@@ -1,0 +1,52 @@
+{
+  "id": "schema_starter",
+  "updatedAt": "2026-07-23T00:00:00.000Z",
+  "schema": {
+    "projectName": "Product workspace",
+    "tables": [
+      {
+        "id": "table_users",
+        "name": "users",
+        "x": 120,
+        "y": 125,
+        "color": "#f4b942",
+        "columns": [
+          { "id": "col_user_id", "name": "id", "type": "uuid", "primary": true, "nullable": false, "unique": true },
+          { "id": "col_user_email", "name": "email", "type": "varchar(255)", "primary": false, "nullable": false, "unique": true },
+          { "id": "col_user_name", "name": "display_name", "type": "varchar(255)", "primary": false, "nullable": true, "unique": false },
+          { "id": "col_user_created", "name": "created_at", "type": "timestamp", "primary": false, "nullable": false, "unique": false }
+        ]
+      },
+      {
+        "id": "table_projects",
+        "name": "projects",
+        "x": 520,
+        "y": 80,
+        "color": "#65a9ff",
+        "columns": [
+          { "id": "col_project_id", "name": "id", "type": "uuid", "primary": true, "nullable": false, "unique": true },
+          { "id": "col_project_owner", "name": "owner_id", "type": "uuid", "primary": false, "nullable": false, "unique": false },
+          { "id": "col_project_name", "name": "name", "type": "varchar(255)", "primary": false, "nullable": false, "unique": false },
+          { "id": "col_project_status", "name": "status", "type": "varchar(255)", "primary": false, "nullable": false, "unique": false }
+        ]
+      },
+      {
+        "id": "table_tasks",
+        "name": "tasks",
+        "x": 920,
+        "y": 210,
+        "color": "#9b82f4",
+        "columns": [
+          { "id": "col_task_id", "name": "id", "type": "uuid", "primary": true, "nullable": false, "unique": true },
+          { "id": "col_task_project", "name": "project_id", "type": "uuid", "primary": false, "nullable": false, "unique": false },
+          { "id": "col_task_title", "name": "title", "type": "varchar(255)", "primary": false, "nullable": false, "unique": false },
+          { "id": "col_task_done", "name": "completed", "type": "boolean", "primary": false, "nullable": false, "unique": false }
+        ]
+      }
+    ],
+    "relationships": [
+      { "id": "rel_owner", "fromTableId": "table_projects", "fromColumnId": "col_project_owner", "toTableId": "table_users", "toColumnId": "col_user_id" },
+      { "id": "rel_tasks", "fromTableId": "table_tasks", "fromColumnId": "col_task_project", "toTableId": "table_projects", "toColumnId": "col_project_id" }
+    ]
+  }
+}

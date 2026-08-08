@@ -1,0 +1,100 @@
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+
+const source = fs.readFileSync("src/schema_foundry/web/app.js", "utf8");
+assert.match(source, /"X-Schema-Foundry-Layout-Token": record\.layoutToken/);
+assert.match(source, /"X-Schema-Foundry-Layout-Protocol": "2"/);
+assert.match(source, /layoutToken: record\?\.layoutToken/);
+assert.match(source, /table\.x = Number\.isFinite\(layout\?\.x\) \? layout\.x : Number\.isFinite\(table\.x\)/);
+assert.match(source, /table\.y = Number\.isFinite\(layout\?\.y\) \? layout\.y : Number\.isFinite\(table\.y\)/);
+const storageStart = source.indexOf("function clone(value)");
+const storageEnd = source.indexOf("function readSchemaLibrary()");
+const migrationStart = source.indexOf("function migrateSchema(schema)");
+const migrationEnd = source.indexOf("function sqlName(value)");
+const preserveStart = source.indexOf("function preserveTableLayout(importedSchema, previousSchema)");
+const preserveEnd = source.indexOf("async function importPostgresSchema()", preserveStart);
+const initializationStart = source.indexOf("async function initializeSchemaLibrary()");
+const initializationEnd = source.indexOf("function uid(prefix)", initializationStart);
+for (const [name, marker] of Object.entries({ storageStart, storageEnd, migrationStart, migrationEnd, preserveStart, preserveEnd, initializationStart, initializationEnd })) {
+  assert.notEqual(marker, -1, `${name} marker is missing`);
+}
+assert.doesNotMatch(source.slice(initializationStart, initializationEnd), /fitDiagram\s*\(/, "startup must preserve the saved viewport");
+
+const context = vm.createContext({ JSON });
+vm.runInContext(`
+  const COLORS = ["#f4b942", "#65a9ff"];
+  let nextId = 0;
+  function uid(prefix) { nextId += 1; return prefix + "_" + nextId; }
+  function defaultPrimaryKeyName(tableName) { return tableName + "_pkey"; }
+  ${source.slice(storageStart, storageEnd)}
+  ${source.slice(migrationStart, migrationEnd)}
+  ${source.slice(preserveStart, preserveEnd)}
+  globalThis.schemaForStorage = schemaForStorage;
+  globalThis.migrateSchema = migrateSchema;
+  globalThis.preserveTableLayout = preserveTableLayout;
+`, context);
+
+const runtime = {
+  projectName: "Layout test",
+  postgres: { namespace: "public" },
+  tables: [{
+    id: "table_accounts",
+    name: "accounts",
+    namespace: "public",
+    x: 321,
+    y: 654,
+    color: "#65a9ff",
+    postgres: { liveOid: 42 },
+    columns: [
+      { id: "column_created", name: "created_at", type: "timestamp", ordinal: 3 },
+      { id: "column_id", name: "id", type: "uuid", primary: true, ordinal: 1 },
+      { id: "column_email", name: "email", type: "text", ordinal: 2 }
+    ],
+    uniqueConstraints: []
+  }],
+  relationships: [],
+  functions: [],
+  views: []
+};
+
+const stored = context.schemaForStorage(runtime, { x: 11, y: 22, zoom: 1.25 });
+assert.equal(stored.tables[0].x, undefined);
+assert.equal(stored.tables[0].y, undefined);
+assert.equal(stored.tables[0].color, undefined);
+assert.deepEqual(JSON.parse(JSON.stringify(stored.layout.tables.table_accounts)), {
+  x: 321,
+  y: 654,
+  color: "#65a9ff",
+  namespace: "public",
+  name: "accounts",
+  liveOid: 42
+});
+
+const hydrated = context.migrateSchema(JSON.parse(JSON.stringify(stored)));
+assert.equal(hydrated.tables[0].x, 321);
+assert.equal(hydrated.tables[0].y, 654);
+assert.equal(hydrated.tables[0].color, "#65a9ff");
+assert.deepEqual(JSON.parse(JSON.stringify(hydrated.layout.view)), { x: 11, y: 22, zoom: 1.25 });
+
+const renamed = context.preserveTableLayout({
+  postgres: { namespace: "public" },
+  tables: [{
+    name: "customers", namespace: "public", x: 0, y: 0, color: "#f4b942", postgres: { liveOid: 42 },
+    columns: [
+      { id: "fresh_id", name: "id", type: "uuid", ordinal: 1, refreshed: true },
+      { id: "fresh_email", name: "contact_email", type: "text", ordinal: 2, refreshed: true },
+      { id: "fresh_created", name: "created_at", type: "timestamp", ordinal: 3, refreshed: true },
+      { id: "fresh_extra", name: "external_column", type: "text", ordinal: 4, refreshed: true }
+    ]
+  }]
+}, runtime);
+assert.equal(renamed.tables[0].x, 321);
+assert.equal(renamed.tables[0].y, 654);
+assert.equal(renamed.tables[0].color, "#65a9ff");
+assert.deepEqual(Array.from(renamed.tables[0].columns, column => column.name), [
+  "created_at", "id", "contact_email", "external_column"
+]);
+assert.equal(renamed.tables[0].columns.every(column => column.refreshed), true);
+
+console.log("Layout overlay tests passed");

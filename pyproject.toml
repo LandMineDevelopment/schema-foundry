@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "schema-foundry"
+version = "0.1.0"
+description = "A standalone PostgreSQL schema designer, introspection tool, and migration workbench"
+readme = "README.md"
+license = "0BSD"
+authors = [{ name = "LandMineDevelopment" }]
+requires-python = ">=3.10"
+dependencies = ["psycopg[binary]>=3.1,<4"]
+
+[project.urls]
+Homepage = "https://github.com/LandMineDevelopment/schema-foundry"
+Repository = "https://github.com/LandMineDevelopment/schema-foundry"
+Issues = "https://github.com/LandMineDevelopment/schema-foundry/issues"
+
+[project.scripts]
+schema-foundry = "schema_foundry.server:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.package-data]
+schema_foundry = ["web/*"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

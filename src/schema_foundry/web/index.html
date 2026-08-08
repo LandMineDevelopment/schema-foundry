@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0d1117" />
+    <title>Schema Foundry</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="app-hydrating">
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="topbar-leading">
+          <div class="brand">
+          <div class="brand-mark" aria-hidden="true">
+            <span></span><span></span><span></span>
+          </div>
+          <div>
+            <strong>Schema Foundry</strong>
+            <span class="brand-subtitle">PostgreSQL schema designer</span>
+          </div>
+          </div>
+        </div>
+
+        <div class="project-title">
+          <span class="status-dot" aria-hidden="true"></span>
+          <input id="project-name" aria-label="Project name" value="Product workspace" />
+          <span id="save-status">Loading files...</span>
+        </div>
+
+        <div class="top-actions">
+          <button class="button button-ghost top-action-icon" id="new-design-button" type="button" data-tooltip="New design" data-tooltip-placement="bottom" aria-label="New design">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v12M4 10h12"/></svg>
+          </button>
+          <button class="button button-ghost top-action-icon" id="open-schema-button" type="button" data-tooltip="Open design" data-tooltip-placement="bottom" aria-label="Open design">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 6h5l2 2h7l-2 7H3Z"/></svg>
+          </button>
+          <button class="button button-ghost top-action-icon" id="save-schema-button" type="button" data-tooltip="Save design" data-tooltip-placement="bottom" aria-label="Save design">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 3.5h10.5L16 5v11.5H4Z"/><path d="M7 3.5V8h6V3.5M7 16.5v-5h6v5"/></svg>
+          </button>
+          <button class="button button-ghost top-action-icon" id="import-sql-button" type="button" data-tooltip="Upload SQL" data-tooltip-placement="bottom" aria-label="Upload SQL">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 12V3M6.5 6.5 10 3l3.5 3.5M4 14v2h12v-2"/></svg>
+          </button>
+          <details class="export-menu" id="export-menu">
+            <summary class="button button-ghost top-action-icon" data-tooltip="Download design" data-tooltip-placement="bottom" aria-label="Download design">
+              <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v9M6.5 8.5 10 12l3.5-3.5M4 14v2h12v-2"/></svg>
+            </summary>
+            <div class="export-menu-options">
+              <button id="export-json-button" type="button">Download JSON</button>
+              <button id="export-sql-button" type="button">Download SQL</button>
+            </div>
+          </details>
+        </div>
+      </header>
+
+      <main class="main-layout" id="main-layout">
+        <aside class="tool-rail" aria-label="Diagram tools">
+          <button class="rail-button active" id="select-tool" type="button" data-tooltip="Select and move" aria-label="Select and move">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 3 12 8-6.3 1.2L9 18Z" /></svg>
+          </button>
+          <button class="rail-button" id="add-table-button" type="button" data-tooltip="Add table" aria-label="Add table">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M4 10h16M9 10v9M15 10v9"/></svg>
+          </button>
+          <button class="rail-button" id="relationship-tool" type="button" data-tooltip="Add relationship" aria-label="Add relationship">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="7" r="2.5"/><circle cx="18" cy="17" r="2.5"/><path d="M8.5 7h3a3 3 0 0 1 3 3v4a3 3 0 0 0 3 3"/></svg>
+          </button>
+          <div class="rail-divider"></div>
+          <button class="rail-button" id="undo-button" type="button" data-tooltip="Undo (Ctrl/Cmd+Z)" aria-label="Undo" aria-keyshortcuts="Control+Z Meta+Z" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 7-4 4 4 4M5 11h7a6 6 0 0 1 6 6"/></svg>
+          </button>
+          <button class="rail-button" id="redo-button" type="button" data-tooltip="Redo (Ctrl/Cmd+Shift+Z)" aria-label="Redo" aria-keyshortcuts="Control+Shift+Z Meta+Shift+Z Control+Y Meta+Y" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 7 4 4-4 4M19 11h-7a6 6 0 0 0-6 6"/></svg>
+          </button>
+          <div class="rail-divider"></div>
+          <button class="rail-button" id="fit-button" type="button" data-tooltip="Fit diagram" aria-label="Fit diagram">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H4v4M16 4h4v4M8 20H4v-4M16 20h4v-4"/></svg>
+          </button>
+          <button class="rail-button" id="zoom-in-button" type="button" data-tooltip="Zoom in" aria-label="Zoom in">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 4 4M10.5 7.5v6M7.5 10.5h6"/></svg>
+          </button>
+          <button class="rail-button" id="zoom-out-button" type="button" data-tooltip="Zoom out" aria-label="Zoom out">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 4 4M7.5 10.5h6"/></svg>
+          </button>
+          <div class="rail-divider"></div>
+          <button class="rail-button" id="functions-button" type="button" data-tooltip="Manage functions" aria-label="Manage functions">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4 19 4 19 9 5 9Z M5 15 19 15 19 20 5 20Z M12 9v6" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linejoin="round"/></svg>
+          </button>
+          <button class="rail-button" id="postgres-button" type="button" data-tooltip="PostgreSQL sync" aria-label="PostgreSQL sync">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>
+          </button>
+        </aside>
+
+        <section class="workspace" id="workspace" aria-label="Schema diagram canvas">
+          <div class="canvas-grid"></div>
+          <div class="selection-marquee" id="selection-marquee" hidden></div>
+          <div class="relationship-banner" id="relationship-banner" hidden>
+            <span class="banner-step">1</span>
+            <span id="relationship-instruction">Select the foreign key column</span>
+            <button id="cancel-relationship" type="button">Cancel</button>
+          </div>
+          <div class="database-drift-banner" id="database-drift-banner" hidden>
+            <span class="status-dot" aria-hidden="true"></span>
+            <span id="database-drift-message">PostgreSQL changed outside this design.</span>
+            <button id="refresh-database-drift" type="button">Refresh design</button>
+            <button id="dismiss-database-drift" type="button" aria-label="Dismiss database change notification">×</button>
+          </div>
+          <div class="stage" id="stage">
+            <svg class="connections" id="connections" width="1" height="1" aria-hidden="true"></svg>
+            <div id="tables-layer"></div>
+          </div>
+          <section class="table-data-panel" id="table-data-panel" aria-label="Table data and read-only SQL console" hidden>
+            <section class="table-data-pane" id="table-data-pane">
+              <header class="table-data-panel-head" id="table-data-panel-head">
+                <button class="table-pane-heading" id="show-table-data-pane" type="button" aria-expanded="true">
+                  <span class="eyebrow">Live PostgreSQL rows</span>
+                  <strong id="table-data-panel-title">Table data</strong>
+                </button>
+                <div class="table-data-panel-actions">
+                  <span id="table-data-count">0 rows</span>
+                  <button id="refresh-table-data" data-action="refresh-table-data" type="button" data-tooltip="Refresh rows" aria-label="Refresh table rows">
+                    <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M15.5 7A6 6 0 1 0 16 12"/><path d="M15.5 3.5V7H12"/></svg>
+                  </button>
+                  <button id="maximize-table-data" type="button" data-tooltip="Maximize data tools" aria-label="Maximize data tools" aria-pressed="false">
+                    <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M8 4H4v4M12 4h4v4M12 16h4v-4M8 16H4v-4"/></svg>
+                  </button>
+                  <button id="minimize-table-data" type="button" data-tooltip="Minimize data tools" aria-label="Minimize data tools">
+                    <svg class="minimize-data-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M5 10h10"/></svg>
+                    <svg class="restore-inspector-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M14 3.5v13M11 7l-3 3 3 3"/></svg>
+                  </button>
+                </div>
+              </header>
+              <div class="table-data-pane-content" id="table-data-pane-content">
+                <div class="table-data-warning" id="table-data-warning" hidden>No primary key; page order may change.</div>
+                <div class="table-data-scroll" id="table-data-scroll" tabindex="0"></div>
+              </div>
+            </section>
+            <section class="sql-console-pane" id="sql-console-pane">
+              <button class="sql-console-bar" id="show-sql-console-pane" type="button" aria-expanded="false">
+                <span><span class="eyebrow">Read-only workspace</span><strong>SQL console</strong></span>
+                <span class="sql-console-bar-status" id="sql-console-status">SELECT · WITH · VALUES · TABLE · EXPLAIN</span>
+              </button>
+              <div class="sql-console-content" id="sql-console-content" hidden>
+                <div class="sql-console-editor">
+                  <textarea id="sql-console-input" spellcheck="false" aria-label="Read-only SQL query"></textarea>
+                  <div class="sql-console-actions">
+                    <span>Run with <kbd>Ctrl</kbd> + <kbd>Enter</kbd></span>
+                    <button id="clear-sql-console" type="button">Clear</button>
+                    <button class="button button-primary" id="run-sql-console" type="button">Run query</button>
+                  </div>
+                </div>
+              </div>
+            </section>
+          </section>
+          <div class="canvas-hint"><kbd>Drag</kbd> blank space to select <span></span> <kbd>Shift</kbd> adds tables <span></span> <kbd>Middle</kbd> drag to pan <span></span> Scroll to zoom</div>
+          <div class="zoom-display" id="zoom-display">100%</div>
+        </section>
+
+        <aside class="inspector" id="inspector">
+          <div class="inspector-empty" id="inspector-empty">
+            <div class="empty-glyph">
+              <svg viewBox="0 0 48 48" aria-hidden="true"><rect x="7" y="8" width="34" height="31" rx="4"/><path d="M7 18h34M17 18v21M30 18v21"/></svg>
+            </div>
+            <h2>Nothing selected</h2>
+            <p>Select a table to edit its name, columns, keys, and constraints.</p>
+            <dl class="schema-stats" id="schema-stats"></dl>
+          </div>
+          <div class="inspector-content" id="inspector-content" hidden></div>
+        </aside>
+      </main>
+    </div>
+
+    <dialog id="table-dialog">
+      <form method="dialog" id="table-form">
+        <div class="dialog-icon">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M4 10h16M9 10v9M15 10v9"/></svg>
+        </div>
+        <div class="dialog-copy">
+          <span class="eyebrow">New entity</span>
+          <h2>Create a table</h2>
+          <p>Give the table a unique, descriptive name.</p>
+        </div>
+        <label for="table-name-input">Table name</label>
+        <input id="table-name-input" name="tableName" placeholder="e.g. invoices" autocomplete="off" required />
+        <div class="dialog-actions">
+          <button class="button button-ghost" value="cancel" type="button" id="cancel-table-dialog">Cancel</button>
+          <button class="button button-primary" value="default" type="submit">Create table</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="relationship-editor-dialog">
+      <form method="dialog" id="relationship-editor-form" class="relationship-editor-form">
+        <div class="dialog-copy relationship-editor-heading">
+          <span class="eyebrow">Foreign key</span>
+          <h2 id="relationship-editor-title">Edit relationship</h2>
+          <p id="relationship-editor-tables"></p>
+        </div>
+        <label for="relationship-editor-name">Constraint name</label>
+        <input id="relationship-editor-name" maxlength="63" autocomplete="off" required />
+        <div class="relationship-pairs-heading">
+          <span>Ordered column pairs</span>
+          <span>Foreign key → referenced key</span>
+        </div>
+        <div id="relationship-editor-pairs" class="relationship-editor-pairs"></div>
+        <button class="add-column relationship-add-pair" id="relationship-add-pair" type="button">+ Add column pair</button>
+        <p class="relationship-editor-status" id="relationship-editor-status"></p>
+        <div class="dialog-actions">
+          <button class="button button-ghost" type="button" id="cancel-relationship-editor">Cancel</button>
+          <button class="button button-danger push-left" type="button" id="delete-relationship-editor">Delete</button>
+          <button class="button button-primary" type="submit">Save relationship</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="schema-dialog" class="schema-dialog">
+      <div class="schema-dialog-panel">
+        <header class="schema-dialog-head">
+          <div>
+            <span class="eyebrow">Local workspace</span>
+            <h2>Open a schema</h2>
+            <p>Your schemas are stored as JSON files in the configured schema directory.</p>
+          </div>
+          <button class="dialog-close" id="close-schema-dialog" type="button" aria-label="Close">×</button>
+        </header>
+        <div class="schema-library" id="schema-library"></div>
+        <footer class="schema-dialog-footer">
+          <span id="schema-library-count"></span>
+          <button class="button button-primary" id="new-schema-from-dialog" type="button">+ New schema</button>
+        </footer>
+      </div>
+    </dialog>
+
+    <dialog id="functions-dialog" class="schema-dialog">
+      <div class="schema-dialog-panel functions-dialog-panel">
+        <header class="schema-dialog-head">
+          <div>
+            <span class="eyebrow">Database functions</span>
+            <h2>Functions</h2>
+            <p>Define stored procedures and functions for this schema.</p>
+          </div>
+          <button class="dialog-close" id="close-functions-dialog" type="button" aria-label="Close">×</button>
+        </header>
+        <div class="functions-list" id="functions-list"></div>
+        <footer class="schema-dialog-footer">
+          <span id="functions-count"></span>
+          <button class="button button-primary" id="add-function-button" type="button">+ Add function</button>
+        </footer>
+      </div>
+    </dialog>
+
+    <dialog id="function-editor-dialog">
+      <form method="dialog" id="function-editor-form">
+        <div class="dialog-icon">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v5H5ZM5 15h14v5H5ZM12 9v6" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
+        </div>
+        <div class="dialog-copy">
+          <span class="eyebrow">Edit function</span>
+          <h2 id="function-editor-title">New function</h2>
+        </div>
+        <label for="function-definition-input">Function body (raw SQL)</label>
+        <textarea id="function-definition-input" name="functionDefinition" placeholder="CREATE OR REPLACE FUNCTION&#10;  your_function_name(param1 TYPE, ...)&#10;RETURNS TYPE&#10;LANGUAGE plpgsql&#10;AS $$&#10;BEGIN&#10;  -- your logic&#10;END;&#10;$$;" rows="16" required></textarea>
+        <div class="dialog-actions">
+          <button class="button button-ghost" value="cancel" type="button" id="cancel-function-editor">Cancel</button>
+          <button class="button button-danger" value="delete" type="button" id="delete-function-button" style="margin-right:auto">Delete</button>
+          <button class="button button-primary" value="default" type="submit">Save function</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="postgres-dialog" class="schema-dialog">
+      <div class="schema-dialog-panel postgres-dialog-panel">
+        <header class="schema-dialog-head">
+          <div>
+            <span class="eyebrow">Live database</span>
+            <h2>PostgreSQL</h2>
+            <p>Import a namespace, review changes, then apply them transactionally.</p>
+          </div>
+          <button class="dialog-close" id="close-postgres-dialog" type="button" aria-label="Close">×</button>
+        </header>
+        <div class="postgres-status" id="postgres-status" hidden></div>
+        <div class="postgres-profiles" id="postgres-profiles-list"></div>
+        <div class="postgres-target">
+          <label for="postgres-namespace-select">PostgreSQL namespace</label>
+          <select id="postgres-namespace-select" disabled><option value="">Select a connection first</option></select>
+          <button class="button button-ghost" id="postgres-refresh-button" type="button" disabled>Refresh</button>
+        </div>
+        <div class="postgres-catalog-summary" id="postgres-catalog-summary" hidden></div>
+        <footer class="postgres-dialog-footer">
+          <button class="button button-ghost" id="add-postgres-profile-button" type="button">+ Connection</button>
+          <div>
+            <button class="button button-ghost" id="postgres-objects-button" type="button" disabled>Objects</button>
+            <button class="button button-ghost" id="postgres-import-button" type="button" disabled>Import</button>
+            <button class="button button-primary" id="postgres-preview-button" type="button" disabled>Preview migration</button>
+          </div>
+        </footer>
+      </div>
+    </dialog>
+
+    <dialog id="postgres-profile-dialog">
+      <form method="dialog" id="postgres-profile-form" class="postgres-profile-form">
+        <div class="dialog-copy postgres-form-title">
+          <span class="eyebrow">Server-side profile</span>
+          <h2 id="postgres-profile-title">New connection</h2>
+          <p>Credentials are stored locally with owner-only permissions and never returned to the browser.</p>
+        </div>
+        <label for="postgres-profile-name">Profile name</label>
+        <input id="postgres-profile-name" autocomplete="off" required placeholder="Development" />
+        <div class="postgres-form-row">
+          <label>Host<input id="postgres-profile-host" autocomplete="off" required value="127.0.0.1" /></label>
+          <label>Port<input id="postgres-profile-port" type="number" min="1" max="65535" required value="5432" /></label>
+        </div>
+        <div class="postgres-form-row">
+          <label>Database<input id="postgres-profile-database" autocomplete="off" required /></label>
+          <label>User<input id="postgres-profile-user" autocomplete="username" required /></label>
+        </div>
+        <label for="postgres-profile-password">Password</label>
+        <input id="postgres-profile-password" type="password" autocomplete="current-password" placeholder="Leave blank to keep the stored password" />
+        <div class="postgres-form-row">
+          <label>SSL mode<select id="postgres-profile-sslmode"><option>prefer</option><option>require</option><option>verify-ca</option><option>verify-full</option><option>disable</option><option>allow</option></select></label>
+          <label>Timeout (seconds)<input id="postgres-profile-timeout" type="number" min="1" max="120" value="10" /></label>
+        </div>
+        <div class="postgres-status" id="postgres-profile-status" hidden></div>
+        <div class="dialog-actions">
+          <button class="button button-ghost" type="button" id="cancel-postgres-profile">Cancel</button>
+          <button class="button button-ghost" type="button" id="test-postgres-profile">Save &amp; test</button>
+          <button class="button button-primary" type="submit">Save connection</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="database-objects-dialog" class="schema-dialog">
+      <div class="schema-dialog-panel functions-dialog-panel">
+        <header class="schema-dialog-head">
+          <div>
+            <span class="eyebrow">PostgreSQL definitions</span>
+            <h2>Database objects</h2>
+            <p>Manage checks, indexes, views, and triggers as reviewed SQL definitions.</p>
+          </div>
+          <button class="dialog-close" id="close-database-objects" type="button" aria-label="Close">×</button>
+        </header>
+        <div class="database-objects-list" id="database-objects-list"></div>
+        <footer class="schema-dialog-footer">
+          <span id="database-objects-count"></span>
+          <button class="button button-primary" id="add-database-object" type="button">+ Add object</button>
+        </footer>
+      </div>
+    </dialog>
+
+    <dialog id="database-object-editor-dialog">
+      <form method="dialog" id="database-object-editor-form" class="database-object-editor-form">
+        <div class="dialog-copy postgres-form-title">
+          <span class="eyebrow">Raw PostgreSQL definition</span>
+          <h2 id="database-object-editor-title">New object</h2>
+        </div>
+        <div class="postgres-form-row">
+          <label>Object type<select id="database-object-type"><option value="check">Check constraint</option><option value="index">Index</option><option value="view">View</option><option value="materialized-view">Materialized view</option><option value="trigger">Trigger</option></select></label>
+          <label>Table<select id="database-object-table"></select></label>
+        </div>
+        <label for="database-object-name">Object name</label>
+        <input id="database-object-name" required autocomplete="off" />
+        <label for="database-object-definition">SQL definition</label>
+        <textarea id="database-object-definition" rows="14" wrap="soft" required spellcheck="false"></textarea>
+        <div class="dialog-actions">
+          <button class="button button-ghost" type="button" id="cancel-database-object">Cancel</button>
+          <button class="button button-danger push-left" type="button" id="delete-database-object">Delete</button>
+          <button class="button button-primary" type="submit">Save object</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="migration-dialog" class="schema-dialog">
+      <div class="schema-dialog-panel migration-dialog-panel">
+        <header class="schema-dialog-head">
+          <div>
+            <span class="eyebrow">Reviewed database change</span>
+            <h2>Migration preview</h2>
+            <p id="migration-target"></p>
+          </div>
+          <button class="dialog-close" id="close-migration-dialog" type="button" aria-label="Close">×</button>
+        </header>
+        <div class="migration-summary" id="migration-summary"></div>
+        <div class="migration-warnings" id="migration-warnings" hidden></div>
+        <textarea class="migration-sql" id="migration-sql" readonly spellcheck="false"></textarea>
+        <label class="destructive-confirmation" id="destructive-confirmation" hidden><input id="confirm-destructive" type="checkbox" /> I reviewed and approve destructive operations</label>
+        <footer class="postgres-dialog-footer">
+          <label class="check-option"><input id="include-destructive" type="checkbox" /> Include destructive changes</label>
+          <div>
+            <button class="button button-ghost" id="refresh-migration-preview" type="button">Refresh</button>
+            <button class="button button-primary" id="apply-migration" type="button">Apply migration</button>
+          </div>
+        </footer>
+      </div>
+    </dialog>
+
+    <input id="sql-file-input" type="file" accept=".sql,text/sql,application/sql,text/plain" hidden />
+    <div class="object-icon-menu" id="object-icon-menu" role="menu" hidden></div>
+    <div class="app-tooltip" id="app-tooltip" role="tooltip" hidden></div>
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="app.js"></script>
+  </body>
+</html>
