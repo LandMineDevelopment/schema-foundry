@@ -76,6 +76,17 @@ class StandaloneRuntimeTests(unittest.TestCase):
         self.assertNotIn("down --volumes", launcher)
         self.assertNotIn("volume rm", launcher)
 
+    def test_ai_navigation_tools_accept_only_logical_ids_and_public_labels(self):
+        tools = "\n".join(path.read_text(encoding="utf-8") for path in sorted((ROOT / "ai" / "workspace" / ".opencode" / "tools").glob("schema_*_open.ts")))
+        create_tool = (ROOT / "ai" / "workspace" / ".opencode" / "tools" / "schema_project_create.ts").read_text(encoding="utf-8")
+        instructions = (ROOT / "ai" / "workspace" / "AGENTS.md").read_text(encoding="utf-8")
+
+        self.assertIn("schemaId", tools)
+        self.assertIn("profileId", tools)
+        self.assertNotRegex(tools, r"\b(?:password|path|url|host|shell|command)\b")
+        self.assertIn("needs no schemaId or availableProjects entry", create_tool)
+        self.assertIn("immediately call `schema_project_create`", instructions)
+
 
 if __name__ == "__main__":
     unittest.main()

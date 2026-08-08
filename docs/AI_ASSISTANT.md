@@ -66,11 +66,11 @@ Every chat selects one disclosure level:
 
 | Level | Information sent to the selected model provider |
 | --- | --- |
-| `Metadata` | Active design name, object counts, and redacted selected target metadata |
+| `Metadata` | Active design name and counts, up to 50 local project names/logical IDs/counts/connection types and targets, and up to 50 saved connection names/logical IDs/database names |
 | `Schema` | Metadata plus bounded tables, columns, keys, checks, and relationships |
 | `Data` | Schema context and results of explicitly permitted read-only SQL requests |
 
-Passwords, local paths, session tokens, environment variables, and stored table rows are never added automatically. Context is bounded and treated as untrusted data in the system prompt.
+Passwords, profile hosts/users, local paths, session tokens, environment variables, and stored table rows are never added automatically. Namespace lists are not fetched while building model context. Context is bounded and treated as untrusted data in the system prompt.
 
 Data access has a separate SQL policy:
 
@@ -106,6 +106,8 @@ The explicit tools can propose:
 - Add or update a column
 - Delete a table or column
 - Add a foreign-key relationship
+- Create a local project or open an exact listed project
+- Open an exact listed saved PostgreSQL connection
 - Prefill a connection profile without a password
 - Open migration preview and apply review workflows
 
@@ -115,7 +117,11 @@ Tool output is inert structured data. It does not prove that an action ran.
 
 Every schema mutation requires a separate browser confirmation. The proposal is bound to the active design and an in-memory schema snapshot; changing the design invalidates it. Schema saves must succeed before the UI marks a proposal applied, and existing table layout is preserved.
 
-Connection proposals only prefill the existing profile form. The user must enter the password and use **Save & test**.
+New-connection proposals only prefill the existing profile form. The user must enter the password and use **Save & test**.
+
+Project navigation accepts only logical schema IDs, never paths. Creation saves an empty named project before switching. Opening a project saves pending current changes first and preserves the opened project's stored table layout and viewport.
+
+Saved-connection opening accepts only an exact listed profile ID. On review Schemii refreshes redacted profile metadata, verifies its current name and database, and explains that confirmation will contact PostgreSQL using credentials already stored server-side. Only after confirmation does Schemii connect and load namespaces; an optional proposed namespace is selected only if PostgreSQL returns it. This action does not reveal credentials, introspect or import a schema, run SQL, preview a migration, or authorize apply.
 
 Migration proposals never bypass Schemii's existing safety flow. The exact profile and namespace must still be selected, SQL must be previewed, destructive planning must be explicitly enabled, destructive steps require the separate checkbox, and apply retains expiry, profile, fingerprint, advisory-lock, timeout, transaction, and rollback checks.
 

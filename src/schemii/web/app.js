@@ -1238,18 +1238,23 @@ function resetSchemaSession() {
 }
 
 async function createNewSchema() {
+  return createSchemaProject("Untitled schema");
+}
+
+async function createSchemaProject(projectName) {
   try {
     await flushPendingSave();
   } catch {
-    return;
+    return false;
   }
   const newSchemaId = uid("schema");
-  const newSchema = { projectName: "Untitled schema", tables: [], relationships: [], functions: [] };
+  const newSchema = { projectName, tables: [], relationships: [], functions: [] };
   try {
     await persistSchemaRecord(newSchemaId, newSchema);
   } catch {
     elements.saveStatus.textContent = "Save failed";
-    return showToast("Could not create the schema file");
+    showToast("Could not create the schema file");
+    return false;
   }
   activeSchemaId = newSchemaId;
   schema = newSchema;
@@ -1259,31 +1264,36 @@ async function createNewSchema() {
   if (elements.schemaDialog.open) elements.schemaDialog.close();
   render();
   showToast("New schema created");
+  return true;
 }
 
-async function openSchema(schemaId) {
+async function openSchema(schemaId, { fit = true } = {}) {
   if (schemaId === activeSchemaId) {
-    elements.schemaDialog.close();
-    return;
+    if (elements.schemaDialog.open) elements.schemaDialog.close();
+    return true;
   }
   try {
     await flushPendingSave();
   } catch {
-    return;
+    return false;
   }
   const library = readSchemaLibrary();
   const record = library.schemas.find(item => item.id === schemaId);
-  if (!record) return showToast("That schema could not be found");
+  if (!record) {
+    showToast("That schema could not be found");
+    return false;
+  }
   activeSchemaId = record.id;
   schema = migrateSchema(clone(record.schema));
   library.activeId = activeSchemaId;
   writeSchemaLibrary(library);
   view = clone(schema.layout.view);
   resetSchemaSession();
-  elements.schemaDialog.close();
+  if (elements.schemaDialog.open) elements.schemaDialog.close();
   render();
-  requestAnimationFrame(fitDiagram);
+  if (fit) requestAnimationFrame(fitDiagram);
   showToast(`${schema.projectName || "Untitled schema"} opened`);
+  return true;
 }
 
 async function deleteSavedSchema(schemaId) {
@@ -1310,6 +1320,37 @@ function formatSavedDate(value) {
   return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(date);
 }
 
+function postgresConnectionType(profile) {
+  if (!profile) return "Linked DB";
+  const host = String(profile.host ?? "").trim().toLowerCase();
+  if (["127.0.0.1", "localhost", "::1"].includes(host)) return "Local DB";
+  if (host === "postgres") return "Docker DB";
+  if (host === "host.docker.internal") return "Host DB";
+  return "Remote DB";
+}
+
+function schemaLibraryConnection(schemaValue) {
+  const source = schemaValue?.postgres;
+  if (!source || typeof source !== "object" || (!source.sourceProfileId && !source.database)) {
+    return { type: "Local project", identity: "No PostgreSQL connection" };
+  }
+  const profile = postgresState.profiles.find(item => item.id === source.sourceProfileId) ?? null;
+  const database = profile?.dbname || source.database || "Unknown database";
+  const target = source.namespace ? `${database}.${source.namespace}` : database;
+  if (!profile) return { type: "Linked DB", identity: `${source.sourceProfileId || "Unknown connection"} · ${target}` };
+  return { type: postgresConnectionType(profile), identity: `${profile.name} (${profile.id}) · ${target}` };
+}
+
+async function loadSchemaLibraryConnections() {
+  try {
+    const payload = await postgresRequest("/api/postgres/profiles", { method: "GET" });
+    postgresState.profiles = payload.profiles ?? [];
+    renderSchemaLibrary();
+  } catch {
+    // Schema cards still show their saved database identity when profile metadata is unavailable.
+  }
+}
+
 function renderSchemaLibrary() {
   const library = readSchemaLibrary();
   const records = [...library.schemas].sort((first, second) => {
@@ -1322,11 +1363,13 @@ function renderSchemaLibrary() {
     const isCurrent = record.id === activeSchemaId;
     const tableCount = record.schema.tables.length;
     const columnCount = record.schema.tables.reduce((total, table) => total + table.columns.length, 0);
+    const connection = schemaLibraryConnection(record.schema);
     return `
       <article class="schema-library-item ${isCurrent ? "current" : ""}">
         <div class="schema-library-copy">
           <div class="schema-library-name"><span>${escapeHtml(record.schema.projectName || "Untitled schema")}</span>${isCurrent ? '<span class="current-badge">Current</span>' : ""}</div>
           <div class="schema-library-meta"><span>${tableCount} table${tableCount === 1 ? "" : "s"}</span><span>${columnCount} columns</span><span>${escapeHtml(formatSavedDate(record.updatedAt))}</span></div>
+          <div class="schema-library-connection"><span>${escapeHtml(connection.type)}</span><strong>${escapeHtml(connection.identity)}</strong></div>
         </div>
         <div class="schema-library-actions">
           <button class="button button-ghost" data-library-action="open" data-schema-id="${record.id}" type="button" ${isCurrent ? "disabled" : ""}>${isCurrent ? "Open" : "Open"}</button>
@@ -3215,7 +3258,7 @@ async function loadPostgresProfiles() {
 }
 
 async function loadPostgresNamespaces() {
-  if (!postgresState.selectedProfileId) return;
+  if (!postgresState.selectedProfileId) return false;
   setPostgresBusy(true, "Connecting and loading namespaces...");
   try {
     const payload = await postgresRequest(`/api/postgres/profiles/${encodeURIComponent(postgresState.selectedProfileId)}/namespaces`, { method: "GET" });
@@ -3226,11 +3269,13 @@ async function loadPostgresNamespaces() {
     }
     renderNamespaceOptions();
     setPostgresStatus(postgresState.namespace ? "Connected. Choose Import or preview the current design." : "The connection has no user namespaces.");
+    return true;
   } catch (error) {
     postgresState.namespaces = [];
     postgresState.namespace = "";
     renderNamespaceOptions();
     setPostgresStatus(error.message, true);
+    return false;
   } finally {
     setPostgresBusy(false);
   }
@@ -3606,6 +3651,7 @@ function saveDatabaseObject() {
 }
 
 const AI_SCHEMA_ACTIONS = new Set(["add_table", "rename_table", "add_column", "update_column", "delete_element", "add_relationship"]);
+const AI_NAVIGATION_ACTIONS = new Set(["create_project", "open_project", "open_connection"]);
 const AI_TOOL_LABELS = {
   schema_read_query: "Preparing read-only SQL",
   schema_add_table: "Drafting a table",
@@ -3615,6 +3661,9 @@ const AI_TOOL_LABELS = {
   schema_delete_element: "Reviewing a deletion",
   schema_add_relationship: "Drafting a relationship",
   schema_connection_setup: "Preparing connection settings",
+  schema_project_create: "Preparing a local project",
+  schema_project_open: "Finding a local project",
+  schema_connection_open: "Finding a saved connection",
   schema_migration_preview: "Preparing migration preview",
   schema_migration_apply: "Reviewing migration apply"
 };
@@ -3653,6 +3702,34 @@ function validAiName(value, label) {
   if (typeof value !== "string" || !value.trim()) return `${label} is required`;
   if (new TextEncoder().encode(value.trim()).length > 63) return `${label} must be at most 63 bytes`;
   return "";
+}
+
+function validateAiNavigationAction(action) {
+  const type = aiActionType(action);
+  const payload = aiActionPayload(action);
+  if (!AI_NAVIGATION_ACTIONS.has(type) || !payload || typeof payload !== "object" || Array.isArray(payload)) return { ok: false, error: "Unsupported navigation action" };
+  const allowed = {
+    create_project: new Set(["type", "projectName", "requiresConfirmation"]),
+    open_project: new Set(["type", "schemaId", "projectName", "requiresConfirmation"]),
+    open_connection: new Set(["type", "profileId", "name", "database", "namespace", "requiresConfirmation"])
+  }[type];
+  if (Object.keys(payload).some(key => !allowed.has(key))) return { ok: false, error: "The navigation proposal contains unsupported fields" };
+  if (type === "create_project") {
+    if (typeof payload.projectName !== "string" || !payload.projectName.trim() || new TextEncoder().encode(payload.projectName.trim()).length > 256 || /[\x00-\x1f\x7f]/.test(payload.projectName)) return { ok: false, error: "Project name is invalid" };
+    return { ok: true, type, projectName: payload.projectName.trim() };
+  }
+  if (type === "open_project") {
+    if (typeof payload.schemaId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(payload.schemaId)) return { ok: false, error: "Project ID is invalid" };
+    const record = readSchemaLibrary().schemas.find(item => item.id === payload.schemaId);
+    if (!record) return { ok: false, error: "That local project no longer exists" };
+    if (record.id === activeSchemaId) return { ok: false, error: "That local project is already open" };
+    if (typeof payload.projectName !== "string" || record.schema.projectName !== payload.projectName) return { ok: false, error: "The local project identity changed" };
+    return { ok: true, type, record };
+  }
+  if (typeof payload.profileId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(payload.profileId)) return { ok: false, error: "Connection ID is invalid" };
+  if (typeof payload.name !== "string" || !payload.name.trim() || typeof payload.database !== "string" || !payload.database.trim()) return { ok: false, error: "Connection identity is invalid" };
+  if (payload.namespace != null && (typeof payload.namespace !== "string" || !payload.namespace.trim() || new TextEncoder().encode(payload.namespace).length > 63 || /[\x00-\x1f\x7f]/.test(payload.namespace))) return { ok: false, error: "Namespace is invalid" };
+  return { ok: true, type, payload };
 }
 
 function validateAiSchemaAction(schemaValue, action) {
@@ -4307,6 +4384,9 @@ function aiActionSummary(action) {
   const payload = aiActionPayload(action);
   if (type === "schema_read_query") return "Read-only SQL query";
   if (type === "connection_setup") return "Set up a PostgreSQL connection";
+  if (type === "create_project") return "Create a local project";
+  if (type === "open_project") return "Open a local project";
+  if (type === "open_connection") return "Open a saved PostgreSQL connection";
   if (type === "migration_preview") return "Preview migration";
   if (type === "migration_apply") return "Review migration for apply";
   return String(action.title ?? payload.title ?? type.replaceAll("_", " ") ?? "Proposed action");
@@ -4334,7 +4414,7 @@ function renderAiAction(action, context) {
   }
   const button = document.createElement("button");
   button.type = "button";
-  button.className = AI_SCHEMA_ACTIONS.has(type) || ["connection_setup", "migration_preview", "migration_apply"].includes(type) ? "button button-primary" : "button button-ghost";
+  button.className = AI_SCHEMA_ACTIONS.has(type) || AI_NAVIGATION_ACTIONS.has(type) || ["connection_setup", "migration_preview", "migration_apply"].includes(type) ? "button button-primary" : "button button-ghost";
   button.textContent = type === "schema_read_query" ? "Run query" : "Review & confirm";
   if (type === "schema_read_query" && elements.aiSqlPolicy.value === "disabled") {
     button.disabled = true;
@@ -4356,6 +4436,7 @@ async function confirmAiAction(action, context, card, button) {
     if (elements.aiSqlPolicy.value === "ask" && !confirm("Run this generated read-only SQL query? PostgreSQL functions can still have side effects outside the database.")) return;
     return executeAiReadQuery(action, context, card, button);
   }
+  if (AI_NAVIGATION_ACTIONS.has(type)) return confirmAiNavigationAction(action, context, card, button);
   if (!confirm(`Confirm action: ${aiActionSummary(action)}?`)) return;
   if (activeSchemaId !== context.schemaId) return showToast("The active design changed. Ask the assistant for a fresh proposal");
   if (AI_SCHEMA_ACTIONS.has(type)) {
@@ -4388,6 +4469,55 @@ async function confirmAiAction(action, context, card, button) {
     return;
   }
   detailAiActionError(card, "This action type is not supported by the frontend");
+}
+
+async function confirmAiNavigationAction(action, context, card, button) {
+  const validated = validateAiNavigationAction(action);
+  if (!validated.ok) return detailAiActionError(card, validated.error);
+  if (activeSchemaId !== context.schemaId) return showToast("The active design changed. Ask the assistant for a fresh proposal");
+  if (validated.type === "create_project") {
+    if (!confirm(`Create and open local project “${validated.projectName}”? Pending changes to the current project will be saved first.`)) return;
+    if (await createSchemaProject(validated.projectName)) {
+      button.disabled = true;
+      button.textContent = "Created";
+    }
+    return;
+  }
+  if (validated.type === "open_project") {
+    const name = validated.record.schema.projectName || "Untitled schema";
+    if (!confirm(`Open local project “${name}”? Pending changes to the current project will be saved first.`)) return;
+    if (await openSchema(validated.record.id, { fit: false })) {
+      button.disabled = true;
+      button.textContent = "Opened";
+    }
+    return;
+  }
+  try {
+    const payload = await postgresRequest("/api/postgres/profiles", { method: "GET" });
+    const profiles = payload.profiles ?? [];
+    const profile = profiles.find(item => item.id === validated.payload.profileId);
+    if (!profile || profile.name !== validated.payload.name || profile.dbname !== validated.payload.database) return detailAiActionError(card, "The saved connection identity changed. Ask for a fresh proposal.");
+    if (!confirm(`Open saved connection “${profile.name}” for database “${profile.dbname}”? Schemii will contact PostgreSQL using the credentials already stored on this server.`)) return;
+    postgresState.profiles = profiles;
+    postgresState.selectedProfileId = profile.id;
+    postgresState.namespace = "";
+    renderPostgresProfiles();
+    if (!elements.postgresDialog.open) elements.postgresDialog.showModal();
+    renderPostgresCatalogSummary();
+    const connected = await loadPostgresNamespaces();
+    if (!connected) return detailAiActionError(card, "The saved PostgreSQL connection could not be opened.");
+    const requestedNamespace = validated.payload.namespace;
+    if (requestedNamespace && postgresState.namespaces.includes(requestedNamespace)) {
+      postgresState.namespace = requestedNamespace;
+      renderNamespaceOptions();
+    } else if (requestedNamespace) {
+      showToast(`Connected, but namespace “${requestedNamespace}” was not found`);
+    }
+    button.disabled = true;
+    button.textContent = "Opened";
+  } catch (error) {
+    detailAiActionError(card, error.message);
+  }
 }
 
 function detailAiActionError(card, message) {
@@ -4610,7 +4740,7 @@ function updateAiAccessDisclosure() {
   elements.aiSqlPolicyWrap.hidden = access !== "data";
   elements.aiFunctionCaveat.hidden = access !== "data";
   elements.aiAccessDisclosure.textContent = access === "metadata"
-    ? "Only schema names and basic counts are sent to the selected external AI provider."
+    ? "Active design metadata plus bounded local project and redacted connection identities are sent to the selected external AI provider."
     : access === "schema"
       ? "The active schema definition is disclosed to the selected external AI provider; database rows are not included."
       : "Schema context and explicitly approved query results may be disclosed to the selected external AI provider. Queries use the selected UI profile only.";
@@ -5364,6 +5494,7 @@ document.querySelector("#open-schema-button").addEventListener("click", async ()
   }
   renderSchemaLibrary();
   elements.schemaDialog.showModal();
+  await loadSchemaLibraryConnections();
 });
 document.querySelector("#close-schema-dialog").addEventListener("click", () => elements.schemaDialog.close());
 document.querySelector("#new-schema-from-dialog").addEventListener("click", createNewSchema);

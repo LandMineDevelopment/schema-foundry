@@ -32,6 +32,9 @@ CUSTOM_TOOLS = {
     "schema_delete_element",
     "schema_add_relationship",
     "schema_connection_setup",
+    "schema_project_create",
+    "schema_project_open",
+    "schema_connection_open",
     "schema_migration_preview",
     "schema_migration_apply",
 }

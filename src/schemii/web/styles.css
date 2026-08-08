@@ -546,6 +546,10 @@ dialog textarea { font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consola
 .current-badge { flex: none; padding: 2px 5px; border-radius: 3px; color: var(--accent); background: #2a2212; font: 7px Inter, sans-serif; text-transform: uppercase; letter-spacing: .1em; }
 .schema-library-meta { display: flex; gap: 10px; color: #667282; font-size: 9px; }
 .schema-library-meta span + span::before { content: "·"; margin-right: 10px; color: #3d4652; }
+.schema-library-connection { display: flex; align-items: center; gap: 7px; min-width: 0; margin-top: 8px; }
+.schema-library-connection > span { flex: 0 0 auto; padding: 3px 5px; border: 1px solid #354354; border-radius: 999px; color: #8ca3bc; background: #111820; font-size: 7px; font-weight: 750; text-transform: uppercase; letter-spacing: .08em; }
+.schema-library-item.current .schema-library-connection > span { border-color: #5d4d27; color: #c3a45e; background: #1c190f; }
+.schema-library-connection strong { min-width: 0; overflow: hidden; color: #8793a2; font-size: 8px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .schema-library-actions { display: flex; gap: 6px; }
 .schema-library-actions .button { min-height: 30px; padding: 0 10px; font-size: 10px; }
 .library-delete { display: grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 1px solid #2c3541; border-radius: 5px; color: #667282; background: transparent; cursor: pointer; }

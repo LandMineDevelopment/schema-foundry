@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from schemii.schema_store import SchemaStore
-from schemii.server import CONTENT_SECURITY_POLICY, ThreadingHTTPServer, _is_local_request, make_handler
+from schemii.server import CONTENT_SECURITY_POLICY, ThreadingHTTPServer, _is_local_request, _project_create_fallback, make_handler
 
 
 class FakePostgresService:
@@ -291,6 +291,17 @@ class ServerTests(unittest.TestCase):
         self.assertIn(("delete_api_key", "anthropic"), self.ai_service.calls)
         self.assertIn(("delete_session", "ses_1"), self.ai_service.calls)
 
+    def test_create_project_fallback_repairs_missing_inert_tool_actions_only(self):
+        empty = {"text": "Review the proposal.", "parts": [{"type": "text", "text": "Review the proposal."}], "actions": []}
+        repaired = _project_create_fallback("Create a new local schema named teaching_rdbms now.", empty)
+        self.assertEqual(repaired["actions"], [{"type": "create_project", "projectName": "teaching_rdbms", "requiresConfirmation": True}])
+
+        follow_up = {"text": "The new project **teaching_rdbms** is ready as a proposal. Review and confirm it.", "parts": [], "actions": []}
+        self.assertEqual(_project_create_fallback("go ahead and make it", follow_up)["actions"][0]["projectName"], "teaching_rdbms")
+        self.assertEqual(_project_create_fallback("Describe this schema", empty)["actions"], [])
+        existing = {**empty, "actions": [{"type": "add_table"}]}
+        self.assertIs(_project_create_fallback("Create a new schema named Demo", existing), existing)
+
     def test_ai_history_routes_require_session_and_return_normalized_history(self):
         for path in ("/api/ai/sessions", "/api/ai/sessions/ses_1/messages"):
             with self.subTest(path=path):
@@ -323,6 +334,9 @@ class ServerTests(unittest.TestCase):
         self.service.profiles = [{
             "id": "local", "name": "Local", "host": "db.internal", "port": 5432,
             "dbname": "demo", "user": "admin", "password": "profile-secret",
+        }, {
+            "id": "reporting", "name": "Reporting", "host": "reports.internal", "port": 5432,
+            "dbname": "reports", "user": "reader", "password": "other-secret",
         }]
         record = {
             "id": "schema_one",
@@ -340,6 +354,7 @@ class ServerTests(unittest.TestCase):
             },
         }
         self.store.save("schema_one", record, expected_layout_token=None, layout_protocol=None)
+        self.store.save("schema_two", {"id": "schema_two", "schema": {"projectName": "Orders", "tables": [], "relationships": [], "functions": [], "configPath": "/secret"}}, expected_layout_token=None, layout_protocol=None)
         model = {"providerID": "anthropic", "modelID": "claude"}
         payload = {
             "text": "Add an audit column", "model": model, "schemaId": "schema_one",
@@ -356,10 +371,19 @@ class ServerTests(unittest.TestCase):
         self.assertIn('"accessLevel":"schema"', context_and_text)
         self.assertIn('"database":"demo"', context_and_text)
         self.assertIn('"primaryKey"', context_and_text)
+        self.assertIn('"schemaId":"schema_two"', context_and_text)
+        self.assertIn('"projectName":"Orders"', context_and_text)
+        self.assertIn('"connection":{"type":"local-project"}', context_and_text)
+        self.assertIn('"type":"remote-db"', context_and_text)
+        self.assertIn('"profileId":"reporting"', context_and_text)
+        self.assertIn('"database":"reports"', context_and_text)
         self.assertIn("Add an audit column", context_and_text)
-        for secret in ("profile-secret", "table-secret", "row-secret", "db.internal", "admin", "/home/user", "/private"):
+        for secret in ("profile-secret", "other-secret", "table-secret", "row-secret", "db.internal", "reports.internal", "admin", "reader", "/home/user", "/private", "configPath"):
             self.assertNotIn(secret, context_and_text)
+        self.assertFalse(any(item[0] == "list_namespaces" for item in self.service.calls))
         self.assertIn("proposals are not executed", call[4].lower())
+        self.assertIn("creation does not require an existing project id", call[4].lower())
+        self.assertIn("call schema_project_create", call[4].lower())
         self.assertFalse(call[5])
 
         payload["accessLevel"] = "data"

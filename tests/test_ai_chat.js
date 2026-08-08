@@ -12,6 +12,10 @@ assert.notEqual(end, -1, "AI action validation end marker is missing");
 
 const context = vm.createContext({ TextEncoder });
 vm.runInContext(`
+  let activeSchemaId = "schema_current";
+  function readSchemaLibrary() {
+    return { schemas: [{ id: "schema_orders", schema: { projectName: "Orders", tables: [], relationships: [] } }] };
+  }
   function relationshipColumnPairs(relationship) {
     const fromColumnIds = relationship.fromColumnIds ?? [relationship.fromColumnId];
     const toColumnIds = relationship.toColumnIds ?? [relationship.toColumnId];
@@ -19,6 +23,7 @@ vm.runInContext(`
   }
   ${source.slice(start, end)}
   globalThis.validateAiSchemaAction = validateAiSchemaAction;
+  globalThis.validateAiNavigationAction = validateAiNavigationAction;
 `, context);
 
 const schema = {
@@ -35,11 +40,43 @@ assert.equal(context.validateAiSchemaAction(schema, { type: "add_column", payloa
 assert.match(context.validateAiSchemaAction(schema, { type: "update_column", payload: { tableId: "orders", columnId: "owner_id", changes: { nullable: "yes" } } }).error, /true or false/);
 assert.equal(context.validateAiSchemaAction(schema, { type: "add_relationship", payload: { fromTableId: "orders", fromColumnId: "owner_id", toTableId: "users", toColumnId: "user_id" } }).ok, true);
 assert.match(context.validateAiSchemaAction(schema, { type: "delete_element", payload: { tableId: "orders", elementType: "column", columnId: "owner_id" } }).error, /at least one column/);
+assert.equal(context.validateAiNavigationAction({ type: "create_project", projectName: "Orders v2", requiresConfirmation: true }).ok, true);
+assert.equal(context.validateAiNavigationAction({ type: "open_project", schemaId: "schema_orders", projectName: "Orders", requiresConfirmation: true }).ok, true);
+assert.equal(context.validateAiNavigationAction({ type: "open_connection", profileId: "local", name: "Local", database: "demo", namespace: "public", requiresConfirmation: true }).ok, true);
+assert.match(context.validateAiNavigationAction({ type: "open_project", schemaId: "../../secret", projectName: "Orders" }).error, /ID is invalid/);
+assert.match(context.validateAiNavigationAction({ type: "open_connection", profileId: "local", name: "Local", database: "demo", password: "secret" }).error, /unsupported fields/);
+assert.match(context.validateAiNavigationAction({ type: "create_project", projectName: "Demo", path: "/tmp/demo" }).error, /unsupported fields/);
+
+const connectionMetadataStart = source.indexOf("function postgresConnectionType");
+const connectionMetadataEnd = source.indexOf("async function loadSchemaLibraryConnections", connectionMetadataStart);
+const connectionContext = vm.createContext({ postgresState: { profiles: [
+  { id: "local", name: "Local", host: "127.0.0.1", dbname: "demo" },
+  { id: "docker", name: "Docker", host: "postgres", dbname: "app" },
+  { id: "remote", name: "Reporting", host: "db.example", dbname: "reports" }
+] } });
+vm.runInContext(`${source.slice(connectionMetadataStart, connectionMetadataEnd)}\nthis.postgresConnectionType = postgresConnectionType; this.schemaLibraryConnection = schemaLibraryConnection;`, connectionContext);
+assert.equal(connectionContext.postgresConnectionType(connectionContext.postgresState.profiles[0]), "Local DB");
+assert.equal(connectionContext.postgresConnectionType(connectionContext.postgresState.profiles[1]), "Docker DB");
+assert.equal(connectionContext.postgresConnectionType(connectionContext.postgresState.profiles[2]), "Remote DB");
+assert.equal(connectionContext.schemaLibraryConnection({ projectName: "Draft" }).type, "Local project");
+const linkedConnection = connectionContext.schemaLibraryConnection({ postgres: { sourceProfileId: "docker", database: "app", namespace: "public" } });
+assert.equal(linkedConnection.type, "Docker DB");
+assert.equal(linkedConnection.identity, "Docker (docker) · app.public");
+const libraryLoader = source.slice(source.indexOf("async function loadSchemaLibraryConnections"), source.indexOf("function renderSchemaLibrary"));
+assert.match(libraryLoader, /\/api\/postgres\/profiles/, "schema library must load redacted saved-profile metadata");
+assert.doesNotMatch(libraryLoader, /namespaces|password/, "opening the schema library must not contact PostgreSQL or expose credentials");
 
 assert.match(source, /if \(!confirm\(`Confirm action:/, "write actions must require explicit confirmation");
 assert.match(source, /elements\.aiSqlPolicy\.value === "ask" && !confirm\(/, "ask-mode SQL must require confirmation");
 assert.match(source, /elements\.aiSqlPolicy\.value === "allow-session" && aiState\.sqlPolicyDeliberatelySelected/, "session SQL must require a deliberate user setting");
 assert.match(source, /elements\.postgresProfilePassword\.value = ""/, "connection proposals must clear the password field");
+const navigationHandler = source.slice(source.indexOf("async function confirmAiNavigationAction"), source.indexOf("function detailAiActionError"));
+assert.match(navigationHandler, /if \(!confirm\(`Create and open local project/, "project creation must require confirmation");
+assert.match(navigationHandler, /if \(!confirm\(`Open local project/, "project opening must require confirmation");
+assert.match(navigationHandler, /credentials already stored on this server/, "connection opening must explain database contact before confirmation");
+assert.match(navigationHandler, /profiles\.find\(item => item\.id === validated\.payload\.profileId\)/, "connection opening must resolve an exact saved profile ID");
+assert.match(navigationHandler, /postgresState\.namespaces\.includes\(requestedNamespace\)/, "a proposed namespace must be verified against the live connection");
+assert.match(navigationHandler, /openSchema\(validated\.record\.id, \{ fit: false \}\)/, "agent project opening must preserve the saved viewport");
 const authUi = source.slice(source.indexOf("function buildAiAuthForm"), source.indexOf("function loadAiStatus"));
 assert.doesNotMatch(authUi, /localStorage|sessionStorage/, "provider credentials must not use browser storage");
 assert.match(source, /path\.startsWith\("\/api\/ai\/"\)/, "AI requests must be restricted to the local API");
@@ -56,6 +93,7 @@ assert.match(panelState, /mainLayout\.classList\.toggle\("ai-open", open\)/, "AI
 assert.match(panelState, /toolRail\.inert = open/, "hidden diagram tools must not remain keyboard-accessible");
 assert.doesNotMatch(panelState, /inspector|mobile-open|inspector-dismissed/, "AI chat must not change right inspector state");
 assert.match(styles, /\.ai-panel \{[^}]*left: 0;[^}]*translate3d\(-100%/, "AI chat must dock from the left");
+assert.match(styles, /\.schema-library-connection/, "saved schema cards must display connection ownership");
 assert.match(styles, /\.main-layout\.ai-open \.tool-rail/, "AI chat must visually replace the left tool rail");
 assert.match(source, /aiInput\.disabled = busy \|\| !aiState\.available \|\| !elements\.aiModelSelect\.value/, "chat input must remain disabled until a provider model is connected");
 assert.match(source, /Connect a provider in settings to start chatting/, "chat must explain how to enable a provider");

@@ -197,11 +197,13 @@ class OpenCodeServiceTests(unittest.TestCase):
 
     def test_prompt_enables_only_schemii_tools_and_normalizes_actions(self):
         valid = {"kind": "add_table", "table": {"name": "events"}}
+        project = {"type": "open_project", "schemaId": "schema_orders", "projectName": "Orders", "requiresConfirmation": True}
         opener = Opener({"id": "ses_1", "directory": "/workspace"}, {"info": {"path": {"cwd": "/secret"}}, "parts": [
             {"type": "text", "text": "I propose a table."},
             {"type": "reasoning", "text": "Checked constraints.", "time": {"start": 1000, "end": 1350}},
             {"type": "tool", "tool": "skill", "state": {"status": "completed", "input": {"name": "schema-design-layout"}, "output": "/secret/skill/path"}},
             {"type": "tool", "tool": "schema_add_table", "state": {"status": "completed", "output": "SCHEMII_ACTION:" + json.dumps(valid)}},
+            {"type": "tool", "tool": "schema_project_open", "state": {"status": "completed", "output": "SCHEMII_ACTION:" + json.dumps(project)}},
             {"type": "tool", "tool": "schema_add_table", "state": {"status": "completed", "output": " SCHEMII_ACTION:{}"}},
             {"type": "tool", "tool": "bash", "state": {"status": "completed", "output": "SCHEMII_ACTION:{}"}},
         ]})
@@ -217,8 +219,8 @@ class OpenCodeServiceTests(unittest.TestCase):
         self.assertTrue(payload["tools"]["skill"])
         self.assertTrue(all(payload["tools"][tool] is False for tool in ("bash", "read", "write", "edit", "webfetch", "task")))
         self.assertEqual(result["text"], "I propose a table.")
-        self.assertEqual(result["actions"], [valid])
-        self.assertEqual(len(result["parts"]), 5)
+        self.assertEqual(result["actions"], [valid, project])
+        self.assertEqual(len(result["parts"]), 6)
         self.assertEqual(result["parts"][1], {"type": "reasoning", "text": "Checked constraints.", "durationMs": 350})
         self.assertEqual(result["parts"][2], {"type": "skill", "skill": "schema-design-layout", "status": "completed"})
         self.assertNotIn("cwd", json.dumps(result))
