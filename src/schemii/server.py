@@ -62,6 +62,11 @@ def _project_create_fallback(user_text: str, response: dict) -> dict:
         return response
     request = user_text.strip()
     name = None
+    creation_request = re.search(
+        r"\b(?:create|make|start)\s+(?:me\s+)?(?:a\s+)?(?:new\s+)?(?:local\s+)?(?:project|schema|design)\b",
+        request,
+        re.IGNORECASE,
+    )
     explicit = re.search(
         r"\b(?:create|make|start)\s+(?:me\s+)?(?:a\s+)?(?:new\s+)?(?:local\s+)?(?:project|schema|design)\s+(?:named|called)\s+(.{1,256}?)(?:[.!?]|$)",
         request,
@@ -70,10 +75,14 @@ def _project_create_fallback(user_text: str, response: dict) -> dict:
     if explicit:
         name = explicit.group(1).strip(" \t\"'`*")
         name = re.sub(r"\s+(?:now|please)$", "", name, flags=re.IGNORECASE).strip()
-    elif re.fullmatch(r"(?:yes[, ]*)?(?:go ahead(?: and (?:make|create) it)?|do it|make it|create it)[.!]?", request, re.IGNORECASE):
+    elif creation_request or re.fullmatch(r"(?:yes[, ]*)?(?:go ahead(?: and (?:make|create) it)?|do it|make it|create it)[.!]?", request, re.IGNORECASE):
         answer = response.get("text") if isinstance(response.get("text"), str) else ""
-        if re.search(r"\b(?:proposal|confirm|review)\b", answer, re.IGNORECASE):
-            inferred = re.search(r"\b(?:new\s+)?(?:project|schema|design)\s+\*\*([A-Za-z0-9][A-Za-z0-9 _.-]{0,127})\*\*", answer, re.IGNORECASE)
+        if re.search(r"\b(?:proposal|proposed|confirm|review|approve)\b", answer, re.IGNORECASE):
+            inferred = re.search(
+                r"\b(?:new\s+)?(?:project|schema|design)(?:\s+(?:named|called))?\s+\*\*[\"'`]?([A-Za-z0-9][A-Za-z0-9 _.-]{0,127}?)[\"'`]?\*\*",
+                answer,
+                re.IGNORECASE,
+            )
             if inferred:
                 name = inferred.group(1).strip()
     if not name or len(name.encode("utf-8")) > 256 or any(ord(char) < 32 or ord(char) == 127 for char in name):

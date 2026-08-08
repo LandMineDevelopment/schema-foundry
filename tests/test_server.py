@@ -298,6 +298,9 @@ class ServerTests(unittest.TestCase):
 
         follow_up = {"text": "The new project **teaching_rdbms** is ready as a proposal. Review and confirm it.", "parts": [], "actions": []}
         self.assertEqual(_project_create_fallback("go ahead and make it", follow_up)["actions"][0]["projectName"], "teaching_rdbms")
+        model_named = {"text": 'Proposed creating the local schema **"Relational DB Teaching Schema"**. Review and approve the proposal in Schemii.', "parts": [], "actions": []}
+        repaired_model_name = _project_create_fallback("create a new local schema designed to teach relational db", model_named)
+        self.assertEqual(repaired_model_name["actions"][0]["projectName"], "Relational DB Teaching Schema")
         self.assertEqual(_project_create_fallback("Describe this schema", empty)["actions"], [])
         existing = {**empty, "actions": [{"type": "add_table"}]}
         self.assertIs(_project_create_fallback("Create a new schema named Demo", existing), existing)
