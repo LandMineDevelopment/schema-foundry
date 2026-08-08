@@ -52,18 +52,25 @@ case "$mode" in
     ;;
 esac
 
+url="http://127.0.0.1:${port}/"
+was_ready=0
+if [[ "${SCHEMII_NO_OPEN:-0}" != "1" ]] && command -v curl >/dev/null 2>&1; then
+  if curl --fail --silent --max-time 1 "$url" >/dev/null 2>&1; then
+    was_ready=1
+  fi
+fi
+
 if [[ "$mode" == ai* && -z "${SCHEMII_OPENCODE_PASSWORD:-}" ]]; then
   SCHEMII_OPENCODE_PASSWORD="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
   export SCHEMII_OPENCODE_PASSWORD
 fi
 
 "${compose[@]}" up --build -d --remove-orphans
-url="http://127.0.0.1:${port}/"
 printf '\nSchemii is ready at %s\n' "$url"
 printf 'Mode: %s\n' "$mode"
 printf 'Saved data remains in Docker named volumes.\n'
 
-if [[ "${SCHEMII_NO_OPEN:-0}" != "1" ]]; then
+if [[ "${SCHEMII_NO_OPEN:-0}" != "1" && "$was_ready" != "1" ]]; then
   if command -v xdg-open >/dev/null 2>&1; then
     xdg-open "$url" >/dev/null 2>&1 || true
   elif command -v open >/dev/null 2>&1; then

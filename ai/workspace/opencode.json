@@ -56,6 +56,7 @@
     "schema_update_column": "allow",
     "schema_delete_element": "allow",
     "schema_add_relationship": "allow",
+    "schema_populate": "allow",
     "schema_connection_setup": "allow",
     "schema_project_create": "allow",
     "schema_project_open": "allow",

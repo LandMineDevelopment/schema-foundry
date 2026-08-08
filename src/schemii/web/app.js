@@ -3650,7 +3650,7 @@ function saveDatabaseObject() {
   closeDatabaseObjectEditor();
 }
 
-const AI_SCHEMA_ACTIONS = new Set(["add_table", "rename_table", "add_column", "update_column", "delete_element", "add_relationship"]);
+const AI_SCHEMA_ACTIONS = new Set(["populate_schema", "add_table", "rename_table", "add_column", "update_column", "delete_element", "add_relationship"]);
 const AI_NAVIGATION_ACTIONS = new Set(["create_project", "open_project", "open_connection"]);
 const AI_TOOL_LABELS = {
   schema_read_query: "Preparing read-only SQL",
@@ -3660,6 +3660,7 @@ const AI_TOOL_LABELS = {
   schema_update_column: "Drafting a column change",
   schema_delete_element: "Reviewing a deletion",
   schema_add_relationship: "Drafting a relationship",
+  schema_populate: "Designing a complete schema",
   schema_connection_setup: "Preparing connection settings",
   schema_project_create: "Preparing a local project",
   schema_project_open: "Finding a local project",
@@ -3704,6 +3705,84 @@ function validAiName(value, label) {
   return "";
 }
 
+function canonicalAiRelationshipType(value) {
+  const type = String(value ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+  const aliases = {
+    serial: "integer", int: "integer", int4: "integer",
+    bigserial: "bigint", int8: "bigint",
+    smallserial: "smallint", int2: "smallint",
+    bool: "boolean",
+    varchar: "character varying"
+  };
+  return aliases[type] ?? type;
+}
+
+function validateAiPopulateAction(schemaValue, payload) {
+  const allowedPayload = new Set(["type", "purpose", "tables", "relationships", "requiresConfirmation"]);
+  if (!payload || typeof payload !== "object" || Array.isArray(payload) || Object.keys(payload).some(key => !allowedPayload.has(key))) return { ok: false, error: "The schema proposal contains unsupported fields" };
+  if (!Array.isArray(payload.tables) || payload.tables.length < 1 || payload.tables.length > 20) return { ok: false, error: "A complete schema proposal needs 1 to 20 tables" };
+  if (!Array.isArray(payload.relationships) || payload.relationships.length > 50) return { ok: false, error: "Schema relationships must be a list of at most 50 items" };
+  const tables = [];
+  const names = new Set(schemaValue.tables.map(table => table.name.toLowerCase()));
+  for (const proposedTable of payload.tables) {
+    if (!proposedTable || typeof proposedTable !== "object" || Array.isArray(proposedTable) || Object.keys(proposedTable).some(key => !["name", "purpose", "columns"].includes(key))) return { ok: false, error: "A proposed table contains unsupported fields" };
+    const tableNameError = validAiName(proposedTable.name, "Table name");
+    if (tableNameError) return { ok: false, error: tableNameError };
+    const tableName = proposedTable.name.trim();
+    if (names.has(tableName.toLowerCase())) return { ok: false, error: `Table ${tableName} already exists or is duplicated` };
+    names.add(tableName.toLowerCase());
+    if (!Array.isArray(proposedTable.columns) || proposedTable.columns.length < 1 || proposedTable.columns.length > 50) return { ok: false, error: `Table ${tableName} needs 1 to 50 columns` };
+    const columnNames = new Set();
+    const columns = [];
+    for (const proposedColumn of proposedTable.columns) {
+      if (!proposedColumn || typeof proposedColumn !== "object" || Array.isArray(proposedColumn) || Object.keys(proposedColumn).some(key => !["name", "type", "primary", "nullable", "unique", "default"].includes(key))) return { ok: false, error: `Table ${tableName} has a column with unsupported fields` };
+      const columnNameError = validAiName(proposedColumn.name, "Column name");
+      if (columnNameError) return { ok: false, error: columnNameError };
+      const columnName = proposedColumn.name.trim();
+      if (columnNames.has(columnName.toLowerCase())) return { ok: false, error: `Column ${columnName} is duplicated in ${tableName}` };
+      columnNames.add(columnName.toLowerCase());
+      if (typeof proposedColumn.type !== "string" || !proposedColumn.type.trim() || new TextEncoder().encode(proposedColumn.type.trim()).length > 128) return { ok: false, error: `Column ${tableName}.${columnName} has an invalid type` };
+      for (const key of ["primary", "nullable", "unique"]) if (proposedColumn[key] != null && typeof proposedColumn[key] !== "boolean") return { ok: false, error: `${tableName}.${columnName} ${key} must be true or false` };
+      if (proposedColumn.default != null && (typeof proposedColumn.default !== "string" || new TextEncoder().encode(proposedColumn.default).length > 1000 || /[\x00]/.test(proposedColumn.default))) return { ok: false, error: `${tableName}.${columnName} has an invalid default` };
+      columns.push({
+        name: columnName, type: proposedColumn.type.trim(), primary: proposedColumn.primary === true,
+        nullable: proposedColumn.primary === true ? false : proposedColumn.nullable !== false,
+        unique: proposedColumn.primary === true || proposedColumn.unique === true,
+        default: proposedColumn.default ?? ""
+      });
+    }
+    tables.push({ name: tableName, columns });
+  }
+  const allTables = [...schemaValue.tables, ...tables];
+  const relationships = [];
+  const relationshipKeys = new Set();
+  const actions = new Set(["NO ACTION", "RESTRICT", "CASCADE", "SET NULL", "SET DEFAULT"]);
+  for (const relation of payload.relationships) {
+    if (!relation || typeof relation !== "object" || Array.isArray(relation) || Object.keys(relation).some(key => !["fromTableName", "fromColumnName", "toTableName", "toColumnName", "constraintName", "onDelete", "onUpdate"].includes(key))) return { ok: false, error: "A relationship contains unsupported fields" };
+    const fromTable = allTables.find(table => table.name.toLowerCase() === String(relation.fromTableName ?? "").toLowerCase());
+    const toTable = allTables.find(table => table.name.toLowerCase() === String(relation.toTableName ?? "").toLowerCase());
+    const fromColumn = fromTable?.columns.find(column => column.name.toLowerCase() === String(relation.fromColumnName ?? "").toLowerCase());
+    const toColumn = toTable?.columns.find(column => column.name.toLowerCase() === String(relation.toColumnName ?? "").toLowerCase());
+    if (!fromTable || !toTable || !fromColumn || !toColumn) return { ok: false, error: "Every relationship must reference proposed or existing table columns" };
+    if (canonicalAiRelationshipType(fromColumn.type) !== canonicalAiRelationshipType(toColumn.type)) return { ok: false, error: `Relationship ${fromTable.name}.${fromColumn.name} has mismatched column types` };
+    const targetKey = toColumn.primary || toColumn.unique || (toTable.uniqueConstraints ?? []).some(constraint => constraint.columnIds?.length === 1 && constraint.columnIds[0] === toColumn.id);
+    if (!targetKey) return { ok: false, error: `Relationship target ${toTable.name}.${toColumn.name} must be primary or unique` };
+    const onDelete = relation.onDelete ?? "NO ACTION";
+    const onUpdate = relation.onUpdate ?? "NO ACTION";
+    if (!actions.has(onDelete) || !actions.has(onUpdate)) return { ok: false, error: "Relationship actions are invalid" };
+    if (onDelete === "SET NULL" && !fromColumn.nullable) return { ok: false, error: `SET NULL requires nullable column ${fromTable.name}.${fromColumn.name}` };
+    const key = `${fromTable.name}.${fromColumn.name}->${toTable.name}.${toColumn.name}`.toLowerCase();
+    if (relationshipKeys.has(key)) return { ok: false, error: "A proposed relationship is duplicated" };
+    relationshipKeys.add(key);
+    if (relation.constraintName != null) {
+      const constraintError = validAiName(relation.constraintName, "Relationship constraint name");
+      if (constraintError) return { ok: false, error: constraintError };
+    }
+    relationships.push({ fromTableName: fromTable.name, fromColumnName: fromColumn.name, toTableName: toTable.name, toColumnName: toColumn.name, constraintName: relation.constraintName?.trim(), onDelete, onUpdate });
+  }
+  return { ok: true, type: "populate_schema", tables, relationships };
+}
+
 function validateAiNavigationAction(action) {
   const type = aiActionType(action);
   const payload = aiActionPayload(action);
@@ -3737,6 +3816,7 @@ function validateAiSchemaAction(schemaValue, action) {
   const payload = aiActionPayload(action);
   if (!AI_SCHEMA_ACTIONS.has(type)) return { ok: false, error: "Unsupported schema action" };
   if (!schemaValue || !Array.isArray(schemaValue.tables) || !Array.isArray(schemaValue.relationships)) return { ok: false, error: "The active schema is invalid" };
+  if (type === "populate_schema") return validateAiPopulateAction(schemaValue, payload);
   if (type === "add_table") {
     const proposal = payload.table ?? payload;
     const error = validAiName(proposal.name, "Table name");
@@ -3799,7 +3879,7 @@ function validateAiSchemaAction(schemaValue, action) {
   const fromColumn = aiNamedColumn(fromTable, payload, "from");
   const toColumn = aiNamedColumn(toTable, payload, "to");
   if (!fromTable || !toTable || !fromColumn || !toColumn) return { ok: false, error: "Both relationship columns must exist" };
-  if (fromColumn.type !== toColumn.type) return { ok: false, error: "Relationship columns must have matching types" };
+  if (canonicalAiRelationshipType(fromColumn.type) !== canonicalAiRelationshipType(toColumn.type)) return { ok: false, error: "Relationship columns must have matching types" };
   const targetKey = toColumn.primary || toColumn.unique || (toTable.uniqueConstraints ?? []).some(constraint => constraint.columnIds.length === 1 && constraint.columnIds[0] === toColumn.id);
   if (!targetKey) return { ok: false, error: "The referenced column must be primary or unique" };
   const constraintName = payload.constraintName ?? payload.name;
@@ -3811,12 +3891,48 @@ function validateAiSchemaAction(schemaValue, action) {
   return { ok: true, type, payload, table: fromTable, fromTable, toTable, fromColumn, toColumn };
 }
 
+function applyAiPopulation(schemaValue, validated, { startX, startY, gridColumns }) {
+  const colorStart = schemaValue.tables.length;
+  for (const [index, proposedTable] of validated.tables.entries()) {
+    schemaValue.tables.push({
+      id: uid("table"), name: proposedTable.name,
+      x: startX + (index % gridColumns) * (TABLE_WIDTH + 55),
+      y: startY + Math.floor(index / gridColumns) * 235,
+      color: COLORS[(colorStart + index) % COLORS.length],
+      columns: proposedTable.columns.map(column => ({ id: uid("col"), ...column })),
+      uniqueConstraints: [], checks: [], indexes: [], triggers: []
+    });
+  }
+  for (const relation of validated.relationships) {
+    const fromTable = schemaValue.tables.find(table => table.name === relation.fromTableName);
+    const toTable = schemaValue.tables.find(table => table.name === relation.toTableName);
+    const fromColumn = fromTable.columns.find(column => column.name === relation.fromColumnName);
+    const toColumn = toTable.columns.find(column => column.name === relation.toColumnName);
+    schemaValue.relationships.push({
+      id: uid("rel"), fromTableId: fromTable.id, fromColumnId: fromColumn.id,
+      toTableId: toTable.id, toColumnId: toColumn.id,
+      constraintName: relation.constraintName || `${fromTable.name}_${fromColumn.name}_fkey`,
+      targetNamespace: toTable.namespace || schemaValue.postgres?.namespace,
+      targetTableName: toTable.name, targetColumnNames: [toColumn.name],
+      onUpdate: relation.onUpdate, onDelete: relation.onDelete,
+      deferrable: false, initiallyDeferred: false, matchType: "SIMPLE", validated: true
+    });
+  }
+}
+
 async function applyAiSchemaAction(action) {
   const validated = validateAiSchemaAction(schema, action);
   if (!validated.ok) throw new Error(validated.error);
   const schemaBefore = clone(schema);
   checkpointHistory();
-  if (validated.type === "add_table") {
+  if (validated.type === "populate_schema") {
+    const rect = elements.workspace.getBoundingClientRect();
+    const gridColumns = Math.ceil(Math.sqrt(validated.tables.length));
+    const gridRows = Math.ceil(validated.tables.length / gridColumns);
+    const startX = (rect.width / 2 - view.x) / view.zoom - ((gridColumns - 1) * (TABLE_WIDTH + 55) + TABLE_WIDTH) / 2;
+    const startY = (rect.height / 2 - view.y) / view.zoom - (gridRows * 235) / 2;
+    applyAiPopulation(schema, validated, { startX, startY, gridColumns });
+  } else if (validated.type === "add_table") {
     const rect = elements.workspace.getBoundingClientRect();
     const columns = validated.payload.columns?.length ? validated.payload.columns : [{ name: "id", type: "uuid", primary: true, nullable: false, unique: true, default: "" }];
     const table = {
@@ -4383,6 +4499,7 @@ function aiActionSummary(action) {
   const type = aiActionType(action);
   const payload = aiActionPayload(action);
   if (type === "schema_read_query") return "Read-only SQL query";
+  if (type === "populate_schema") return "Populate the active schema";
   if (type === "connection_setup") return "Set up a PostgreSQL connection";
   if (type === "create_project") return "Create a local project";
   if (type === "open_project") return "Open a local project";
@@ -4430,6 +4547,7 @@ function renderAiAction(action, context) {
 }
 
 async function confirmAiAction(action, context, card, button) {
+  card.querySelectorAll(".ai-action-error").forEach(error => error.remove());
   const type = aiActionType(action);
   if (type === "schema_read_query") {
     if (elements.aiSqlPolicy.value === "disabled") return;

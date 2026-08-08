@@ -106,6 +106,7 @@ The explicit tools can propose:
 - Add or update a column
 - Delete a table or column
 - Add a foreign-key relationship
+- Atomically populate an active design with complete tables, columns, keys, and relationships
 - Create a local project or open an exact listed project
 - Open an exact listed saved PostgreSQL connection
 - Prefill a connection profile without a password
@@ -116,6 +117,8 @@ Tool output is inert structured data. It does not prove that an action ran.
 ## Confirmation And Migration Safety
 
 Every schema mutation requires a separate browser confirmation. The proposal is bound to the active design and an in-memory schema snapshot; changing the design invalidates it. Schema saves must succeed before the UI marks a proposal applied, and existing table layout is preserved.
+
+Initial example-schema generation uses one `populate_schema` action rather than separate table cards. Schemii validates table and column counts, names, types, declared keys, defaults, relationship endpoints, type compatibility, referenced uniqueness, referential actions, and unsupported fields before showing confirmation. PostgreSQL-valid keyless tables are allowed; only foreign-key targets must be primary or unique. Approval applies the validated batch atomically, lays out only the new tables, preserves all existing table layout, and saves once. If a provider fails to execute a custom proposal tool, Schemii accepts only a bounded `SCHEMII_PROPOSALS:` fallback manifest containing this same inert action; the browser performs identical validation and confirmation.
 
 New-connection proposals only prefill the existing profile form. The user must enter the password and use **Save & test**.
 

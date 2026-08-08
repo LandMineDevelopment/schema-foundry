@@ -76,6 +76,16 @@ class StandaloneRuntimeTests(unittest.TestCase):
         self.assertNotIn("down --volumes", launcher)
         self.assertNotIn("volume rm", launcher)
 
+    def test_launchers_do_not_open_duplicate_browser_tabs(self):
+        shell = (ROOT / "start.sh").read_text(encoding="utf-8")
+        powershell = (ROOT / "start.ps1").read_text(encoding="utf-8")
+
+        self.assertIn('curl --fail --silent --max-time 1 "$url"', shell)
+        self.assertIn('"$was_ready" != "1"', shell)
+        self.assertIn("SCHEMII_NO_OPEN", shell)
+        self.assertIn("Invoke-WebRequest -Uri $url -TimeoutSec 1", powershell)
+        self.assertIn("-not $NoOpen -and -not $wasReady", powershell)
+
     def test_ai_navigation_tools_accept_only_logical_ids_and_public_labels(self):
         tools = "\n".join(path.read_text(encoding="utf-8") for path in sorted((ROOT / "ai" / "workspace" / ".opencode" / "tools").glob("schema_*_open.ts")))
         create_tool = (ROOT / "ai" / "workspace" / ".opencode" / "tools" / "schema_project_create.ts").read_text(encoding="utf-8")
@@ -86,6 +96,18 @@ class StandaloneRuntimeTests(unittest.TestCase):
         self.assertNotRegex(tools, r"\b(?:password|path|url|host|shell|command)\b")
         self.assertIn("needs no schemaId or availableProjects entry", create_tool)
         self.assertIn("immediately call `schema_project_create`", instructions)
+
+    def test_ai_population_tool_requires_complete_tables_and_name_based_relationships(self):
+        populate = (ROOT / "ai" / "workspace" / ".opencode" / "tools" / "schema_populate.ts").read_text(encoding="utf-8")
+        add_table = (ROOT / "ai" / "workspace" / ".opencode" / "tools" / "schema_add_table.ts").read_text(encoding="utf-8")
+        relationship = (ROOT / "ai" / "workspace" / ".opencode" / "tools" / "schema_add_relationship.ts").read_text(encoding="utf-8")
+
+        self.assertIn('type: "populate_schema"', populate)
+        self.assertIn("columns: tool.schema.array(column).min(1)", populate)
+        self.assertIn("relationships: tool.schema.array(relationship)", populate)
+        self.assertIn("columns: tool.schema.array(column).min(1)", add_table)
+        for field in ("fromTableName", "fromColumnName", "toTableName", "toColumnName"):
+            self.assertIn(field, relationship)
 
 
 if __name__ == "__main__":

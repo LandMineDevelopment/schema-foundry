@@ -254,6 +254,26 @@ class OpenCodeServiceTests(unittest.TestCase):
         self.assertEqual([call[1] for call in opener.calls], [12, 12, 5])
         self.assertEqual(opener.calls[2][0].full_url, "http://127.0.0.1:4096/session/ses_1/abort")
 
+    def test_prompt_recovers_split_tool_actions_only_after_the_exact_latest_user_message(self):
+        action = {"type": "populate_schema", "tables": [{"name": "authors"}], "relationships": []}
+        prompt = "Schemii context\n\nUser request:\npopulate it"
+        opener = Opener(
+            {"id": "ses_1", "directory": "/workspace"},
+            {"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "Review the proposal."}]},
+            [
+                {"info": {"role": "user"}, "parts": [{"type": "text", "text": "older prompt"}]},
+                {"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "Old"}, {"type": "tool", "tool": "schema_populate", "state": {"status": "completed", "output": "SCHEMII_ACTION:" + json.dumps({"type": "populate_schema", "tables": [{"name": "stale"}], "relationships": []})}}]},
+                {"info": {"role": "user"}, "parts": [{"type": "text", "text": prompt}]},
+                {"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "Working"}, {"type": "tool", "tool": "schema_populate", "state": {"status": "completed", "output": "SCHEMII_ACTION:" + json.dumps(action)}}]},
+                {"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "Review the proposal."}]},
+            ],
+        )
+
+        result = self.service(opener).prompt("ses_1", prompt, {"providerID": "opencode", "modelID": "deepseek-v4-flash-free"}, "Fixed system")
+
+        self.assertEqual(result["actions"], [action])
+        self.assertEqual(opener.calls[2][0].full_url, "http://127.0.0.1:4096/session/ses_1/message?limit=20")
+
     def test_empty_provider_response_is_rejected(self):
         service = self.service(Opener({"id": "ses_1", "directory": "/workspace"}, {"parts": []}))
 

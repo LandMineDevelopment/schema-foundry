@@ -45,18 +45,29 @@ if ($Mode.StartsWith("ai") -and -not $env:SCHEMII_OPENCODE_PASSWORD) {
 }
 $composeArgs += @("up", "--build", "-d", "--remove-orphans")
 
+$port = if ($env:SCHEMII_HOST_PORT) { $env:SCHEMII_HOST_PORT } else { "8080" }
+$url = "http://127.0.0.1:$port/"
+$wasReady = $false
+if (-not $NoOpen) {
+    try {
+        Invoke-WebRequest -Uri $url -TimeoutSec 1 -UseBasicParsing *> $null
+        $wasReady = $true
+    }
+    catch {
+        $wasReady = $false
+    }
+}
+
 & docker @composeArgs
 if ($LASTEXITCODE -ne 0) {
     throw "Schemii could not be started. Review the Docker output above."
 }
 
-$port = if ($env:SCHEMII_HOST_PORT) { $env:SCHEMII_HOST_PORT } else { "8080" }
-$url = "http://127.0.0.1:$port/"
 Write-Host ""
 Write-Host "Schemii is ready at $url"
 Write-Host "Mode: $Mode"
 Write-Host "Saved data remains in Docker named volumes."
 
-if (-not $NoOpen) {
+if (-not $NoOpen -and -not $wasReady) {
     Start-Process $url
 }

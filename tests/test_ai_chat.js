@@ -13,6 +13,10 @@ assert.notEqual(end, -1, "AI action validation end marker is missing");
 const context = vm.createContext({ TextEncoder });
 vm.runInContext(`
   let activeSchemaId = "schema_current";
+  const TABLE_WIDTH = 270;
+  const COLORS = ["amber", "blue"];
+  let nextId = 0;
+  function uid(prefix) { nextId += 1; return prefix + "_" + nextId; }
   function readSchemaLibrary() {
     return { schemas: [{ id: "schema_orders", schema: { projectName: "Orders", tables: [], relationships: [] } }] };
   }
@@ -24,6 +28,7 @@ vm.runInContext(`
   ${source.slice(start, end)}
   globalThis.validateAiSchemaAction = validateAiSchemaAction;
   globalThis.validateAiNavigationAction = validateAiNavigationAction;
+  globalThis.applyAiPopulation = applyAiPopulation;
 `, context);
 
 const schema = {
@@ -40,6 +45,53 @@ assert.equal(context.validateAiSchemaAction(schema, { type: "add_column", payloa
 assert.match(context.validateAiSchemaAction(schema, { type: "update_column", payload: { tableId: "orders", columnId: "owner_id", changes: { nullable: "yes" } } }).error, /true or false/);
 assert.equal(context.validateAiSchemaAction(schema, { type: "add_relationship", payload: { fromTableId: "orders", fromColumnId: "owner_id", toTableId: "users", toColumnId: "user_id" } }).ok, true);
 assert.match(context.validateAiSchemaAction(schema, { type: "delete_element", payload: { tableId: "orders", elementType: "column", columnId: "owner_id" } }).error, /at least one column/);
+const population = {
+  type: "populate_schema",
+  purpose: "Library teaching schema",
+  tables: [
+    { name: "authors", purpose: "Authors", columns: [{ name: "id", type: "serial", primary: true }, { name: "name", type: "text", nullable: false }] },
+    { name: "books", purpose: "Books", columns: [{ name: "id", type: "uuid", primary: true }, { name: "author_id", type: "integer", nullable: false }, { name: "title", type: "text", nullable: false }] }
+  ],
+  relationships: [{ fromTableName: "books", fromColumnName: "author_id", toTableName: "authors", toColumnName: "id", onDelete: "RESTRICT", onUpdate: "CASCADE" }],
+  requiresConfirmation: true
+};
+const validatedPopulation = context.validateAiSchemaAction({ tables: [], relationships: [] }, population);
+assert.equal(validatedPopulation.ok, true);
+assert.equal(validatedPopulation.tables.length, 2);
+assert.equal(validatedPopulation.relationships.length, 1);
+const populatedSchema = { tables: [], relationships: [] };
+context.applyAiPopulation(populatedSchema, validatedPopulation, { startX: 100, startY: 80, gridColumns: 2 });
+assert.equal(populatedSchema.tables.length, 2);
+assert.equal(populatedSchema.relationships.length, 1);
+assert.notEqual(populatedSchema.tables[0].id, populatedSchema.tables[1].id);
+assert.notEqual(populatedSchema.tables[0].x, populatedSchema.tables[1].x);
+const appliedRelation = populatedSchema.relationships[0];
+const appliedBooks = populatedSchema.tables.find(table => table.name === "books");
+const appliedAuthors = populatedSchema.tables.find(table => table.name === "authors");
+assert.equal(appliedRelation.fromTableId, appliedBooks.id);
+assert.equal(appliedRelation.fromColumnId, appliedBooks.columns.find(column => column.name === "author_id").id);
+assert.equal(appliedRelation.toTableId, appliedAuthors.id);
+assert.equal(appliedRelation.toColumnId, appliedAuthors.columns.find(column => column.name === "id").id);
+assert.match(context.validateAiSchemaAction({ tables: [], relationships: [] }, { ...population, path: "/tmp/schema" }).error, /unsupported fields/);
+const noPrimary = structuredClone(population);
+noPrimary.tables[0].columns[0].primary = false;
+noPrimary.relationships = noPrimary.relationships.filter(relation => relation.toTableName !== "authors");
+assert.equal(context.validateAiSchemaAction({ tables: [], relationships: [] }, noPrimary).ok, true, "PostgreSQL permits keyless tables when no foreign key references them");
+const keylessJunction = structuredClone(population);
+keylessJunction.tables.push({ name: "book_tags", purpose: "Keyless staging junction", columns: [{ name: "book_id", type: "uuid", nullable: false }, { name: "tag_id", type: "uuid", nullable: false }] });
+keylessJunction.tables.push({ name: "tags", purpose: "Tags", columns: [{ name: "id", type: "uuid", primary: true }] });
+keylessJunction.relationships.push(
+  { fromTableName: "book_tags", fromColumnName: "book_id", toTableName: "books", toColumnName: "id", onDelete: "CASCADE", onUpdate: "CASCADE" },
+  { fromTableName: "book_tags", fromColumnName: "tag_id", toTableName: "tags", toColumnName: "id", onDelete: "CASCADE", onUpdate: "CASCADE" }
+);
+assert.equal(context.validateAiSchemaAction({ tables: [], relationships: [] }, keylessJunction).ok, true, "keyless source/junction tables remain buildable PostgreSQL");
+const badTarget = structuredClone(population);
+badTarget.relationships[0].toColumnName = "name";
+badTarget.tables[0].columns[1].type = "integer";
+assert.match(context.validateAiSchemaAction({ tables: [], relationships: [] }, badTarget).error, /primary or unique/);
+const badType = structuredClone(population);
+badType.tables[1].columns[1].type = "bigint";
+assert.match(context.validateAiSchemaAction({ tables: [], relationships: [] }, badType).error, /mismatched column types/);
 assert.equal(context.validateAiNavigationAction({ type: "create_project", projectName: "Orders v2", requiresConfirmation: true }).ok, true);
 assert.equal(context.validateAiNavigationAction({ type: "open_project", schemaId: "schema_orders", projectName: "Orders", requiresConfirmation: true }).ok, true);
 assert.equal(context.validateAiNavigationAction({ type: "open_connection", profileId: "local", name: "Local", database: "demo", namespace: "public", requiresConfirmation: true }).ok, true);
@@ -83,6 +135,11 @@ assert.match(source, /path\.startsWith\("\/api\/ai\/"\)/, "AI requests must be r
 assert.doesNotMatch(source.slice(source.indexOf("async function aiRequest"), source.indexOf("async function checkPostgresDrift")), /fetch\((?!path|"\/api\/session")/, "AI request code must not fetch external URLs");
 assert.match(source, /postgresState\.selectedProfileId !== context\.profileId/, "actions must recheck the selected profile");
 assert.match(source, /JSON\.stringify\(schema\) !== context\.schemaSnapshot/, "schema proposals must recheck their base schema");
+const schemaApply = source.slice(source.indexOf("async function applyAiSchemaAction"), source.indexOf("const AI_MODEL_STORAGE_KEY"));
+assert.match(schemaApply, /validated\.type === "populate_schema"/, "complete schema proposals must apply through one atomic action");
+assert.match(schemaApply, /applyAiPopulation\(schema, validated/, "atomic population must create every validated table and relationship");
+assert.equal((schemaApply.match(/await persistCurrentSchema\(\)/g) ?? []).length, 1, "an atomic schema population must save once");
+assert.match(source, /card\.querySelectorAll\("\.ai-action-error"\).*remove/, "repeated review attempts must replace prior validation errors");
 const messageRenderer = source.slice(source.indexOf("function appendAiMessage"), source.indexOf("function aiActionSummary"));
 assert.match(messageRenderer, /body\.textContent =/, "chat text must render with textContent");
 assert.doesNotMatch(messageRenderer, /innerHTML/, "chat text must not render as HTML");

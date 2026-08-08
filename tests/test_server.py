@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from schemii.schema_store import SchemaStore
-from schemii.server import CONTENT_SECURITY_POLICY, ThreadingHTTPServer, _is_local_request, _project_create_fallback, make_handler
+from schemii.server import CONTENT_SECURITY_POLICY, ThreadingHTTPServer, _is_local_request, _proposal_manifest_fallback, make_handler
 
 
 class FakePostgresService:
@@ -291,19 +291,30 @@ class ServerTests(unittest.TestCase):
         self.assertIn(("delete_api_key", "anthropic"), self.ai_service.calls)
         self.assertIn(("delete_session", "ses_1"), self.ai_service.calls)
 
-    def test_create_project_fallback_repairs_missing_inert_tool_actions_only(self):
-        empty = {"text": "Review the proposal.", "parts": [{"type": "text", "text": "Review the proposal."}], "actions": []}
-        repaired = _project_create_fallback("Create a new local schema named teaching_rdbms now.", empty)
-        self.assertEqual(repaired["actions"], [{"type": "create_project", "projectName": "teaching_rdbms", "requiresConfirmation": True}])
+    def test_schema_manifest_fallback_is_bounded_inert_and_hidden_from_chat_text(self):
+        action = {
+            "type": "populate_schema",
+            "purpose": "Teaching example",
+            "tables": [{"name": "authors", "purpose": "Authors", "columns": [{"name": "id", "type": "uuid", "primary": True}]}],
+            "relationships": [],
+            "requiresConfirmation": True,
+        }
+        visible = "Prepared a complete teaching schema."
+        manifest = "SCHEMII_PROPOSALS:" + json.dumps([action])
+        response = {"text": f"{visible}\n{manifest}", "parts": [{"type": "text", "text": f"{visible}\n{manifest}"}], "actions": []}
 
-        follow_up = {"text": "The new project **teaching_rdbms** is ready as a proposal. Review and confirm it.", "parts": [], "actions": []}
-        self.assertEqual(_project_create_fallback("go ahead and make it", follow_up)["actions"][0]["projectName"], "teaching_rdbms")
-        model_named = {"text": 'Proposed creating the local schema **"Relational DB Teaching Schema"**. Review and approve the proposal in Schemii.', "parts": [], "actions": []}
-        repaired_model_name = _project_create_fallback("create a new local schema designed to teach relational db", model_named)
-        self.assertEqual(repaired_model_name["actions"][0]["projectName"], "Relational DB Teaching Schema")
-        self.assertEqual(_project_create_fallback("Describe this schema", empty)["actions"], [])
-        existing = {**empty, "actions": [{"type": "add_table"}]}
-        self.assertIs(_project_create_fallback("Create a new schema named Demo", existing), existing)
+        repaired = _proposal_manifest_fallback(response)
+
+        self.assertEqual(repaired["actions"], [action])
+        self.assertEqual(repaired["text"], visible)
+        self.assertEqual(repaired["parts"], [{"type": "text", "text": visible}])
+        self.assertNotIn("SCHEMII_PROPOSALS", json.dumps(repaired["parts"]))
+        project = {**response, "text": 'SCHEMII_PROPOSALS:[{"type":"create_project","projectName":"Demo","requiresConfirmation":true}]'}
+        self.assertEqual(_proposal_manifest_fallback(project)["actions"][0]["type"], "create_project")
+        mixed = {**response, "text": 'SCHEMII_PROPOSALS:[{"type":"unknown_action"}]'}
+        self.assertIs(_proposal_manifest_fallback(mixed), mixed)
+        existing = {**response, "actions": [{"type": "add_table"}]}
+        self.assertIs(_proposal_manifest_fallback(existing), existing)
 
     def test_ai_history_routes_require_session_and_return_normalized_history(self):
         for path in ("/api/ai/sessions", "/api/ai/sessions/ses_1/messages"):

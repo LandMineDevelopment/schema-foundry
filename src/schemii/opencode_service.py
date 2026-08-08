@@ -31,6 +31,7 @@ CUSTOM_TOOLS = {
     "schema_update_column",
     "schema_delete_element",
     "schema_add_relationship",
+    "schema_populate",
     "schema_connection_setup",
     "schema_project_create",
     "schema_project_open",
@@ -662,7 +663,41 @@ class OpenCodeService:
                     "The AI provider did not respond. Connect another provider or try a different model.",
                 ) from error
             raise
-        return self._normalize_message(result)
+        normalized = self._normalize_message(result)
+        if not normalized["actions"]:
+            normalized["actions"] = self._recover_prompt_actions(session_id, text)
+        return normalized
+
+    def _recover_prompt_actions(self, session_id: str, prompt_text: str) -> list[dict[str, Any]]:
+        try:
+            messages = self._request("GET", f"/session/{quote(session_id, safe='')}/message?limit=20")
+        except OpenCodeServiceError:
+            return []
+        if not isinstance(messages, list):
+            return []
+        prompt_index = None
+        for index in range(len(messages) - 1, -1, -1):
+            item = messages[index]
+            if not isinstance(item, dict) or not isinstance(item.get("info"), dict) or item["info"].get("role") != "user":
+                continue
+            parts = item.get("parts") if isinstance(item.get("parts"), list) else []
+            if any(isinstance(part, dict) and part.get("type") == "text" and part.get("text") == prompt_text for part in parts):
+                prompt_index = index
+                break
+        if prompt_index is None:
+            return []
+        actions = []
+        for item in messages[prompt_index + 1:]:
+            if not isinstance(item, dict) or not isinstance(item.get("info"), dict) or item["info"].get("role") != "assistant":
+                continue
+            try:
+                item_actions = self._normalize_message(item)["actions"]
+            except OpenCodeServiceError:
+                continue
+            actions.extend(item_actions[:MAX_ACTIONS - len(actions)])
+            if len(actions) >= MAX_ACTIONS:
+                break
+        return actions
 
     @staticmethod
     def _normalize_message(result: Any) -> dict[str, Any]:
