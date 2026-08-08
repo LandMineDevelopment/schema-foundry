@@ -275,6 +275,7 @@ let aiState = {
   skills: [],
   sessionId: null,
   busy: false,
+  requestGeneration: 0,
   sqlPolicyDeliberatelySelected: false,
   oauth: null
 };
@@ -398,6 +399,44 @@ async function aiRequest(path, options = {}, retry = true) {
     throw new Error(payload.error?.message || payload.error || "The AI service request failed");
   }
   return payload;
+}
+
+async function readAiActivity(sessionId, onEvent, signal, retry = true) {
+  const path = `/api/ai/sessions/${encodeURIComponent(sessionId)}/activity`;
+  if (!postgresState.token) {
+    const sessionResponse = await fetch("/api/session", { signal });
+    const session = await sessionResponse.json().catch(() => ({}));
+    if (!sessionResponse.ok || !session.token) throw new Error(session.error?.message || "Could not start local agent activity");
+    postgresState.token = session.token;
+  }
+  const response = await fetch(path, {
+    method: "GET",
+    signal,
+    headers: { "X-Schema-Foundry-Token": postgresState.token }
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    if (payload.error?.code === "invalid_session" && retry) {
+      postgresState.token = null;
+      return readAiActivity(sessionId, onEvent, signal, false);
+    }
+    throw new Error(payload.error?.message || "Agent activity is unavailable");
+  }
+  if (!response.body) throw new Error("Agent activity stream is unavailable");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try { onEvent(JSON.parse(line)); } catch { /* Ignore malformed or unknown activity records. */ }
+    }
+    if (done) break;
+  }
 }
 
 async function checkPostgresDrift() {
@@ -3564,6 +3603,26 @@ function saveDatabaseObject() {
 }
 
 const AI_SCHEMA_ACTIONS = new Set(["add_table", "rename_table", "add_column", "update_column", "delete_element", "add_relationship"]);
+const AI_TOOL_LABELS = {
+  schema_read_query: "Preparing read-only SQL",
+  schema_add_table: "Drafting a table",
+  schema_rename_table: "Drafting a table rename",
+  schema_add_column: "Drafting a column",
+  schema_update_column: "Drafting a column change",
+  schema_delete_element: "Reviewing a deletion",
+  schema_add_relationship: "Drafting a relationship",
+  schema_connection_setup: "Preparing connection settings",
+  schema_migration_preview: "Preparing migration preview",
+  schema_migration_apply: "Reviewing migration apply"
+};
+const AI_SKILL_LABELS = {
+  "schema-foundry-help": "Schema Foundry guidance",
+  "connection-setup": "Connection safety",
+  "migration-safety": "Migration safety",
+  "schema-design-layout": "Schema design and layout",
+  "read-only-query-safety": "Read-only query safety",
+  "target-selection": "Target verification"
+};
 
 function aiActionType(action) {
   return String(action?.type ?? action?.action ?? action?.kind ?? "").toLowerCase().replaceAll("-", "_");
@@ -3764,7 +3823,11 @@ function setAiBusy(busy) {
   aiState.busy = busy;
   elements.aiSendButton.disabled = busy || !aiState.available || !elements.aiModelSelect.value;
   elements.aiInput.disabled = busy || !aiState.available || !elements.aiModelSelect.value;
-  elements.aiSendButton.textContent = busy ? "Thinking..." : "Send";
+  elements.aiNewChat.disabled = busy;
+  elements.aiModelSelect.disabled = busy || !elements.aiModelSelect.value;
+  elements.aiAccessSelect.disabled = busy;
+  elements.aiSqlPolicy.disabled = busy;
+  elements.aiSendButton.textContent = busy ? "Working..." : "Send";
 }
 
 function renderAiModels() {
@@ -4014,6 +4077,202 @@ function appendAiMessage(role, text) {
   return message;
 }
 
+function formatAiDuration(milliseconds) {
+  const seconds = Math.max(0, milliseconds) / 1000;
+  return seconds < 10 ? `${seconds.toFixed(1)}s` : `${Math.round(seconds)}s`;
+}
+
+function beginAiActivity(modelName) {
+  elements.aiMessages.querySelector(".ai-empty-state")?.remove();
+  const startedAt = performance.now();
+  const details = document.createElement("details");
+  details.className = "ai-run active";
+  details.open = true;
+  details.setAttribute("role", "status");
+  const summary = document.createElement("summary");
+  const indicator = document.createElement("span");
+  indicator.className = "ai-progress-grid";
+  indicator.setAttribute("aria-hidden", "true");
+  for (let index = 0; index < 25; index += 1) {
+    const dot = document.createElement("i");
+    dot.style.setProperty("--dot-index", index);
+    indicator.append(dot);
+  }
+  const title = document.createElement("span");
+  title.className = "ai-run-title shimmer";
+  title.textContent = "Starting assistant";
+  const elapsed = document.createElement("time");
+  elapsed.className = "ai-run-time";
+  elapsed.textContent = "0.0s";
+  summary.append(indicator, title, elapsed);
+  const steps = document.createElement("div");
+  steps.className = "ai-run-steps";
+  details.append(summary, steps);
+  elements.aiMessages.append(details);
+  elements.aiMessages.scrollTop = elements.aiMessages.scrollHeight;
+
+  const stageElements = new Map();
+  let retryAt = null;
+  let finished = false;
+  const setStage = (key, label, state = "running") => {
+    const safeState = ["running", "completed", "error"].includes(state) ? state : "running";
+    let row = stageElements.get(key);
+    if (!row) {
+      row = document.createElement("div");
+      row.className = "ai-run-step";
+      const marker = document.createElement("span");
+      marker.className = "ai-run-step-marker";
+      marker.setAttribute("aria-hidden", "true");
+      const copy = document.createElement("span");
+      copy.className = "ai-run-step-copy";
+      row.append(marker, copy);
+      steps.append(row);
+      stageElements.set(key, row);
+    }
+    row.className = `ai-run-step ${safeState}`;
+    row.querySelector(".ai-run-step-copy").textContent = label;
+    return row;
+  };
+  setStage("request", `Opening ${modelName || "selected model"}`);
+
+  const tick = () => {
+    elapsed.textContent = formatAiDuration(performance.now() - startedAt);
+    if (retryAt) {
+      const remaining = Math.max(0, Math.ceil((retryAt - Date.now()) / 1000));
+      title.textContent = `Retrying in ${remaining}s`;
+    }
+  };
+  const timer = setInterval(tick, 100);
+
+  return {
+    details,
+    update(event) {
+      if (finished || !event || typeof event !== "object") return;
+      if (event.type === "connection") {
+        if (event.state === "connected") {
+          title.textContent = "Waiting for model";
+          setStage("request", `Connected to ${modelName || "selected model"}`, "completed");
+        } else {
+          title.textContent = "Working without live updates";
+          setStage("stream", "Live activity disconnected", "error");
+        }
+      } else if (event.type === "session" && event.state === "busy") {
+        retryAt = null;
+        title.textContent = "Agent is working";
+        setStage("model", "Model started", "running");
+      } else if (event.type === "session" && event.state === "retry") {
+        retryAt = Number.isFinite(event.retryAt) ? event.retryAt : null;
+        title.textContent = "Retrying provider";
+        setStage("retry", `Provider retry ${Number.isInteger(event.attempt) ? event.attempt : ""}`.trim(), "running");
+      } else if (event.type === "session" && event.state === "error") {
+        title.textContent = "Provider reported an issue";
+        setStage("provider-error", "Provider issue detected", "error");
+      } else if (event.type === "session" && event.state === "idle") {
+        retryAt = null;
+        title.textContent = "Finalizing response";
+        setStage("model", "Model finished", "completed");
+      } else if (event.type === "compaction") {
+        title.textContent = "Compacting context";
+        setStage("compaction", "Context compacted", event.state === "completed" ? "completed" : "running");
+      } else if (event.type === "part" && event.kind === "reasoning") {
+        title.textContent = event.state === "completed" ? "Preparing response" : "Reasoning";
+        setStage(event.key, "Reasoning", event.state);
+      } else if (event.type === "part" && event.kind === "text") {
+        title.textContent = "Writing response";
+        setStage(event.key, "Writing response", event.state);
+      } else if (event.type === "part" && event.kind === "tool" && AI_TOOL_LABELS[event.tool]) {
+        title.textContent = AI_TOOL_LABELS[event.tool];
+        setStage(event.key, AI_TOOL_LABELS[event.tool], event.state);
+      } else if (event.type === "part" && event.kind === "skill" && AI_SKILL_LABELS[event.skill]) {
+        title.textContent = `Loading ${AI_SKILL_LABELS[event.skill]}`;
+        setStage(event.key, AI_SKILL_LABELS[event.skill], event.state);
+      }
+      elements.aiMessages.scrollTop = elements.aiMessages.scrollHeight;
+    },
+    finish(outcome) {
+      if (finished) return;
+      clearInterval(timer);
+      retryAt = null;
+      tick();
+      finished = true;
+      const failed = outcome === "error";
+      details.classList.remove("active");
+      details.classList.add(failed ? "failed" : "completed");
+      title.classList.remove("shimmer");
+      title.textContent = failed ? "Agent stopped" : "Completed";
+      setStage("model", failed ? "Response failed" : "Model finished", failed ? "error" : "completed");
+      if (!failed) setStage("delivered", "Response delivered", "completed");
+      if (!failed) setTimeout(() => { details.open = false; }, 650);
+    }
+  };
+}
+
+function startAiActivityStream(sessionId, activity) {
+  const controller = new AbortController();
+  let resolveReady;
+  let readyResolved = false;
+  const ready = new Promise(resolve => { resolveReady = resolve; });
+  const markReady = () => {
+    if (readyResolved) return;
+    readyResolved = true;
+    resolveReady();
+  };
+  const done = readAiActivity(sessionId, event => {
+    if (event?.type === "connection") markReady();
+    activity.update(event);
+  }, controller.signal).catch(error => {
+    markReady();
+    if (error.name !== "AbortError") activity.update({ type: "connection", state: "disconnected" });
+  }).finally(markReady);
+  return { ready, done, abort: () => controller.abort() };
+}
+
+function renderAiReasoning(part) {
+  if (!part.text) return;
+  const details = document.createElement("details");
+  details.className = "ai-reasoning";
+  const summary = document.createElement("summary");
+  summary.textContent = `Thought${Number.isFinite(part.durationMs) ? ` / ${formatAiDuration(part.durationMs)}` : ""}`;
+  const body = document.createElement("p");
+  body.textContent = part.text;
+  details.append(summary, body);
+  elements.aiMessages.append(details);
+}
+
+function renderAiToolPart(part) {
+  const label = part.type === "skill" ? AI_SKILL_LABELS[part.skill] : AI_TOOL_LABELS[part.tool];
+  if (!label) return;
+  const safeStatus = ["pending", "running", "completed", "error"].includes(part.status) ? part.status : "completed";
+  const card = document.createElement("div");
+  card.className = `ai-tool-part ${safeStatus}`;
+  const marker = document.createElement("span");
+  marker.className = "ai-tool-marker";
+  marker.setAttribute("aria-hidden", "true");
+  const name = document.createElement("strong");
+  name.textContent = label;
+  const status = document.createElement("span");
+  status.textContent = safeStatus;
+  card.append(marker, name, status);
+  elements.aiMessages.append(card);
+}
+
+function renderAiResponse(response, context) {
+  let renderedText = false;
+  for (const part of response.parts ?? []) {
+    if (part?.type === "text" && part.text) {
+      appendAiMessage("assistant", part.text);
+      renderedText = true;
+    } else if (part?.type === "reasoning") {
+      renderAiReasoning(part);
+    } else if (part?.type === "tool" || part?.type === "skill") {
+      renderAiToolPart(part);
+    }
+  }
+  if (!renderedText && response.text) appendAiMessage("assistant", response.text);
+  for (const action of response.actions ?? []) renderAiAction(action, context);
+  elements.aiMessages.scrollTop = elements.aiMessages.scrollHeight;
+}
+
 function aiActionSummary(action) {
   const type = aiActionType(action);
   const payload = aiActionPayload(action);
@@ -4151,6 +4410,8 @@ async function sendAiMessage(text, renderedRole = "user") {
   } catch {
     return showToast("Connect and select an AI model first");
   }
+  const modelName = elements.aiModelSelect.selectedOptions[0]?.textContent || model.modelId || "selected model";
+  const requestGeneration = ++aiState.requestGeneration;
   if (renderedRole === "user") appendAiMessage("user", text);
   const linkedProfileId = schema.postgres?.sourceProfileId;
   const linkedNamespace = schema.postgres?.namespace;
@@ -4162,9 +4423,17 @@ async function sendAiMessage(text, renderedRole = "user") {
     profileId: selectedProfileId || undefined,
     namespace: selectedNamespace || undefined
   };
+  const activity = beginAiActivity(modelName);
+  let activityStream = null;
   setAiBusy(true);
   try {
     const sessionId = await ensureAiSession(model);
+    if (requestGeneration !== aiState.requestGeneration) return;
+    activityStream = startAiActivityStream(sessionId, activity);
+    await Promise.race([
+      activityStream.ready,
+      new Promise(resolve => setTimeout(resolve, 1500))
+    ]);
     const response = await aiRequest(`/api/ai/sessions/${encodeURIComponent(sessionId)}/messages`, {
       method: "POST",
       body: JSON.stringify({
@@ -4173,17 +4442,29 @@ async function sendAiMessage(text, renderedRole = "user") {
         ...(context.profileId && context.namespace ? { namespace: context.namespace } : {})
       })
     });
-    const assistantText = response.text ?? (response.parts ?? []).filter(part => typeof part?.text === "string").map(part => part.text).join("\n");
-    if (assistantText) appendAiMessage("assistant", assistantText);
-    for (const action of response.actions ?? []) renderAiAction(action, context);
+    if (requestGeneration !== aiState.requestGeneration) return;
+    if (activityStream) {
+      await Promise.race([
+        activityStream.done,
+        new Promise(resolve => setTimeout(resolve, 750))
+      ]);
+    }
+    renderAiResponse(response, context);
+    activity.finish("completed");
   } catch (error) {
-    appendAiMessage("assistant", `AI unavailable: ${error.message}`);
+    if (requestGeneration === aiState.requestGeneration) {
+      activity.finish("error");
+      appendAiMessage("assistant", `AI unavailable: ${error.message}`);
+    }
   } finally {
-    setAiBusy(false);
+    activityStream?.abort();
+    if (requestGeneration === aiState.requestGeneration) setAiBusy(false);
   }
 }
 
 async function startNewAiChat() {
+  if (aiState.busy) return showToast("Wait for the current response to finish");
+  aiState.requestGeneration += 1;
   if (aiState.sessionId) {
     try { await aiRequest(`/api/ai/sessions/${encodeURIComponent(aiState.sessionId)}`, { method: "DELETE" }); } catch { /* A stale remote session must not block a local reset. */ }
   }

@@ -60,5 +60,15 @@ assert.match(source, /aiInput\.disabled = busy \|\| !aiState\.available \|\| !el
 assert.match(source, /Connect a provider in settings to start chatting/, "chat must explain how to enable a provider");
 assert.match(source, /anonymousFreeAccess \? "Free access"/, "anonymous free providers must be identified accurately");
 assert.match(source, /help\.rel = "noopener noreferrer"/, "provider key links must not control the local application window");
+assert.match(source, /application\/x-ndjson|readAiActivity/, "chat must consume the local agent activity stream");
+assert.match(source, /new TextDecoder\(\)/, "agent activity must parse bounded streamed records incrementally");
+const activityRenderer = source.slice(source.indexOf("function beginAiActivity"), source.indexOf("function aiActionSummary"));
+assert.match(activityRenderer, /AI_TOOL_LABELS\[event\.tool\]/, "live tool activity must use fixed local labels");
+assert.match(activityRenderer, /AI_SKILL_LABELS\[event\.skill\]/, "live skill activity must use fixed local labels");
+assert.match(activityRenderer, /body\.textContent = part\.text/, "reasoning must render as text rather than HTML");
+assert.doesNotMatch(activityRenderer, /innerHTML|insertAdjacentHTML|eval\(/, "agent visualizations must not interpret model output as code or HTML");
+assert.match(source, /requestGeneration !== aiState\.requestGeneration/, "stale agent responses must not enter a reset conversation");
+assert.match(styles, /@keyframes ai-dot-wave/, "agent progress animation is missing");
+assert.match(styles, /prefers-reduced-motion[\s\S]*\.ai-progress-grid i[\s\S]*animation: none/, "agent animations must respect reduced motion");
 
 console.log("AI chat safety and action validation tests passed");

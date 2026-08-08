@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import time
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
@@ -16,6 +17,7 @@ MAX_PARTS = 100
 MAX_ACTIONS = 20
 MAX_ACTION_SIZE = 32 * 1024
 MAX_TOOL_OUTPUT_SIZE = 256 * 1024
+MAX_ACTIVITY_LINE_SIZE = 256 * 1024
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 ACTION_PREFIX = "SCHEMA_FOUNDRY_ACTION:"
 CUSTOM_TOOLS = {
@@ -393,6 +395,119 @@ class OpenCodeService:
             raise OpenCodeServiceError(502, "opencode_error", "OpenCode returned an invalid session")
         return {"id": result["id"][:128], "title": str(result.get("title", title or ""))[:256]}
 
+    def verify_session(self, session_id: Any) -> str:
+        session_id = _identifier(session_id, "sessionId")
+        result = self._request("GET", f"/session/{quote(session_id, safe='')}")
+        if not isinstance(result, dict) or result.get("id") != session_id:
+            raise OpenCodeServiceError(404, "not_found", "AI session was not found")
+        return session_id
+
+    def activity(self, session_id: Any):
+        session_id = _identifier(session_id, "sessionId")
+        request = self._request_factory(
+            self.base_url + "/event",
+            headers={"Accept": "text/event-stream", "Authorization": self._authorization},
+            method="GET",
+        )
+        try:
+            response = self._opener(request, timeout=self.timeout)
+            with response:
+                data_lines = []
+                saw_busy = False
+                deadline = time.monotonic() + self.timeout + 10
+                while time.monotonic() < deadline:
+                    raw_line = response.readline(MAX_ACTIVITY_LINE_SIZE + 1)
+                    if not raw_line:
+                        break
+                    if len(raw_line) > MAX_ACTIVITY_LINE_SIZE:
+                        raise OpenCodeServiceError(502, "opencode_error", "OpenCode returned an oversized activity event")
+                    line = raw_line.decode("utf-8", "strict").rstrip("\r\n")
+                    if line.startswith("data:"):
+                        data_lines.append(line[5:].lstrip())
+                        continue
+                    if line or not data_lines:
+                        continue
+                    try:
+                        event = json.loads("\n".join(data_lines))
+                    except (json.JSONDecodeError, ValueError):
+                        data_lines = []
+                        continue
+                    data_lines = []
+                    normalized = self._normalize_activity_event(event, session_id)
+                    if normalized is None:
+                        continue
+                    if normalized.get("type") == "part" and not saw_busy:
+                        continue
+                    if normalized.get("type") == "session" and normalized.get("state") == "busy":
+                        saw_busy = True
+                    yield normalized
+                    if saw_busy and normalized.get("type") == "session" and normalized.get("state") == "idle":
+                        return
+        except HTTPError as exc:
+            exc.close()
+            raise OpenCodeServiceError(502, "opencode_error", "OpenCode rejected the activity stream") from exc
+        except (UnicodeDecodeError, URLError, TimeoutError, OSError) as exc:
+            raise OpenCodeServiceError(502, "opencode_unavailable", "OpenCode activity is unavailable") from exc
+
+    @staticmethod
+    def _normalize_activity_event(event: Any, session_id: str) -> dict[str, Any] | None:
+        if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+            return None
+        event_type = event["type"]
+        properties = event.get("properties") if isinstance(event.get("properties"), dict) else {}
+        if event_type == "server.connected":
+            return {"type": "connection", "state": "connected"}
+        if properties.get("sessionID") != session_id:
+            return None
+        if event_type == "session.status":
+            status = properties.get("status") if isinstance(properties.get("status"), dict) else {}
+            state = status.get("type")
+            if state not in {"idle", "busy", "retry"}:
+                return None
+            normalized = {"type": "session", "state": state}
+            if state == "retry":
+                attempt = status.get("attempt")
+                retry_at = status.get("next")
+                if isinstance(attempt, int) and not isinstance(attempt, bool):
+                    normalized["attempt"] = max(0, min(attempt, 100))
+                if isinstance(retry_at, (int, float)) and not isinstance(retry_at, bool):
+                    normalized["retryAt"] = max(0, retry_at)
+            return normalized
+        if event_type == "session.compacted":
+            return {"type": "compaction", "state": "completed"}
+        if event_type == "session.error":
+            return {"type": "session", "state": "error"}
+        if event_type != "message.part.updated":
+            return None
+        part = properties.get("part") if isinstance(properties.get("part"), dict) else {}
+        part_id = part.get("id")
+        if not isinstance(part_id, str) or not SAFE_ID.fullmatch(part_id):
+            return None
+        part_type = part.get("type")
+        if part_type in {"reasoning", "text"}:
+            part_time = part.get("time") if isinstance(part.get("time"), dict) else {}
+            return {
+                "type": "part",
+                "kind": part_type,
+                "key": part_id,
+                "state": "completed" if isinstance(part_time.get("end"), (int, float)) else "running",
+            }
+        if part_type != "tool":
+            return None
+        tool = part.get("tool")
+        state = part.get("state") if isinstance(part.get("state"), dict) else {}
+        tool_state = state.get("status")
+        if tool_state not in {"pending", "running", "completed", "error"}:
+            return None
+        if tool in CUSTOM_TOOLS:
+            return {"type": "part", "kind": "tool", "key": part_id, "tool": tool, "state": tool_state}
+        if tool == "skill":
+            tool_input = state.get("input") if isinstance(state.get("input"), dict) else {}
+            skill_name = tool_input.get("name")
+            if skill_name in SAFE_SKILLS:
+                return {"type": "part", "kind": "skill", "key": part_id, "skill": skill_name, "state": tool_state}
+        return None
+
     def delete_session(self, session_id: Any) -> dict[str, bool]:
         session_id = _identifier(session_id, "sessionId")
         if self._request("DELETE", f"/session/{quote(session_id, safe='')}") is not True:
@@ -446,9 +561,19 @@ class OpenCodeService:
                 remaining = MAX_TEXT_SIZE - text_size
                 value = part["text"].encode("utf-8")[:remaining].decode("utf-8", "ignore")
                 text_size += len(value.encode("utf-8"))
-                parts.append({"type": part["type"], "text": value})
+                safe_part = {"type": part["type"], "text": value}
+                part_time = part.get("time") if isinstance(part.get("time"), dict) else {}
+                if part["type"] == "reasoning" and isinstance(part_time.get("start"), (int, float)) and isinstance(part_time.get("end"), (int, float)):
+                    safe_part["durationMs"] = max(0, min(round(part_time["end"] - part_time["start"]), 60 * 60 * 1000))
+                parts.append(safe_part)
                 if part["type"] == "text":
                     text_items.append(value)
+                continue
+            if part.get("type") == "tool" and part.get("tool") == "skill":
+                state = part.get("state") if isinstance(part.get("state"), dict) else {}
+                tool_input = state.get("input") if isinstance(state.get("input"), dict) else {}
+                if tool_input.get("name") in SAFE_SKILLS:
+                    parts.append({"type": "skill", "skill": tool_input["name"], "status": str(state.get("status", "unknown"))[:32]})
                 continue
             if part.get("type") != "tool" or part.get("tool") not in CUSTOM_TOOLS:
                 continue

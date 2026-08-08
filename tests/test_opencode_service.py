@@ -27,6 +27,17 @@ class Response:
         return self.body[:size]
 
 
+class ActivityResponse(Response):
+    def __init__(self, events):
+        lines = []
+        for event in events:
+            lines.extend(("event: message\n", f"data: {json.dumps(event)}\n", "\n"))
+        self.stream = BytesIO("".join(lines).encode("utf-8"))
+
+    def readline(self, size=-1):
+        return self.stream.readline(size)
+
+
 class Opener:
     def __init__(self, *payloads):
         self.payloads = list(payloads)
@@ -37,6 +48,8 @@ class Opener:
         payload = self.payloads.pop(0)
         if isinstance(payload, Exception):
             raise payload
+        if isinstance(payload, Response):
+            return payload
         return Response(payload)
 
 
@@ -129,6 +142,8 @@ class OpenCodeServiceTests(unittest.TestCase):
         valid = {"kind": "add_table", "table": {"name": "events"}}
         opener = Opener({"info": {"path": {"cwd": "/secret"}}, "parts": [
             {"type": "text", "text": "I propose a table."},
+            {"type": "reasoning", "text": "Checked constraints.", "time": {"start": 1000, "end": 1350}},
+            {"type": "tool", "tool": "skill", "state": {"status": "completed", "input": {"name": "schema-design-layout"}, "output": "/secret/skill/path"}},
             {"type": "tool", "tool": "schema_add_table", "state": {"status": "completed", "output": "SCHEMA_FOUNDRY_ACTION:" + json.dumps(valid)}},
             {"type": "tool", "tool": "schema_add_table", "state": {"status": "completed", "output": " SCHEMA_FOUNDRY_ACTION:{}"}},
             {"type": "tool", "tool": "bash", "state": {"status": "completed", "output": "SCHEMA_FOUNDRY_ACTION:{}"}},
@@ -146,8 +161,11 @@ class OpenCodeServiceTests(unittest.TestCase):
         self.assertTrue(all(payload["tools"][tool] is False for tool in ("bash", "read", "write", "edit", "webfetch", "task")))
         self.assertEqual(result["text"], "I propose a table.")
         self.assertEqual(result["actions"], [valid])
-        self.assertEqual(len(result["parts"]), 3)
+        self.assertEqual(len(result["parts"]), 5)
+        self.assertEqual(result["parts"][1], {"type": "reasoning", "text": "Checked constraints.", "durationMs": 350})
+        self.assertEqual(result["parts"][2], {"type": "skill", "skill": "schema-design-layout", "status": "completed"})
         self.assertNotIn("cwd", json.dumps(result))
+        self.assertNotIn("/secret", json.dumps(result))
 
     def test_disabled_invalid_ids_and_upstream_failures_are_sanitized(self):
         self.assertEqual(OpenCodeService("", "opencode", "").status()["enabled"], False)
@@ -184,6 +202,31 @@ class OpenCodeServiceTests(unittest.TestCase):
             service.prompt("ses_1", "Hello", {"providerID": "opencode", "modelID": "north-mini-code-free"}, "Fixed system")
 
         self.assertEqual(error.exception.code, "provider_empty_response")
+
+    def test_activity_stream_filters_session_and_sensitive_fields(self):
+        events = [
+            {"type": "server.connected", "properties": {}},
+            {"type": "session.status", "properties": {"sessionID": "other", "status": {"type": "busy"}}},
+            {"type": "session.status", "properties": {"sessionID": "ses_1", "status": {"type": "busy"}}},
+            {"type": "message.part.updated", "properties": {"sessionID": "ses_1", "part": {"id": "prt_reason", "type": "reasoning", "text": "private reasoning", "time": {"start": 1}}}},
+            {"type": "message.part.updated", "properties": {"sessionID": "ses_1", "part": {"id": "prt_tool", "type": "tool", "tool": "schema_add_table", "state": {"status": "running", "input": {"name": "secret"}, "metadata": {"path": "/secret"}}}}},
+            {"type": "message.part.updated", "properties": {"sessionID": "ses_1", "part": {"id": "prt_shell", "type": "tool", "tool": "bash", "state": {"status": "running", "input": {"command": "cat /secret"}}}}},
+            {"type": "message.part.updated", "properties": {"sessionID": "ses_1", "part": {"id": "prt_skill", "type": "tool", "tool": "skill", "state": {"status": "completed", "input": {"name": "migration-safety"}, "output": "/secret/skill"}}}},
+            {"type": "session.status", "properties": {"sessionID": "ses_1", "status": {"type": "idle"}}},
+        ]
+        opener = Opener(ActivityResponse(events))
+
+        result = list(self.service(opener).activity("ses_1"))
+
+        self.assertEqual(result, [
+            {"type": "connection", "state": "connected"},
+            {"type": "session", "state": "busy"},
+            {"type": "part", "kind": "reasoning", "key": "prt_reason", "state": "running"},
+            {"type": "part", "kind": "tool", "key": "prt_tool", "tool": "schema_add_table", "state": "running"},
+            {"type": "part", "kind": "skill", "key": "prt_skill", "skill": "migration-safety", "state": "completed"},
+            {"type": "session", "state": "idle"},
+        ])
+        self.assertNotIn("secret", json.dumps(result).lower())
 
 
 if __name__ == "__main__":

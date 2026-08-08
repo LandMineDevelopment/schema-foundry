@@ -86,6 +86,8 @@ The launcher generates the internal OpenCode password. Direct Compose operation 
 
 Read `docs/AI_ASSISTANT.md` before changing the embedded agent. Keep OpenCode pinned, private, Basic-authenticated, and restricted to the packaged read-only workspace, explicit tools, and six allowlisted skills. Never expose raw OpenCode file, shell, PTY, auth, config, plugin, MCP, or permission endpoints through Schema Foundry.
 
+Live chat activity uses the narrowly scoped `GET /api/ai/sessions/{sessionId}/activity` NDJSON route. The backend verifies the local session, subscribes to OpenCode's private event stream, filters the exact session ID, and emits only normalized status, reasoning-state, allowlisted skill/tool-state, compaction, and connection records. Do not widen this into a raw event proxy.
+
 Provider credentials must flow browser -> local Schema Foundry API -> private OpenCode. Never return credentials, put them in browser storage, print them, commit them, or mount host OpenCode credentials automatically. Every write proposal requires browser confirmation; SQL data access follows the user's current disclosure and SQL-policy settings.
 
 ## Data Safety

@@ -106,6 +106,17 @@ class FakeAIService:
         self.calls.append(("prompt", session_id, text, model, system, allow_data))
         return {"text": "Proposed.", "parts": [{"type": "text", "text": "Proposed."}], "actions": []}
 
+    def verify_session(self, session_id):
+        self.calls.append(("verify_session", session_id))
+        return session_id
+
+    def activity(self, session_id):
+        self.calls.append(("activity", session_id))
+        yield {"type": "connection", "state": "connected"}
+        yield {"type": "session", "state": "busy"}
+        yield {"type": "part", "kind": "tool", "key": "prt_1", "tool": "schema_add_table", "state": "running"}
+        yield {"type": "session", "state": "idle"}
+
 
 class QuietHandlerMixin:
     def log_message(self, format, *args):
@@ -271,6 +282,23 @@ class ServerTests(unittest.TestCase):
         self.assertIn(("oauth_callback", "anthropic", 1, "code"), self.ai_service.calls)
         self.assertIn(("delete_api_key", "anthropic"), self.ai_service.calls)
         self.assertIn(("delete_session", "ses_1"), self.ai_service.calls)
+
+    def test_ai_activity_stream_requires_session_and_returns_only_normalized_events(self):
+        path = "/api/ai/sessions/ses_1/activity"
+        self.assertEqual(self.request(path)[0], 403)
+
+        status, body, headers = self.request(path, authorized=True)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get_content_type(), "application/x-ndjson")
+        self.assertEqual([json.loads(line) for line in body.decode().splitlines()], [
+            {"type": "connection", "state": "connected"},
+            {"type": "session", "state": "busy"},
+            {"type": "part", "kind": "tool", "key": "prt_1", "tool": "schema_add_table", "state": "running"},
+            {"type": "session", "state": "idle"},
+        ])
+        self.assertIn(("verify_session", "ses_1"), self.ai_service.calls)
+        self.assertIn(("activity", "ses_1"), self.ai_service.calls)
 
     def test_ai_message_loads_schema_and_sends_bounded_redacted_context(self):
         self.service.profiles = [{

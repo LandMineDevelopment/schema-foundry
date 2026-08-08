@@ -72,6 +72,14 @@ Data access has a separate SQL policy:
 
 Query results are bounded before being sent back to the model. PostgreSQL runs these queries in a read-only transaction, but a `SELECT` can invoke database functions with external side effects. Use a narrowly privileged role and review every generated statement.
 
+## Live Agent Activity
+
+While a response is running, the chat shows an animated activity timeline modeled after OpenCode's session UI. It can show provider connection, elapsed time, reasoning activity, retry countdowns, context compaction, allowlisted skill loading, and `schema_*` tool lifecycle states. Completed responses retain a collapsed run summary, collapsed reasoning, and compact tool cards.
+
+The browser never connects to OpenCode directly. Schema Foundry subscribes to the private sidecar's session events, filters every event to the exact chat session, and emits a bounded same-origin NDJSON stream. The stream does not forward prompt or response text, reasoning text, tool inputs or outputs, SQL, action payloads, paths, attachments, metadata, provider response bodies, or events from another session. Final response content still arrives through the existing bounded message route and uses text-only rendering.
+
+Animations respect the operating system's reduced-motion preference. Starting a new chat is disabled while a response is active, and late responses are rejected by a local request-generation guard.
+
 ## Explicit Tools And Skills
 
 The embedded agent can load only these packaged skills:
@@ -118,7 +126,7 @@ Never remove these volumes unless credential and chat deletion is intentional. D
 
 ## Limitations
 
-- Chat uses a bounded synchronous request. Slow providers may take up to `SCHEMA_FOUNDRY_OPENCODE_TIMEOUT`, which defaults to 45 seconds, followed by an upstream session-abort attempt of at most five seconds.
+- Final chat content uses a bounded synchronous request alongside a session-scoped live activity stream. Slow providers may take up to `SCHEMA_FOUNDRY_OPENCODE_TIMEOUT`, which defaults to 45 seconds, followed by an upstream session-abort attempt of at most five seconds.
 - OpenCode provider APIs evolve quickly. The image is pinned so UI and proxy behavior do not change unexpectedly.
 - OAuth callback behavior is provider-specific. Complete the displayed instructions and provide a callback code only when requested.
 - Provider catalogs may list models that still require authentication or are temporarily unavailable. Schema Foundry filters anonymous free models known not to respond with the pinned OpenCode version and reports empty responses as errors.
