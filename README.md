@@ -4,6 +4,38 @@ Schema Foundry is a standalone, local browser application for designing PostgreS
 
 Schema Foundry has no Tagg, workflow, backlog, or coordinator behavior. It is a generic PostgreSQL schema design and migration tool.
 
+## Try It In One Command
+
+The default trial starts only Schema Foundry. It does not install, start, or contact PostgreSQL. Docker is the only prerequisite, and saved schemas persist across restarts.
+
+Linux or macOS:
+
+```bash
+git clone https://github.com/LandMineDevelopment/schema-foundry.git
+cd schema-foundry
+./start.sh
+```
+
+Windows PowerShell with Docker Desktop running in Linux container mode:
+
+```powershell
+git clone https://github.com/LandMineDevelopment/schema-foundry.git
+Set-Location schema-foundry
+powershell -ExecutionPolicy Bypass -File .\start.ps1
+```
+
+The launcher builds the image, starts the UI, and opens `http://127.0.0.1:8080/`. Edit the built-in sample, use the disk button to save it, and use the folder button to reopen saved designs. No account, database profile, `.env`, Node.js, or local Python installation is needed.
+
+Without Git, download and extract the GitHub source ZIP, open a terminal in the extracted directory, and run the platform launcher above.
+
+AI-assisted setup instructions are in [`docs/AI_AGENT_SETUP.md`](docs/AI_AGENT_SETUP.md). Give that file and `agent_guide.md` to an AI agent before asking it to operate the project or migrate saved data.
+
+| Goal | Linux or macOS | Windows PowerShell |
+| --- | --- | --- |
+| Try the UI without PostgreSQL | `./start.sh` | `powershell -ExecutionPolicy Bypass -File .\start.ps1` |
+| Connect to Linux host PostgreSQL | `./start.sh local-db` | Not applicable; use UI mode and `host.docker.internal` |
+| Start UI with included PostgreSQL | `./start.sh docker-db` | `powershell -ExecutionPolicy Bypass -File .\start.ps1 -Mode docker-db` |
+
 ## Screenshots
 
 ### Schema Canvas
@@ -19,6 +51,8 @@ Schema Foundry has no Tagg, workflow, backlog, or coordinator behavior. It is a 
 This is the simplest way to use Schema Foundry. It starts only the UI and its local API. PostgreSQL is not installed, started, or contacted, and no database profile is required. You can design schemas, save and reopen multiple designs, import SQL files, and export JSON or SQL.
 
 Install Docker Desktop on Windows or macOS, or Docker Engine with the Compose plugin on Linux. On Windows, use Docker Desktop's Linux container mode.
+
+Use the launcher shown above, or run Compose directly:
 
 ```bash
 git clone https://github.com/LandMineDevelopment/schema-foundry.git
@@ -51,8 +85,10 @@ On PowerShell, set `$env:SCHEMA_FOUNDRY_HOST_PORT = "8081"` before running `dock
 Use the optional Compose file to start Schema Foundry with a private PostgreSQL 17 container. The database port is not published to the host or LAN; only Schema Foundry can reach it on the Compose network.
 
 ```bash
-docker compose -f compose.yaml -f compose.postgres.yaml up --build -d
+./start.sh docker-db
 ```
+
+On Windows, run `powershell -ExecutionPolicy Bypass -File .\start.ps1 -Mode docker-db`. The equivalent direct Compose command is `docker compose -f compose.yaml -f compose.postgres.yaml up --build -d`.
 
 Open `http://127.0.0.1:8080/`, select the database icon labeled **PostgreSQL sync**, choose **+ Connection**, and enter:
 
@@ -105,27 +141,52 @@ If `.env` changes the database or user, substitute those values in the command.
 
 Open Schema Foundry, choose **PostgreSQL**, create a profile, and enter the database host, port, database name, user, password, SSL mode, and connection timeout. Use **Test connection** before selecting a namespace or introspecting.
 
-Choose the host according to where PostgreSQL runs:
+Choose the launch mode and profile host according to where PostgreSQL runs:
 
-| PostgreSQL location | Profile host |
-| --- | --- |
-| Another machine or managed service | Its DNS name or IP address |
-| Docker Desktop host on macOS or Windows | `host.docker.internal` |
-| Docker host on Linux | `host.docker.internal`; Compose maps this to the host gateway |
-| Another container on the same Docker network | The PostgreSQL Compose service or container name |
-| Native Schema Foundry and native PostgreSQL | Usually `127.0.0.1` |
+| PostgreSQL location | Compose files | Profile host |
+| --- | --- | --- |
+| Linux host, including a server bound only to host loopback | `compose.yaml` + `compose.local-db.yaml` | `127.0.0.1` or `localhost` |
+| Windows or macOS Docker Desktop host | `compose.yaml` | `host.docker.internal` |
+| Supplied PostgreSQL container | `compose.yaml` + `compose.postgres.yaml` | `postgres` |
+| Existing container on the same Docker network | `compose.yaml` | Its service name or network alias |
+| Another machine or managed service | `compose.yaml` | Its DNS name or IP address |
+| Native Schema Foundry and native PostgreSQL | Not applicable | Usually `127.0.0.1` |
 
-For a database on the Linux Docker host, PostgreSQL must listen on an address reachable from the Docker bridge and `pg_hba.conf` must permit the relevant bridge subnet. Do not expose PostgreSQL broadly just to make this work. For another container, attach both services to the same user-defined Docker network rather than publishing the database publicly.
+### Linux Host PostgreSQL
 
-To connect an existing PostgreSQL container, either attach it to the default network shown by `docker network ls` for this Compose project and use its container or network-alias name as the profile host, or publish its PostgreSQL port only on host loopback and use `host.docker.internal` as the profile host. The optional `compose.postgres.yaml` file is the ready-made same-network example and avoids manual network setup.
+Linux containers cannot normally reach a PostgreSQL server listening only on host `127.0.0.1`. The Linux-only override gives Schema Foundry the host network namespace while keeping the UI bound to host loopback:
+
+```bash
+./start.sh local-db
+```
+
+The equivalent direct Compose command is `docker compose -f compose.yaml -f compose.local-db.yaml up --build -d`.
+
+Use `127.0.0.1` or `localhost` in the profile. This mode also reaches a PostgreSQL Docker container whose port is published on host loopback. Stop it with:
+
+```bash
+docker compose -f compose.yaml -f compose.local-db.yaml down
+```
+
+The same named config and schema volumes are used in every launch mode, so switching modes does not discard saved designs or profiles.
+
+### Windows And macOS Host PostgreSQL
+
+Start the normal UI stack with `docker compose up --build -d` and use `host.docker.internal` in the profile. Docker Desktop resolves that name to the host. Ensure PostgreSQL accepts the connection and the operating-system firewall permits Docker Desktop.
+
+### Docker PostgreSQL
+
+For the supplied private PostgreSQL container, start `compose.yaml` with `compose.postgres.yaml` as shown in **Quick Start: UI And PostgreSQL**, then use `postgres` in the profile. For an existing PostgreSQL container, attach both containers to the same user-defined network and use the database container's service name or network alias.
+
+Do not expose PostgreSQL broadly just to make container networking work. Prefer the host-network override for Linux loopback, Docker Desktop's host alias, or a private user-defined Docker network.
 
 Use `sslmode=verify-full` with trusted certificates for remote production databases when possible. Use a narrowly privileged PostgreSQL role: inspection needs catalog and target-schema access, while migration apply additionally needs only the DDL privileges required by the reviewed plan.
 
 ### Connection Troubleshooting
 
-- Do not use `127.0.0.1` for a database in another container. Inside Schema Foundry, that address means the Schema Foundry container itself. Use `postgres`, another same-network service name, or `host.docker.internal` as described above.
+- In normal bridge mode, do not use `127.0.0.1` for another container or the host. Use `postgres`, another same-network service name, or `host.docker.internal`. In Linux host-network mode, `127.0.0.1` intentionally refers to the Linux host.
 - If **Save & test** reports connection refused, confirm the PostgreSQL container is healthy with `docker compose -f compose.yaml -f compose.postgres.yaml ps`.
-- If a host PostgreSQL server is unreachable from Docker on Linux, verify `listen_addresses`, `pg_hba.conf`, the host firewall, and that the database accepts the Docker bridge source address.
+- If a host PostgreSQL server is unreachable from Docker on Linux, use `compose.local-db.yaml` and confirm PostgreSQL is listening on host loopback. If using bridge networking instead, verify `listen_addresses`, `pg_hba.conf`, the host firewall, and the Docker bridge source address.
 - On Windows, confirm Docker Desktop is running in Linux container mode and that `docker compose version` succeeds in PowerShell or Command Prompt.
 - If port `8080` is already in use, set `SCHEMA_FOUNDRY_HOST_PORT` to another host port as shown in the UI-only quick start.
 

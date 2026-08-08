@@ -4,6 +4,8 @@
 
 This repository is a standalone PostgreSQL schema design, introspection, migration-preview, and migration-apply application. Keep changes focused on generic PostgreSQL behavior, saved schema records, browser layout, tests, and project documentation.
 
+For installation, launch modes, Docker networking, persistent-volume safety, and setup verification, follow `docs/AI_AGENT_SETUP.md`.
+
 ## Sources Of Truth
 
 Use this order when behavior differs:

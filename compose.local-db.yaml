@@ -1,0 +1,8 @@
+# Linux-only override for PostgreSQL bound to host loopback.
+services:
+  schema-foundry:
+    network_mode: host
+    ports: !reset []
+    environment:
+      SCHEMA_FOUNDRY_HOST: 127.0.0.1
+      SCHEMA_FOUNDRY_BEHIND_LOOPBACK_PROXY: 0

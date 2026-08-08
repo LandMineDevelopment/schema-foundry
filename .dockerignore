@@ -15,6 +15,11 @@ examples
 schemas
 .schema-foundry
 *.log
-.env
-.env.*
-!.env.example
+.env*
+.github
+docs
+start.sh
+start.ps1
+compose*.yaml
+agent_guide.md
+opencode.json
