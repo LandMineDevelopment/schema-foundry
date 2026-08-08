@@ -18,7 +18,7 @@ Windows PowerShell:
 powershell -ExecutionPolicy Bypass -File .\start.ps1 -Mode ui
 ```
 
-The expected URL is `http://127.0.0.1:8080/`. Verify `GET /` and `GET /api/session` return HTTP 200. Verify `docker compose ps` shows only `schemii` in UI-only mode.
+The expected URL is `http://127.0.0.1:8080/`. Verify `GET /` and `GET /api/session` return HTTP 200. The session response includes a secret token and a non-secret per-process `serverId`; never print or persist the token. Verify `docker compose ps` shows only `schemii` in UI-only mode.
 
 ## Prerequisite Checks
 
@@ -102,6 +102,8 @@ Schemii stores Docker data in these named volumes:
 
 Never run `docker compose down --volumes`, `docker volume rm`, or any equivalent destructive command without explicit user approval. Normal `docker compose down` and mode switches retain named volumes.
 
+The browser's **Shut down Schemii** control sends an authenticated local `POST /api/shutdown` after flushing pending design saves. It stops only the Schemii process; use the exact Compose file set with `docker compose down` when PostgreSQL or OpenCode sidecars must also stop. Do not call the shutdown endpoint while introspection, SQL, AI, preview, or migration apply work is active.
+
 Do not print profile passwords, commit `.env`, or copy runtime schema records into the repository. API profile responses must remain redacted.
 
 Before migrating or rewriting saved schema JSON, follow `.opencode/skills/preserve-schemii-layout/SKILL.md`. Stop the server, back up files, snapshot parsed layout, perform the minimal write, compare layout equality, and only then restart.
@@ -118,15 +120,13 @@ docker compose -f compose.yaml -f compose.postgres.yaml ps
 
 ## Startup Verification
 
-Check the selected stack and local routes:
+The launchers wait for the Schemii container health check. Confirm the selected stack reports `healthy` using Docker only:
 
 ```bash
 docker compose ps
-curl --fail --output /dev/null http://127.0.0.1:8080/
-curl --fail --output /dev/null http://127.0.0.1:8080/api/session
 ```
 
-For local-db mode, include both Compose files in lifecycle commands. For docker-db mode, include `compose.postgres.yaml`. Confirm the UI is bound only to loopback.
+Then open the local URL and verify the application loads. HTTP command-line checks are optional and must not be treated as a host prerequisite. For local-db mode, include both Compose files in lifecycle commands. For docker-db mode, include `compose.postgres.yaml`. Confirm the UI is bound only to loopback.
 
 ## Troubleshooting Order
 

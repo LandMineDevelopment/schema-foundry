@@ -16,8 +16,6 @@ services:
     volumes:
       - schemii-config:/data/config
       - schemii-schemas:/data/schemas
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777
@@ -25,7 +23,13 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/', timeout=2).read(1)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s
+    restart: on-failure
 
 volumes:
   schemii-config:

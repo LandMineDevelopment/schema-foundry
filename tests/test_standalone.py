@@ -86,6 +86,28 @@ class StandaloneRuntimeTests(unittest.TestCase):
         self.assertIn("Invoke-WebRequest -Uri $url -TimeoutSec 1", powershell)
         self.assertIn("-not $NoOpen -and -not $wasReady", powershell)
 
+    def test_compose_allows_a_clean_browser_shutdown_to_remain_stopped(self):
+        compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
+
+        self.assertIn("restart: on-failure", compose)
+        self.assertNotIn("restart: unless-stopped", compose)
+
+    def test_container_runtime_is_cross_platform_and_self_checking(self):
+        compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
+        shell = (ROOT / "start.sh").read_text(encoding="utf-8")
+        powershell = (ROOT / "start.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("healthcheck:", compose)
+        self.assertIn("urllib.request.urlopen", compose)
+        self.assertNotIn("host-gateway", compose)
+        self.assertIn(".State.Health.Status", shell)
+        self.assertIn(".State.Health.Status", powershell)
+        self.assertIn("docker run --rm python:3.12-slim", shell)
+        self.assertIn("docker run --rm python:3.12-slim", powershell)
+        self.assertNotIn("od -An", shell)
+        self.assertNotIn("RandomNumberGenerator]::Fill", powershell)
+        self.assertNotIn("[Convert]::ToHexString", powershell)
+
     def test_ai_navigation_tools_accept_only_logical_ids_and_public_labels(self):
         tools = "\n".join(path.read_text(encoding="utf-8") for path in sorted((ROOT / "ai" / "workspace" / ".opencode" / "tools").glob("schema_*_open.ts")))
         create_tool = (ROOT / "ai" / "workspace" / ".opencode" / "tools" / "schema_project_create.ts").read_text(encoding="utf-8")

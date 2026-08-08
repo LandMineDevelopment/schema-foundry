@@ -61,11 +61,29 @@ if [[ "${SCHEMII_NO_OPEN:-0}" != "1" ]] && command -v curl >/dev/null 2>&1; then
 fi
 
 if [[ "$mode" == ai* && -z "${SCHEMII_OPENCODE_PASSWORD:-}" ]]; then
-  SCHEMII_OPENCODE_PASSWORD="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+  SCHEMII_OPENCODE_PASSWORD="$(docker run --rm python:3.12-slim python -c 'import secrets; print(secrets.token_hex(32))')"
   export SCHEMII_OPENCODE_PASSWORD
 fi
 
 "${compose[@]}" up --build -d --remove-orphans
+container_id="$("${compose[@]}" ps -q schemii)"
+if [[ -z "$container_id" ]]; then
+  printf 'Schemii did not start. Review the Docker Compose output above.\n' >&2
+  exit 1
+fi
+for _ in {1..60}; do
+  health="$(docker inspect --format '{{.State.Health.Status}}' "$container_id" 2>/dev/null || true)"
+  [[ "$health" == "healthy" ]] && break
+  if [[ "$health" == "unhealthy" ]]; then
+    printf 'Schemii failed its container health check. Run docker compose logs schemii for details.\n' >&2
+    exit 1
+  fi
+  sleep 1
+done
+if [[ "${health:-}" != "healthy" ]]; then
+  printf 'Schemii did not become ready within 60 seconds. Run docker compose logs schemii for details.\n' >&2
+  exit 1
+fi
 printf '\nSchemii is ready at %s\n' "$url"
 printf 'Mode: %s\n' "$mode"
 printf 'Saved data remains in Docker named volumes.\n'

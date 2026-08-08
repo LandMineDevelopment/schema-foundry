@@ -6,7 +6,7 @@ Schemii has no Tagg, workflow, backlog, or coordinator behavior. It is a generic
 
 ## Try It In One Command
 
-The default trial starts only Schemii. It does not install, start, or contact PostgreSQL. Docker is the only prerequisite, and saved schemas persist across restarts.
+The default trial starts only Schemii. It does not install, start, or contact PostgreSQL. Docker Desktop, or Docker Engine with the Compose plugin, is the only runtime prerequisite on every supported operating system. Python, Node.js, PostgreSQL tools, and Git are not required to run Schemii. Download and extract the [source archive](https://github.com/LandMineDevelopment/schemii/archive/refs/heads/main.zip), or optionally use Git, then run the platform launcher.
 
 Linux or macOS:
 
@@ -24,9 +24,9 @@ Set-Location schemii
 powershell -ExecutionPolicy Bypass -File .\start.ps1
 ```
 
-The launcher builds the image, starts the UI, and opens `http://127.0.0.1:8080/` when Schemii was not already running there. Rebuilds of a running instance do not open duplicate tabs. Set `SCHEMII_NO_OPEN=1` on Linux or macOS, or pass `-NoOpen` in PowerShell, to always suppress automatic browser opening. Edit the built-in sample, use the disk button to save it, and use the folder button to reopen saved designs. No account, database profile, `.env`, Node.js, or local Python installation is needed.
+The launcher builds the image, waits for its container health check, starts the UI, and opens `http://127.0.0.1:8080/` when Schemii was not already running there. Rebuilds of a running instance do not open duplicate tabs. Set `SCHEMII_NO_OPEN=1` on Linux or macOS, or pass `-NoOpen` in PowerShell, to always suppress automatic browser opening. Edit the built-in sample, use the disk button to save it, and use the folder button to reopen saved designs. No account, database profile, `.env`, Node.js, or local Python installation is needed.
 
-Without Git, download and extract the GitHub source ZIP, open a terminal in the extracted directory, and run the platform launcher above.
+Git is only a download and update convenience. The extracted source archive contains the complete Docker build context and Compose configuration.
 
 AI-assisted setup instructions are in [`docs/AI_AGENT_SETUP.md`](docs/AI_AGENT_SETUP.md). Give that file and `agent_guide.md` to an AI agent before asking it to operate the project or migrate saved data.
 
@@ -78,9 +78,9 @@ cd schemii
 docker compose up --build -d
 ```
 
-Open `http://127.0.0.1:8080/`. The built-in sample design is immediately editable. Use the disk button in the top toolbar to save, the folder button to reopen a saved design, and the plus button to create another design. Saved designs remain in the `schemii-schemas` Docker volume across container restarts and upgrades.
+Open `http://127.0.0.1:8080/`. A four-step introduction appears once for each new Schemii server run, not again on browser refresh; select **Do not show on future server starts** to disable it. The **?** menu can reopen the guide at any time. The built-in sample design is immediately editable. Use the disk button in the top toolbar to save, the folder button to reopen a saved design, and the plus button to create another design. Saved designs remain in the `schemii-schemas` Docker volume across container restarts and upgrades.
 
-View startup output with `docker compose logs -f schemii` and stop the application with `docker compose down`. Starting it again with `docker compose up -d` restores saved designs. Do not run `docker compose down --volumes` unless you intend to delete them.
+View startup output with `docker compose logs -f schemii`. Use **? > Shut down Schemii** to save pending design edits and stop the Schemii application container, or use `docker compose down` to stop the complete stack, including optional PostgreSQL and AI sidecars. Starting it again with `docker compose up -d` restores saved designs. Do not run `docker compose down --volumes` unless you intend to delete them.
 
 The Compose configuration:
 
@@ -202,15 +202,17 @@ Use `sslmode=verify-full` with trusted certificates for remote production databa
 
 ### Connection Troubleshooting
 
-- In normal bridge mode, do not use `127.0.0.1` for another container or the host. Use `postgres`, another same-network service name, or `host.docker.internal`. In Linux host-network mode, `127.0.0.1` intentionally refers to the Linux host.
+- In normal bridge mode, do not use `127.0.0.1` for another container or the host. Use `postgres` or another same-network service name; Docker Desktop users can use `host.docker.internal`. In Linux host-network mode, `127.0.0.1` intentionally refers to the Linux host.
 - If **Save & test** reports connection refused, confirm the PostgreSQL container is healthy with `docker compose -f compose.yaml -f compose.postgres.yaml ps`.
 - If a host PostgreSQL server is unreachable from Docker on Linux, use `compose.local-db.yaml` and confirm PostgreSQL is listening on host loopback. If using bridge networking instead, verify `listen_addresses`, `pg_hba.conf`, the host firewall, and the Docker bridge source address.
 - On Windows, confirm Docker Desktop is running in Linux container mode and that `docker compose version` succeeds in PowerShell or Command Prompt.
 - If port `8080` is already in use, set `SCHEMII_HOST_PORT` to another host port as shown in the UI-only quick start.
 
-## Windows Native Launch
+## Optional Developer Native Launch
 
-Docker Desktop is recommended on Windows because it provides the same environment as Linux and macOS. Native Windows use requires Python 3.10 or newer.
+End users should use the containerized launchers above. Native execution is an optional development path and is not needed to operate Schemii. It requires Python 3.10 or newer and does not provide the same isolated, cross-platform runtime as Docker.
+
+### Windows
 
 PowerShell:
 
@@ -236,7 +238,7 @@ schemii
 
 Open `http://127.0.0.1:8080/`. Native Windows schema files default to `%USERPROFILE%\.local\share\schemii\schemas`; profiles and migration history default to `%USERPROFILE%\.config\schemii`.
 
-## Linux And macOS Native Launch
+### Linux And macOS
 
 Native use requires Python 3.10 or newer. PostgreSQL is optional until a database operation is requested.
 
@@ -247,7 +249,7 @@ python3 -m pip install -e .
 schemii
 ```
 
-Open `http://127.0.0.1:8080/` and stop the process with `Ctrl-C`.
+Open `http://127.0.0.1:8080/` and stop the process with **? > Shut down Schemii** or `Ctrl-C`.
 
 For source-tree development without installation:
 
@@ -278,7 +280,7 @@ The default schema data directory is therefore `~/.local/share/schemii/schemas`.
 SCHEMII_SCHEMA_DIR=/absolute/path/to/schemas schemii
 ```
 
-The PostgreSQL API is designed for local browser use and requires both a local origin and the per-process session token. Keep the default loopback host unless you have separately provided an appropriate secure access boundary. `SCHEMII_BEHIND_LOOPBACK_PROXY=1` relaxes only the source-IP check needed after Docker port forwarding; it still requires a localhost host and origin. Do not enable it unless the forwarding port is bound exclusively to host loopback as it is in `compose.yaml`.
+The PostgreSQL, AI, and shutdown APIs are designed for local browser use and require both a local origin and the per-process session token. Keep the default loopback host unless you have separately provided an appropriate secure access boundary. `SCHEMII_BEHIND_LOOPBACK_PROXY=1` relaxes only the source-IP check needed after Docker port forwarding; it still requires a localhost host and origin. Do not enable it unless the forwarding port is bound exclusively to host loopback as it is in `compose.yaml`.
 
 ## Standalone Runtime
 
@@ -297,7 +299,7 @@ git pull
 docker compose up --build -d
 ```
 
-`docker compose down` removes the container and network but retains both named volumes. `docker compose down --volumes` permanently removes saved schemas, profiles, passwords, and migration history; do not use it unless that deletion is intentional.
+An in-browser shutdown cleanly stops only the Schemii process. Optional PostgreSQL and OpenCode sidecars continue until the Compose stack is stopped. `docker compose down` removes the containers and network but retains named volumes. `docker compose down --volumes` permanently removes saved schemas, profiles, passwords, and migration history; do not use it unless that deletion is intentional.
 
 Back up both volumes before upgrades or migration work. One portable approach is to stop the service and archive each volume with a temporary container:
 
@@ -308,11 +310,12 @@ docker run --rm -v schemii_schemii-schemas:/source:ro -v "$PWD":/backup alpine t
 docker compose start schemii
 ```
 
-The volume prefix normally comes from the project directory name. Confirm actual names with `docker volume ls` before backup or restore. On PowerShell, replace `"$PWD"` with an absolute host path accepted by Docker Desktop.
+The supplied Compose configuration fixes the default project and volume prefix to `schemii`. Confirm actual names with `docker volume ls` if you override the Compose project name. On PowerShell, replace `"$PWD"` with an absolute host path accepted by Docker Desktop.
 
 ## API Summary
 
-- `GET /api/session`: obtain the current local session token used by PostgreSQL API requests.
+- `GET /api/session`: obtain the current local session token and non-secret server-start identifier.
+- `POST /api/shutdown`: browser shutdown endpoint; requires a local origin and `X-Schemii-Token`, acknowledges with HTTP 202, then stops Schemii.
 - `GET /api/schemas`: list saved schema records.
 - `PUT /api/schemas/{schemaId}`: create or update a schema record with revision and layout-conflict checks.
 - `DELETE /api/schemas/{schemaId}`: delete a saved schema record.
@@ -327,7 +330,7 @@ The volume prefix normally comes from the project directory name. Confirm actual
 - `POST /api/postgres/profiles/{profileId}/plans/{planId}/apply`: apply a still-current plan transactionally.
 - `GET /api/postgres/history`: list local migration history.
 
-PostgreSQL endpoints require the token returned by `/api/session` in the `X-Schemii-Token` header. Schema saves use revision checks and the layout protocol headers managed by the browser application.
+PostgreSQL and shutdown endpoints require the token returned by `/api/session` in the `X-Schemii-Token` header. Schema saves use revision checks and the layout protocol headers managed by the browser application. Do not request shutdown while database, SQL, migration, or AI work is active; the browser control prevents this and flushes pending design saves first.
 
 ## Profiles And Passwords
 
@@ -354,7 +357,7 @@ Treat saved canvas layout as user-owned data. Before scripts or tools rewrite sc
 
 ## Tests
 
-Development checks require Python 3.10 or newer and Node.js. Node.js is not needed in the application container or for native runtime use.
+Development checks in a source checkout use Python 3.10 or newer and Node.js. These are contributor tools only; neither is needed to build or operate the Docker application.
 
 ```bash
 python3 -m unittest discover -s tests

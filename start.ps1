@@ -39,11 +39,13 @@ switch ($Mode) {
     }
 }
 if ($Mode.StartsWith("ai") -and -not $env:SCHEMII_OPENCODE_PASSWORD) {
-    $secret = [byte[]]::new(32)
-    [System.Security.Cryptography.RandomNumberGenerator]::Fill($secret)
-    $env:SCHEMII_OPENCODE_PASSWORD = [Convert]::ToHexString($secret).ToLowerInvariant()
+    $env:SCHEMII_OPENCODE_PASSWORD = (& docker run --rm python:3.12-slim python -c "import secrets; print(secrets.token_hex(32))").Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $env:SCHEMII_OPENCODE_PASSWORD) {
+        throw "Schemii could not generate its internal AI credential with Docker."
+    }
 }
-$composeArgs += @("up", "--build", "-d", "--remove-orphans")
+$composeFiles = $composeArgs
+$upArgs = $composeArgs + @("up", "--build", "-d", "--remove-orphans")
 
 $port = if ($env:SCHEMII_HOST_PORT) { $env:SCHEMII_HOST_PORT } else { "8080" }
 $url = "http://127.0.0.1:$port/"
@@ -58,9 +60,27 @@ if (-not $NoOpen) {
     }
 }
 
-& docker @composeArgs
+& docker @upArgs
 if ($LASTEXITCODE -ne 0) {
     throw "Schemii could not be started. Review the Docker output above."
+}
+$containerId = (& docker @composeFiles ps -q schemii | Select-Object -First 1)
+if (-not $containerId) {
+    throw "Schemii did not start. Review the Docker Compose output above."
+}
+$health = ""
+for ($attempt = 0; $attempt -lt 60; $attempt++) {
+    $health = (& docker inspect --format "{{.State.Health.Status}}" $containerId 2>$null)
+    if ($health -eq "healthy") {
+        break
+    }
+    if ($health -eq "unhealthy") {
+        throw "Schemii failed its container health check. Run docker compose logs schemii for details."
+    }
+    Start-Sleep -Seconds 1
+}
+if ($health -ne "healthy") {
+    throw "Schemii did not become ready within 60 seconds. Run docker compose logs schemii for details."
 }
 
 Write-Host ""

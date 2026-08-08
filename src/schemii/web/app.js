@@ -4,6 +4,8 @@ const MAX_ZOOM = 1.7;
 const SAVE_DELAY_MS = 180;
 const LAYOUT_SAVE_DELAY_MS = 750;
 const WHEEL_ZOOM_IDLE_MS = 140;
+const ONBOARDING_DISABLED_KEY = "schemii.onboarding.disabled.v1";
+const ONBOARDING_SERVER_KEY = "schemii.onboarding.server.v1";
 
 function clampZoom(value, maximum = MAX_ZOOM) {
   return Math.min(maximum, Math.max(MIN_ZOOM, value));
@@ -184,7 +186,19 @@ const elements = {
   aiSettingsStatus: document.querySelector("#ai-settings-status"),
   aiProviders: document.querySelector("#ai-providers"),
   aiHistoryDialog: document.querySelector("#ai-history-dialog"),
-  aiHistoryList: document.querySelector("#ai-history-list")
+  aiHistoryList: document.querySelector("#ai-history-list"),
+  onboardingDialog: document.querySelector("#onboarding-dialog"),
+  onboardingStepLabel: document.querySelector("#onboarding-step-label"),
+  onboardingProgress: document.querySelector("#onboarding-progress"),
+  onboardingDontShow: document.querySelector("#onboarding-dont-show"),
+  onboardingBack: document.querySelector("#onboarding-back"),
+  onboardingNext: document.querySelector("#onboarding-next"),
+  onboardingSkip: document.querySelector("#onboarding-skip"),
+  shutdownDialog: document.querySelector("#shutdown-dialog"),
+  shutdownConfirmPanel: document.querySelector("#shutdown-confirm-panel"),
+  shutdownComplete: document.querySelector("#shutdown-complete"),
+  shutdownWarning: document.querySelector("#shutdown-warning"),
+  confirmShutdown: document.querySelector("#confirm-shutdown")
 };
 
 let schemaLibrary = { activeId: null, schemas: [] };
@@ -213,6 +227,9 @@ let saveTimer = null;
 let saveQueue = Promise.resolve();
 let wheelZoomTimer = null;
 let toastTimer = null;
+let onboardingPage = 0;
+let onboardingSeenServerId = null;
+let serverStopped = false;
 let activeTooltipTarget = null;
 let tooltipHideTimer = null;
 let undoStack = [];
@@ -285,6 +302,106 @@ let aiState = {
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+function onboardingStorageValue(key) {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+
+function onboardingDisabled() {
+  return onboardingStorageValue(ONBOARDING_DISABLED_KEY) === "1";
+}
+
+function shouldShowOnboarding(serverId) {
+  if (!serverId || onboardingDisabled()) return false;
+  if (onboardingSeenServerId === serverId || onboardingStorageValue(ONBOARDING_SERVER_KEY) === serverId) return false;
+  onboardingSeenServerId = serverId;
+  try { localStorage.setItem(ONBOARDING_SERVER_KEY, serverId); } catch { /* In-memory state still prevents repeats on this page. */ }
+  return true;
+}
+
+function rememberOnboardingPreference() {
+  try {
+    if (elements.onboardingDontShow.checked) localStorage.setItem(ONBOARDING_DISABLED_KEY, "1");
+    else localStorage.removeItem(ONBOARDING_DISABLED_KEY);
+  } catch { /* Onboarding remains usable when browser storage is unavailable. */ }
+}
+
+function renderOnboardingPage() {
+  const pages = [...elements.onboardingDialog.querySelectorAll("[data-onboarding-page]")];
+  onboardingPage = Math.max(0, Math.min(pages.length - 1, onboardingPage));
+  pages.forEach((page, index) => { page.hidden = index !== onboardingPage; });
+  elements.onboardingStepLabel.textContent = `${onboardingPage + 1} of ${pages.length}`;
+  elements.onboardingProgress.innerHTML = pages.map((_, index) => `<i class="${index === onboardingPage ? "active" : ""}"></i>`).join("");
+  elements.onboardingBack.disabled = onboardingPage === 0;
+  elements.onboardingNext.querySelector("span").textContent = onboardingPage === pages.length - 1 ? "Finish" : "Next";
+}
+
+function openOnboarding() {
+  onboardingPage = 0;
+  elements.onboardingDontShow.checked = onboardingDisabled();
+  renderOnboardingPage();
+  if (!elements.onboardingDialog.open) elements.onboardingDialog.showModal();
+}
+
+function closeOnboarding() {
+  rememberOnboardingPreference();
+  elements.onboardingDialog.close();
+}
+
+async function initializeOnboarding() {
+  try {
+    const response = await fetch("/api/session");
+    const session = await response.json().catch(() => ({}));
+    if (!response.ok || !session.token) return;
+    postgresState.token = session.token;
+    if (shouldShowOnboarding(session.serverId)) openOnboarding();
+  } catch { /* Startup remains usable if the local session endpoint is unavailable. */ }
+}
+
+function activeShutdownOperation() {
+  if (postgresState.busy) return "A PostgreSQL operation is still running. Wait for it to finish before shutting down.";
+  if (aiState.busy) return "The AI assistant is still working. Wait for it to finish before shutting down.";
+  if (tableDataState.loading || sqlConsoleState.loading) return "A data request is still running. Wait for it to finish before shutting down.";
+  return "";
+}
+
+function openShutdownDialog() {
+  const warning = activeShutdownOperation();
+  elements.shutdownWarning.hidden = !warning;
+  elements.shutdownWarning.textContent = warning;
+  elements.confirmShutdown.disabled = Boolean(warning);
+  elements.shutdownConfirmPanel.hidden = false;
+  elements.shutdownComplete.hidden = true;
+  if (!elements.shutdownDialog.open) elements.shutdownDialog.showModal();
+}
+
+async function shutdownSchemii() {
+  const warning = activeShutdownOperation();
+  if (warning) return openShutdownDialog();
+  elements.confirmShutdown.disabled = true;
+  elements.confirmShutdown.textContent = "Saving...";
+  elements.shutdownWarning.hidden = true;
+  try {
+    await flushPendingSave();
+    if (!postgresState.token) {
+      const sessionResponse = await fetch("/api/session");
+      const session = await sessionResponse.json().catch(() => ({}));
+      if (!sessionResponse.ok || !session.token) throw new Error("Could not authorize shutdown");
+      postgresState.token = session.token;
+    }
+    const response = await fetch("/api/shutdown", { method: "POST", headers: { "X-Schemii-Token": postgresState.token } });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || !payload.shuttingDown) throw new Error(payload.error?.message || "Schemii could not be shut down");
+    serverStopped = true;
+    elements.shutdownConfirmPanel.hidden = true;
+    elements.shutdownComplete.hidden = false;
+  } catch (error) {
+    elements.shutdownWarning.textContent = error.message;
+    elements.shutdownWarning.hidden = false;
+    elements.confirmShutdown.disabled = false;
+    elements.confirmShutdown.textContent = "Shut down";
+  }
 }
 
 function schemaForStorage(schemaValue, viewState = null) {
@@ -5577,6 +5694,7 @@ elements.projectName.addEventListener("input", event => {
 elements.projectName.addEventListener("blur", endHistoryGroup);
 
 const exportMenu = document.querySelector("#export-menu");
+const appMenu = document.querySelector("#app-menu");
 document.querySelector("#export-json-button").addEventListener("click", () => {
   exportMenu.removeAttribute("open");
   exportFile(`${schema.projectName || "schema"}.json`, JSON.stringify(schema, null, 2), "application/json");
@@ -5589,6 +5707,7 @@ document.querySelector("#export-sql-button").addEventListener("click", () => {
 });
 document.addEventListener("pointerdown", event => {
   if (exportMenu.open && !event.target.closest("#export-menu")) exportMenu.removeAttribute("open");
+  if (appMenu.open && !event.target.closest("#app-menu")) appMenu.removeAttribute("open");
   if (!event.target.closest("#object-icon-menu")) closeObjectIconMenu();
 });
 elements.objectIconMenu.addEventListener("click", event => {
@@ -5604,6 +5723,29 @@ elements.sqlFileInput.addEventListener("change", () => {
 });
 document.querySelector("#save-schema-button").addEventListener("click", () => saveSchemaNow(true));
 document.querySelector("#new-design-button").addEventListener("click", createNewSchema);
+document.querySelector("#show-onboarding-button").addEventListener("click", () => {
+  appMenu.removeAttribute("open");
+  openOnboarding();
+});
+document.querySelector("#shutdown-button").addEventListener("click", () => {
+  appMenu.removeAttribute("open");
+  openShutdownDialog();
+});
+elements.onboardingBack.addEventListener("click", () => {
+  onboardingPage -= 1;
+  renderOnboardingPage();
+});
+elements.onboardingNext.addEventListener("click", () => {
+  const pageCount = elements.onboardingDialog.querySelectorAll("[data-onboarding-page]").length;
+  if (onboardingPage >= pageCount - 1) return closeOnboarding();
+  onboardingPage += 1;
+  renderOnboardingPage();
+});
+elements.onboardingSkip.addEventListener("click", closeOnboarding);
+elements.onboardingDialog.addEventListener("close", rememberOnboardingPreference);
+document.querySelector("#cancel-shutdown").addEventListener("click", () => elements.shutdownDialog.close());
+elements.confirmShutdown.addEventListener("click", shutdownSchemii);
+elements.shutdownDialog.addEventListener("cancel", event => { if (serverStopped) event.preventDefault(); });
 document.querySelector("#open-schema-button").addEventListener("click", async () => {
   try {
     await flushPendingSave();
@@ -5911,5 +6053,8 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) chec
 setInterval(checkPostgresDrift, 15000);
 
 initializeSchemaLibrary().finally(() => {
-  requestAnimationFrame(() => requestAnimationFrame(() => document.body.classList.remove("app-hydrating")));
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    document.body.classList.remove("app-hydrating");
+    initializeOnboarding();
+  }));
 });

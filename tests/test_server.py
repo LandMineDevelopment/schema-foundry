@@ -139,6 +139,7 @@ class ServerTests(unittest.TestCase):
         self.store = SchemaStore(Path(self.temporary_directory.name) / "schemas")
         handler = make_handler(
             ROOT / "src" / "schemii" / "web", self.service, self.store, "session-token",
+            server_id="server-start-id",
             ai_service=self.ai_service,
         )
         quiet_handler = type("QuietSchemiiHandler", (QuietHandlerMixin, handler), {})
@@ -153,13 +154,15 @@ class ServerTests(unittest.TestCase):
         self.thread.join()
         self.temporary_directory.cleanup()
 
-    def request(self, path, method="GET", payload=None, content_type="application/json", authorized=False):
+    def request(self, path, method="GET", payload=None, content_type="application/json", authorized=False, headers=None):
         data = json.dumps(payload).encode() if payload is not None else None
         request = Request(f"{self.base_url}{path}", data=data, method=method)
         if data is not None:
             request.add_header("Content-Type", content_type)
         if authorized:
             request.add_header("X-Schemii-Token", "session-token")
+        for name, value in (headers or {}).items():
+            request.add_header(name, value)
         try:
             with urlopen(request) as response:
                 return response.status, response.read(), response.headers
@@ -179,7 +182,27 @@ class ServerTests(unittest.TestCase):
 
         status, body, _ = self.request("/api/session")
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body), {"token": "session-token"})
+        self.assertEqual(json.loads(body), {"token": "session-token", "serverId": "server-start-id"})
+
+    def test_shutdown_requires_local_session_and_stops_server_after_response(self):
+        status, body, _ = self.request("/api/shutdown", "POST")
+        self.assertEqual(status, 403)
+        self.assertEqual(json.loads(body)["error"]["code"], "invalid_session")
+        self.assertTrue(self.thread.is_alive())
+
+        status, body, _ = self.request(
+            "/api/shutdown", "POST", authorized=True,
+            headers={"Origin": "https://example.com"},
+        )
+        self.assertEqual(status, 403)
+        self.assertEqual(json.loads(body)["error"]["code"], "forbidden")
+        self.assertTrue(self.thread.is_alive())
+
+        status, body, _ = self.request("/api/shutdown", "POST", authorized=True)
+        self.assertEqual(status, 202)
+        self.assertEqual(json.loads(body), {"shuttingDown": True})
+        self.thread.join(timeout=2)
+        self.assertFalse(self.thread.is_alive())
 
     def test_loopback_proxy_mode_still_requires_a_local_host_and_origin(self):
         self.assertFalse(_is_local_request("172.17.0.1", "localhost:8080", None, False))

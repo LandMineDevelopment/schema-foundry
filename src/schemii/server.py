@@ -4,6 +4,7 @@ import json
 import os
 import re
 import secrets
+import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
@@ -272,6 +273,7 @@ def make_handler(
     store: SchemaStore,
     session_token: str,
     *,
+    server_id: str,
     ai_service: OpenCodeService | None = None,
     behind_loopback_proxy: bool = False,
 ):
@@ -315,6 +317,15 @@ def make_handler(
                 return False
             if self.headers.get("X-Schemii-Token") != session_token:
                 self.send_json(403, {"error": {"code": "invalid_session", "message": "AI session token is missing or invalid"}})
+                return False
+            return True
+
+        def _authorize_shutdown(self) -> bool:
+            if not self._is_local_request():
+                self.send_json(403, {"error": {"code": "forbidden", "message": "Shutdown requires a local origin"}})
+                return False
+            if self.headers.get("X-Schemii-Token") != session_token:
+                self.send_json(403, {"error": {"code": "invalid_session", "message": "Shutdown session token is missing or invalid"}})
                 return False
             return True
 
@@ -379,7 +390,7 @@ def make_handler(
             if path == "/api/session":
                 if not self._is_local_request():
                     return self.send_json(403, {"error": {"code": "forbidden", "message": "Session requires a local origin"}})
-                return self.send_json(200, {"token": session_token})
+                return self.send_json(200, {"token": session_token, "serverId": server_id})
             if path == "/api/schemas":
                 return self._schema_call(lambda: {"schemas": store.list()})
             if path == "/api/ai/status":
@@ -476,6 +487,14 @@ def make_handler(
 
         def do_POST(self):
             path = urlparse(self.path).path
+            if path == "/api/shutdown":
+                if not self._authorize_shutdown():
+                    return
+                shutdown_thread = threading.Thread(target=self.server.shutdown, name="schemii-shutdown", daemon=True)
+                self.send_json(202, {"shuttingDown": True})
+                self.wfile.flush()
+                shutdown_thread.start()
+                return
             if path.startswith("/api/ai/"):
                 if not self._authorize_ai():
                     return
@@ -646,6 +665,7 @@ def main() -> None:
         service,
         store,
         secrets.token_urlsafe(32),
+        server_id=secrets.token_urlsafe(18),
         ai_service=ai_service,
         behind_loopback_proxy=proxy_setting == "1",
     )

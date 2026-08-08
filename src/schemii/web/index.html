@@ -50,6 +50,15 @@
               <button id="export-sql-button" type="button">Download SQL</button>
             </div>
           </details>
+          <details class="export-menu app-menu" id="app-menu">
+            <summary class="button button-ghost top-action-icon" data-tooltip="Help and app controls" data-tooltip-placement="bottom" aria-label="Help and app controls">
+              <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7"/><path d="M7.8 7.5A2.3 2.3 0 0 1 10 6c1.4 0 2.4.8 2.4 2 0 1.7-2.4 1.8-2.4 3.5M10 14.5h.01"/></svg>
+            </summary>
+            <div class="export-menu-options app-menu-options">
+              <button id="show-onboarding-button" type="button">Show introduction</button>
+              <button class="menu-danger" id="shutdown-button" type="button">Shut down Schemii</button>
+            </div>
+          </details>
         </div>
       </header>
 
@@ -211,6 +220,87 @@
         </aside>
       </main>
     </div>
+
+    <dialog id="onboarding-dialog" class="onboarding-dialog" aria-labelledby="onboarding-title">
+      <div class="onboarding-panel">
+        <header class="onboarding-head">
+          <div>
+            <span class="eyebrow">Quick start</span>
+            <h2 id="onboarding-title">Welcome to Schemii</h2>
+          </div>
+          <span id="onboarding-step-label" aria-live="polite">1 of 4</span>
+        </header>
+        <div class="onboarding-pages">
+          <section class="onboarding-page" data-onboarding-page="0">
+            <div class="onboarding-screenshot canvas-tour-shot" role="img" aria-label="Schemii canvas with connected PostgreSQL tables">
+              <div class="tour-shot-bar"><i></i><span>product_workspace</span><b>Saved</b></div>
+              <div class="tour-shot-rail"><i></i><i></i><i></i><i></i></div>
+              <div class="tour-table tour-users"><strong>users</strong><span><b>PK</b> id <em>uuid</em></span><span>email <em>varchar</em></span></div>
+              <div class="tour-table tour-projects"><strong>projects</strong><span><b>PK</b> id <em>uuid</em></span><span><b>FK</b> owner_id <em>uuid</em></span></div>
+              <svg class="tour-relationship" viewBox="0 0 100 40" aria-hidden="true"><path d="M2 30 C35 30 60 10 98 10"/></svg>
+            </div>
+            <div class="onboarding-copy">
+              <span class="onboarding-number">01</span>
+              <div><h3>Design on the canvas</h3><p>Tables are cards, columns are rows, and connecting lines are foreign keys. Drag tables to arrange them, use the mouse wheel to zoom, and select a card to edit it.</p></div>
+            </div>
+          </section>
+          <section class="onboarding-page" data-onboarding-page="1" hidden>
+            <div class="onboarding-screenshot inspector-tour-shot" role="img" aria-label="Table inspector editing columns and constraints">
+              <div class="tour-table tour-focused"><strong>orders</strong><span><b>PK</b> id <em>uuid</em></span><span>status <em>text</em></span><span>created_at <em>timestamp</em></span></div>
+              <div class="tour-inspector"><small>TABLE INSPECTOR</small><strong>orders</strong><label>Name <i>orders</i></label><label>Columns <i>+ Add column</i></label><span>id <em>PRIMARY KEY</em></span><span>status <em>NOT NULL</em></span></div>
+            </div>
+            <div class="onboarding-copy">
+              <span class="onboarding-number">02</span>
+              <div><h3>Build with database rules</h3><p>Use the inspector to add columns, primary and unique keys, checks, indexes, and triggers. The folder opens saved designs; the disk saves immediately. Normal edits also save automatically.</p></div>
+            </div>
+          </section>
+          <section class="onboarding-page" data-onboarding-page="2" hidden>
+            <div class="onboarding-screenshot postgres-tour-shot" role="img" aria-label="PostgreSQL connection and reviewed migration preview">
+              <div class="tour-db-card"><small>LIVE DATABASE</small><strong>PostgreSQL</strong><span class="tour-connection"><i></i> Development <b>CONNECTED</b></span><label>Namespace <em>public</em></label><div><button type="button" tabindex="-1">Import</button><button type="button" tabindex="-1">Preview migration</button></div></div>
+              <div class="tour-safety"><i>✓</i><span><strong>Review before apply</strong>Inspect SQL, warnings, locks, and destructive steps.</span></div>
+            </div>
+            <div class="onboarding-copy">
+              <span class="onboarding-number">03</span>
+              <div><h3>PostgreSQL stays authoritative</h3><p>Connect to an exact database and namespace, import its live structure, then preview differences. Schemii never applies a migration until you review the SQL and confirm it.</p></div>
+            </div>
+          </section>
+          <section class="onboarding-page" data-onboarding-page="3" hidden>
+            <div class="onboarding-screenshot assistant-tour-shot" role="img" aria-label="AI schema assistant proposing a reviewed change">
+              <div class="tour-chat"><small>SCHEMII COPILOT</small><strong>Schema assistant</strong><p>“Create a small library schema.”</p><div><i>PROPOSAL</i><span>Populate the active schema</span><button type="button" tabindex="-1">Review</button></div></div>
+              <div class="tour-help-card"><span>?</span><strong>Help &amp; controls</strong><small>Reopen this guide or shut down Schemii safely.</small></div>
+            </div>
+            <div class="onboarding-copy">
+              <span class="onboarding-number">04</span>
+              <div><h3>Ask, review, stay in control</h3><p>The optional assistant can explain or propose schema changes, but every action waits for your confirmation. Use the <strong>?</strong> menu anytime to reopen this guide or shut down the app.</p></div>
+            </div>
+          </section>
+        </div>
+        <footer class="onboarding-footer">
+          <label class="onboarding-opt-out"><input id="onboarding-dont-show" type="checkbox" /> Do not show on future server starts</label>
+          <div class="onboarding-progress" id="onboarding-progress" aria-label="Introduction progress"></div>
+          <div class="onboarding-actions">
+            <button class="button button-ghost" id="onboarding-skip" type="button">Skip</button>
+            <button class="button button-ghost onboarding-arrow" id="onboarding-back" type="button" aria-label="Previous introduction page" disabled><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m12.5 5-5 5 5 5"/></svg></button>
+            <button class="button button-primary onboarding-next" id="onboarding-next" type="button"><span>Next</span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7.5 5 5 5-5 5"/></svg></button>
+          </div>
+        </footer>
+      </div>
+    </dialog>
+
+    <dialog id="shutdown-dialog" class="shutdown-dialog" aria-labelledby="shutdown-title">
+      <div class="shutdown-panel" id="shutdown-confirm-panel">
+        <div class="shutdown-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v8M7 6.5a8 8 0 1 0 10 0"/></svg></div>
+        <div><span class="eyebrow">Application control</span><h2 id="shutdown-title">Shut down Schemii?</h2><p>Pending design edits will be saved first. The Schemii server will stop, but saved designs and Docker volumes remain intact.</p></div>
+        <div class="shutdown-warning" id="shutdown-warning" hidden></div>
+        <div class="dialog-actions">
+          <button class="button button-ghost" id="cancel-shutdown" type="button">Cancel</button>
+          <button class="button button-danger" id="confirm-shutdown" type="button">Shut down</button>
+        </div>
+      </div>
+      <div class="shutdown-complete" id="shutdown-complete" hidden>
+        <span class="shutdown-complete-mark">✓</span><h2>Schemii has shut down</h2><p>Your work is saved. You can close this tab and use the launcher to start Schemii again.</p>
+      </div>
+    </dialog>
 
     <dialog id="table-dialog">
       <form method="dialog" id="table-form">
