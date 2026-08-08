@@ -72,6 +72,22 @@ On Windows or macOS, start UI mode and use profile host `host.docker.internal`. 
 
 Prefer a shared user-defined network and use the PostgreSQL service name or network alias. Do not expose PostgreSQL to the LAN merely to make the connection work.
 
+## Optional Embedded AI Modes
+
+AI is opt-in and must never be added to a user's default UI-only launch without their request.
+
+```bash
+./start.sh ai
+./start.sh ai-local-db
+./start.sh ai-docker-db
+```
+
+The launcher generates the internal OpenCode password. Direct Compose operation must set `SCHEMA_FOUNDRY_OPENCODE_PASSWORD` and include `compose.ai.yaml`; Linux host-database AI also includes `compose.ai.local-db.yaml`.
+
+Read `docs/AI_ASSISTANT.md` before changing the embedded agent. Keep OpenCode pinned, private, Basic-authenticated, and restricted to the packaged read-only workspace, explicit tools, and six allowlisted skills. Never expose raw OpenCode file, shell, PTY, auth, config, plugin, MCP, or permission endpoints through Schema Foundry.
+
+Provider credentials must flow browser -> local Schema Foundry API -> private OpenCode. Never return credentials, put them in browser storage, print them, commit them, or mount host OpenCode credentials automatically. Every write proposal requires browser confirmation; SQL data access follows the user's current disclosure and SQL-policy settings.
+
 ## Data Safety
 
 Schema Foundry stores Docker data in these named volumes:

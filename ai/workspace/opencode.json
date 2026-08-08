@@ -1,0 +1,63 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": [
+    "AGENTS.md"
+  ],
+  "share": "disabled",
+  "autoupdate": false,
+  "snapshot": false,
+  "formatter": false,
+  "lsp": false,
+  "mcp": {},
+  "agent": {
+    "plan": {
+      "disable": true
+    },
+    "general": {
+      "disable": true
+    },
+    "explore": {
+      "disable": true
+    }
+  },
+  "permission": {
+    "*": "deny",
+    "bash": "deny",
+    "shell": "deny",
+    "read": "deny",
+    "edit": "deny",
+    "write": "deny",
+    "apply_patch": "deny",
+    "glob": "deny",
+    "grep": "deny",
+    "list": "deny",
+    "external_directory": "deny",
+    "webfetch": "deny",
+    "websearch": "deny",
+    "task": "deny",
+    "mcp": "deny",
+    "todowrite": "deny",
+    "question": "deny",
+    "lsp": "deny",
+    "doom_loop": "deny",
+    "skill": {
+      "*": "deny",
+      "schema-foundry-help": "allow",
+      "connection-setup": "allow",
+      "migration-safety": "allow",
+      "schema-design-layout": "allow",
+      "read-only-query-safety": "allow",
+      "target-selection": "allow"
+    },
+    "schema_read_query": "allow",
+    "schema_add_table": "allow",
+    "schema_rename_table": "allow",
+    "schema_add_column": "allow",
+    "schema_update_column": "allow",
+    "schema_delete_element": "allow",
+    "schema_add_relationship": "allow",
+    "schema_connection_setup": "allow",
+    "schema_migration_preview": "allow",
+    "schema_migration_apply": "allow"
+  }
+}

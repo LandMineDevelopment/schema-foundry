@@ -1,0 +1,17 @@
+import { tool } from "/opt/opencode/node_modules/@opencode-ai/plugin/dist/index.js"
+
+export default tool({
+  description: "Propose adding a PostgreSQL column to a saved-schema table; does not execute the change.",
+  args: {
+    profileId: tool.schema.string().min(1).max(128).optional(),
+    namespace: tool.schema.string().min(1).max(63).optional(),
+    tableId: tool.schema.string().min(1).max(128),
+    name: tool.schema.string().trim().min(1).max(63),
+    type: tool.schema.string().trim().min(1).max(128),
+    nullable: tool.schema.boolean(),
+    default: tool.schema.string().trim().max(1000).optional(),
+  },
+  async execute(args) {
+    return "SCHEMA_FOUNDRY_ACTION:" + JSON.stringify({ type: "add_column", ...args, requiresConfirmation: true })
+  },
+})

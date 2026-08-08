@@ -32,11 +32,30 @@ case "$mode" in
   docker-db)
     compose=(docker compose -f compose.yaml -f compose.postgres.yaml)
     ;;
+  ai)
+    compose=(docker compose -f compose.yaml -f compose.ai.yaml)
+    ;;
+  ai-local-db)
+    if [[ "$(uname -s)" != "Linux" ]]; then
+      printf 'ai-local-db mode is Linux-only. Use ai mode with host.docker.internal on Docker Desktop.\n' >&2
+      exit 1
+    fi
+    compose=(docker compose -f compose.yaml -f compose.local-db.yaml -f compose.ai.yaml -f compose.ai.local-db.yaml)
+    port=8080
+    ;;
+  ai-docker-db)
+    compose=(docker compose -f compose.yaml -f compose.postgres.yaml -f compose.ai.yaml)
+    ;;
   *)
-    printf 'Usage: ./start.sh [ui|local-db|docker-db]\n' >&2
+    printf 'Usage: ./start.sh [ui|local-db|docker-db|ai|ai-local-db|ai-docker-db]\n' >&2
     exit 2
     ;;
 esac
+
+if [[ "$mode" == ai* && -z "${SCHEMA_FOUNDRY_OPENCODE_PASSWORD:-}" ]]; then
+  SCHEMA_FOUNDRY_OPENCODE_PASSWORD="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+  export SCHEMA_FOUNDRY_OPENCODE_PASSWORD
+fi
 
 "${compose[@]}" up --build -d --remove-orphans
 url="http://127.0.0.1:${port}/"

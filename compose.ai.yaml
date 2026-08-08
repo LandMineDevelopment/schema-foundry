@@ -1,0 +1,39 @@
+services:
+  schema-foundry:
+    environment:
+      SCHEMA_FOUNDRY_OPENCODE_URL: http://opencode:4096
+      SCHEMA_FOUNDRY_OPENCODE_USERNAME: ${SCHEMA_FOUNDRY_OPENCODE_USERNAME:-opencode}
+      SCHEMA_FOUNDRY_OPENCODE_PASSWORD: ${SCHEMA_FOUNDRY_OPENCODE_PASSWORD:?Set SCHEMA_FOUNDRY_OPENCODE_PASSWORD or use an AI launcher mode}
+      SCHEMA_FOUNDRY_OPENCODE_TIMEOUT: ${SCHEMA_FOUNDRY_OPENCODE_TIMEOUT:-45}
+    depends_on:
+      opencode:
+        condition: service_started
+
+  opencode:
+    build:
+      context: ./ai
+    image: schema-foundry-opencode:1.18.15-local
+    working_dir: /workspace
+    command: serve --hostname 0.0.0.0 --port 4096
+    environment:
+      OPENCODE_SERVER_USERNAME: ${SCHEMA_FOUNDRY_OPENCODE_USERNAME:-opencode}
+      OPENCODE_SERVER_PASSWORD: ${SCHEMA_FOUNDRY_OPENCODE_PASSWORD:?Set SCHEMA_FOUNDRY_OPENCODE_PASSWORD or use an AI launcher mode}
+      XDG_DATA_HOME: /opencode/data
+      XDG_CONFIG_HOME: /opencode/config
+      XDG_STATE_HOME: /opencode/state
+      XDG_CACHE_HOME: /opencode/cache
+      OPENCODE_DISABLE_EXTERNAL_SKILLS: 1
+      OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: 1
+    volumes:
+      - ./ai/workspace:/workspace:ro
+      - schema-foundry-opencode-data:/opencode/data
+      - schema-foundry-opencode-config:/opencode/config
+      - schema-foundry-opencode-state:/opencode/state
+      - schema-foundry-opencode-cache:/opencode/cache
+    restart: unless-stopped
+
+volumes:
+  schema-foundry-opencode-data:
+  schema-foundry-opencode-config:
+  schema-foundry-opencode-state:
+  schema-foundry-opencode-cache:

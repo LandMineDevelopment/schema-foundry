@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("ui", "docker-db")]
+    [ValidateSet("ui", "docker-db", "ai", "ai-local-db", "ai-docker-db")]
     [string]$Mode = "ui",
     [switch]$NoOpen
 )
@@ -20,9 +20,28 @@ if ($LASTEXITCODE -ne 0) {
     throw "Docker Compose is unavailable. Update Docker Desktop and try again."
 }
 
-$composeArgs = @("compose")
-if ($Mode -eq "docker-db") {
-    $composeArgs += @("-f", "compose.yaml", "-f", "compose.postgres.yaml")
+$composeArgs = @("compose", "-f", "compose.yaml")
+switch ($Mode) {
+    "docker-db" {
+        $composeArgs += @("-f", "compose.postgres.yaml")
+    }
+    "ai" {
+        $composeArgs += @("-f", "compose.ai.yaml")
+    }
+    "ai-local-db" {
+        if (-not $IsLinux) {
+            throw "ai-local-db mode is Linux-only. Use ai mode with host.docker.internal on Docker Desktop."
+        }
+        $composeArgs += @("-f", "compose.local-db.yaml", "-f", "compose.ai.yaml", "-f", "compose.ai.local-db.yaml")
+    }
+    "ai-docker-db" {
+        $composeArgs += @("-f", "compose.postgres.yaml", "-f", "compose.ai.yaml")
+    }
+}
+if ($Mode.StartsWith("ai") -and -not $env:SCHEMA_FOUNDRY_OPENCODE_PASSWORD) {
+    $secret = [byte[]]::new(32)
+    [System.Security.Cryptography.RandomNumberGenerator]::Fill($secret)
+    $env:SCHEMA_FOUNDRY_OPENCODE_PASSWORD = [Convert]::ToHexString($secret).ToLowerInvariant()
 }
 $composeArgs += @("up", "--build", "-d", "--remove-orphans")
 

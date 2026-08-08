@@ -51,10 +51,20 @@ jobs:
   docker:
     name: Docker
     runs-on: ubuntu-latest
+    env:
+      SCHEMA_FOUNDRY_OPENCODE_PASSWORD: ci-only-opencode-password
     steps:
       - uses: actions/checkout@v4
       - run: bash -n start.sh
       - run: docker compose config
       - run: docker compose -f compose.yaml -f compose.local-db.yaml config
       - run: docker compose -f compose.yaml -f compose.postgres.yaml config
+      - run: docker compose -f compose.yaml -f compose.ai.yaml config
+      - run: docker compose -f compose.yaml -f compose.local-db.yaml -f compose.ai.yaml -f compose.ai.local-db.yaml config
+      - run: docker compose -f compose.yaml -f compose.postgres.yaml -f compose.ai.yaml config
+      - name: Validate embedded OpenCode JSON
+        run: python -m json.tool ai/workspace/opencode.json > /dev/null
+      - run: docker compose -f compose.yaml -f compose.ai.yaml build opencode
+      - name: Validate embedded OpenCode config, skills, and tools
+        run: docker run --rm -v "$PWD/ai/workspace:/workspace:ro" -w /workspace schema-foundry-opencode:1.18.15-local debug agent build > /dev/null
       - run: docker compose build

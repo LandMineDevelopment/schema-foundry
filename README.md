@@ -36,6 +36,22 @@ AI-assisted setup instructions are in [`docs/AI_AGENT_SETUP.md`](docs/AI_AGENT_S
 | Connect to Linux host PostgreSQL | `./start.sh local-db` | Not applicable; use UI mode and `host.docker.internal` |
 | Start UI with included PostgreSQL | `./start.sh docker-db` | `powershell -ExecutionPolicy Bypass -File .\start.ps1 -Mode docker-db` |
 
+## Optional AI Assistant
+
+The embedded assistant runs in a pinned, containerized OpenCode sidecar. It is not started by default.
+
+```bash
+./start.sh ai
+./start.sh ai-local-db
+./start.sh ai-docker-db
+```
+
+Use `ai` for design-only chat, `ai-local-db` for a Linux host PostgreSQL server, or `ai-docker-db` for the included PostgreSQL container. Windows PowerShell supports `-Mode ai` and `-Mode ai-docker-db`; use `ai` with profile host `host.docker.internal` for a Windows host database.
+
+The AI panel discovers providers, subscription/API-key sign-in methods, connected models, and packaged Schema Foundry skills from OpenCode. Working temporary OpenCode free models are available without a key; provider settings also support an optional OpenCode Zen key. Users control whether the model receives metadata, full schema structure, or explicitly approved query results. Raw SQL is always visible, every write requires separate UI confirmation, and migration apply continues through the existing reviewed plan workflow.
+
+See [`docs/AI_ASSISTANT.md`](docs/AI_ASSISTANT.md) for provider sign-in, model selection, data disclosure, tools, skills, confirmations, credential storage, and limitations.
+
 ## Screenshots
 
 ### Schema Canvas
@@ -249,6 +265,10 @@ Schema Foundry reads these environment variables at startup:
 | `SCHEMA_FOUNDRY_CONFIG_DIR` | `~/.config/schema-foundry` | PostgreSQL profiles and migration history |
 | `SCHEMA_FOUNDRY_SCHEMA_DIR` | `~/.local/share/schema-foundry/schemas` | Saved schema JSON records |
 | `SCHEMA_FOUNDRY_BEHIND_LOOPBACK_PROXY` | `0` | Trust a loopback-only container or proxy boundary; accepts only `0` or `1` |
+| `SCHEMA_FOUNDRY_OPENCODE_URL` | empty | Fixed OpenCode server URL; empty disables embedded AI |
+| `SCHEMA_FOUNDRY_OPENCODE_USERNAME` | `opencode` | OpenCode Basic-auth username |
+| `SCHEMA_FOUNDRY_OPENCODE_PASSWORD` | empty | OpenCode Basic-auth password; AI launchers generate one |
+| `SCHEMA_FOUNDRY_OPENCODE_TIMEOUT` | `45` | OpenCode request timeout from 1 through 300 seconds; failed chat abort adds at most 5 seconds |
 
 The default schema data directory is therefore `~/.local/share/schema-foundry/schemas`. To use a project-specific or external schema directory:
 
@@ -260,7 +280,9 @@ The PostgreSQL API is designed for local browser use and requires both a local o
 
 ## Standalone Runtime
 
-Schema Foundry runs as one Python process and serves all browser HTML, CSS, JavaScript, schema storage, and API routes itself. It has no CDN assets, telemetry, external HTTP APIs, subprocess helpers, or integration with another project. Browser connections are restricted to the same Schema Foundry origin by Content Security Policy. The only application-initiated connection outside that origin is a PostgreSQL connection explicitly selected from a saved profile; offline schema design does not require PostgreSQL to be available.
+In non-AI modes, Schema Foundry runs as one Python process and serves all browser HTML, CSS, JavaScript, schema storage, and API routes itself. It has no CDN assets, telemetry, external HTTP APIs, or subprocess helpers. Browser connections are restricted to the same Schema Foundry origin by Content Security Policy. The only application-initiated connection outside that origin is a PostgreSQL connection explicitly selected from a saved profile; offline schema design does not require PostgreSQL to be available.
+
+AI modes additionally start the pinned OpenCode sidecar. The browser still uses only Schema Foundry's same-origin API, while the backend proxies a narrow allowlist of OpenCode operations. OpenCode contacts only the model provider selected and authenticated by the user. UI-only operation remains available when OpenCode is absent or offline.
 
 Configured storage paths are expanded and resolved to absolute paths at startup, so runtime data does not depend on the directory from which the process was launched. Psycopg is the only third-party runtime package. Node.js is used by development checks and tests only, not by the running application.
 

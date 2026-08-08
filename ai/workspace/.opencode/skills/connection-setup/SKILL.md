@@ -1,0 +1,14 @@
+---
+name: connection-setup
+description: Use for Schema Foundry PostgreSQL connection setup, Docker host mapping, ports, SSL modes, profile fields, or password guidance.
+---
+
+# Connection Setup
+
+- Never request, repeat, store, or emit a password. The user enters it directly in Schema Foundry.
+- In normal Docker bridge mode, a database in another Compose service is reached by its service name, not `localhost`.
+- From a container to a host database on Docker Desktop, use `host.docker.internal`. The base Compose setup also maps that name through `host-gateway` on supported Linux Docker versions.
+- In Linux `local-db` or `ai-local-db` host-network mode, Schema Foundry reaches a loopback-bound PostgreSQL server at `127.0.0.1`.
+- `localhost` inside a normal container refers to that container, not the host.
+- Use the actual PostgreSQL port and choose SSL mode according to server policy. Do not weaken certificate verification without explaining the risk.
+- Connection setup is a proposal requiring UI review and password entry; it does not test or save the profile itself.

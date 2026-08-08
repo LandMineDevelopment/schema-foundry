@@ -55,6 +55,7 @@ const starterSchema = {
 const elements = {
   workspace: document.querySelector("#workspace"),
   mainLayout: document.querySelector("#main-layout"),
+  toolRail: document.querySelector("#tool-rail"),
   stage: document.querySelector("#stage"),
   selectionMarquee: document.querySelector("#selection-marquee"),
   tablesLayer: document.querySelector("#tables-layer"),
@@ -161,7 +162,26 @@ const elements = {
   databaseDriftBanner: document.querySelector("#database-drift-banner"),
   databaseDriftMessage: document.querySelector("#database-drift-message"),
   objectIconMenu: document.querySelector("#object-icon-menu"),
-  tooltip: document.querySelector("#app-tooltip")
+  tooltip: document.querySelector("#app-tooltip"),
+  aiButton: document.querySelector("#ai-button"),
+  aiRailStatus: document.querySelector("#ai-rail-status"),
+  aiPanel: document.querySelector("#ai-panel"),
+  aiEmptyCopy: document.querySelector("#ai-empty-copy"),
+  aiStatusPill: document.querySelector("#ai-status-pill"),
+  aiNewChat: document.querySelector("#ai-new-chat"),
+  aiModelSelect: document.querySelector("#ai-model-select"),
+  aiAccessSelect: document.querySelector("#ai-access-select"),
+  aiSqlPolicyWrap: document.querySelector("#ai-sql-policy-wrap"),
+  aiSqlPolicy: document.querySelector("#ai-sql-policy"),
+  aiAccessDisclosure: document.querySelector("#ai-access-disclosure"),
+  aiFunctionCaveat: document.querySelector("#ai-function-caveat"),
+  aiMessages: document.querySelector("#ai-messages"),
+  aiComposer: document.querySelector("#ai-composer"),
+  aiInput: document.querySelector("#ai-input"),
+  aiSendButton: document.querySelector("#ai-send-button"),
+  aiSettingsDialog: document.querySelector("#ai-settings-dialog"),
+  aiSettingsStatus: document.querySelector("#ai-settings-status"),
+  aiProviders: document.querySelector("#ai-providers")
 };
 
 let schemaLibrary = { activeId: null, schemas: [] };
@@ -245,6 +265,18 @@ let postgresState = {
   objectEditorDisplayDefinition: "",
   driftChecking: false,
   dismissedFingerprint: null
+};
+let aiState = {
+  loaded: false,
+  available: false,
+  version: "",
+  providers: [],
+  authMethods: {},
+  skills: [],
+  sessionId: null,
+  busy: false,
+  sqlPolicyDeliberatelySelected: false,
+  oauth: null
 };
 
 function clone(value) {
@@ -335,6 +367,35 @@ async function postgresRequest(path, options = {}, retry = true) {
     error.code = payload.error?.code;
     error.status = response.status;
     throw error;
+  }
+  return payload;
+}
+
+async function aiRequest(path, options = {}, retry = true) {
+  if (typeof path !== "string" || !path.startsWith("/api/ai/")) {
+    throw new Error("AI requests must use the local Schema Foundry API");
+  }
+  if (!postgresState.token) {
+    const sessionResponse = await fetch("/api/session");
+    const session = await sessionResponse.json().catch(() => ({}));
+    if (!sessionResponse.ok || !session.token) throw new Error(session.error?.message || "Could not start a local AI session");
+    postgresState.token = session.token;
+  }
+  const response = await fetch(path, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      "X-Schema-Foundry-Token": postgresState.token,
+      ...(options.headers || {})
+    }
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    if (payload.error?.code === "invalid_session" && retry) {
+      postgresState.token = null;
+      return aiRequest(path, options, false);
+    }
+    throw new Error(payload.error?.message || payload.error || "The AI service request failed");
   }
   return payload;
 }
@@ -3502,6 +3563,655 @@ function saveDatabaseObject() {
   closeDatabaseObjectEditor();
 }
 
+const AI_SCHEMA_ACTIONS = new Set(["add_table", "rename_table", "add_column", "update_column", "delete_element", "add_relationship"]);
+
+function aiActionType(action) {
+  return String(action?.type ?? action?.action ?? action?.kind ?? "").toLowerCase().replaceAll("-", "_");
+}
+
+function aiActionPayload(action) {
+  return action?.payload && typeof action.payload === "object" ? action.payload : action?.data && typeof action.data === "object" ? action.data : action ?? {};
+}
+
+function aiNamedTable(schemaValue, payload, prefix = "") {
+  const id = payload[`${prefix}TableId`] ?? (prefix ? payload[prefix]?.tableId : payload.tableId);
+  const nested = prefix ? payload[prefix] : payload.table;
+  const name = payload[`${prefix}TableName`] ?? (prefix ? nested?.tableName ?? nested?.table ?? (typeof nested === "string" ? nested : nested?.name) : payload.tableName ?? payload.table?.name);
+  return schemaValue.tables.find(table => table.id === id || (!id && table.name === name)) ?? null;
+}
+
+function aiNamedColumn(table, payload, prefix = "") {
+  const id = payload[`${prefix}ColumnId`] ?? (prefix ? payload[prefix]?.columnId : payload.columnId);
+  const nested = prefix ? payload[prefix] : payload.column;
+  const name = payload[`${prefix}ColumnName`] ?? (prefix ? nested?.columnName ?? nested?.column ?? (typeof nested === "string" ? nested : nested?.name) : payload.columnName ?? payload.column?.name);
+  return table?.columns.find(column => column.id === id || (!id && column.name === name)) ?? null;
+}
+
+function validAiName(value, label) {
+  if (typeof value !== "string" || !value.trim()) return `${label} is required`;
+  if (new TextEncoder().encode(value.trim()).length > 63) return `${label} must be at most 63 bytes`;
+  return "";
+}
+
+function validateAiSchemaAction(schemaValue, action) {
+  const type = aiActionType(action);
+  const payload = aiActionPayload(action);
+  if (!AI_SCHEMA_ACTIONS.has(type)) return { ok: false, error: "Unsupported schema action" };
+  if (!schemaValue || !Array.isArray(schemaValue.tables) || !Array.isArray(schemaValue.relationships)) return { ok: false, error: "The active schema is invalid" };
+  if (type === "add_table") {
+    const proposal = payload.table ?? payload;
+    const error = validAiName(proposal.name, "Table name");
+    if (error) return { ok: false, error };
+    if (schemaValue.tables.some(table => table.name.toLowerCase() === proposal.name.trim().toLowerCase())) return { ok: false, error: "A table with that name already exists" };
+    if (proposal.columns != null && !Array.isArray(proposal.columns)) return { ok: false, error: "Table columns must be a list" };
+    for (const column of proposal.columns ?? []) {
+      const columnError = validAiName(column?.name, "Column name");
+      if (columnError) return { ok: false, error: columnError };
+      if (typeof column.type !== "string" || !column.type.trim()) return { ok: false, error: "Column type is required" };
+    }
+    const names = (proposal.columns ?? []).map(column => column.name.toLowerCase());
+    if (new Set(names).size !== names.length) return { ok: false, error: "Column names must be unique within a table" };
+    return { ok: true, type, payload: proposal };
+  }
+  const table = aiNamedTable(schemaValue, payload);
+  if (type !== "add_relationship" && !table) return { ok: false, error: "The target table no longer exists" };
+  if (type === "rename_table") {
+    const newName = payload.newName ?? payload.name;
+    const error = validAiName(newName, "New table name");
+    if (error) return { ok: false, error };
+    if (schemaValue.tables.some(item => item.id !== table.id && item.name.toLowerCase() === newName.trim().toLowerCase())) return { ok: false, error: "A table with that name already exists" };
+    return { ok: true, type, payload, table, newName: newName.trim() };
+  }
+  if (type === "add_column") {
+    const column = payload.column ?? payload;
+    const error = validAiName(column.name, "Column name");
+    if (error) return { ok: false, error };
+    if (typeof column.type !== "string" || !column.type.trim()) return { ok: false, error: "Column type is required" };
+    if (table.columns.some(item => item.name.toLowerCase() === column.name.trim().toLowerCase())) return { ok: false, error: "That column already exists" };
+    return { ok: true, type, payload, table, column };
+  }
+  if (type === "update_column") {
+    const column = aiNamedColumn(table, payload);
+    if (!column) return { ok: false, error: "The target column no longer exists" };
+    const changes = payload.changes ?? payload.update ?? payload.column ?? {};
+    const allowed = ["name", "type", "nullable", "unique", "primary", "default"];
+    const keys = Object.keys(changes).filter(key => allowed.includes(key));
+    if (!keys.length) return { ok: false, error: "No supported column changes were supplied" };
+    if (keys.includes("name")) {
+      const error = validAiName(changes.name, "Column name");
+      if (error) return { ok: false, error };
+      if (table.columns.some(item => item.id !== column.id && item.name.toLowerCase() === changes.name.trim().toLowerCase())) return { ok: false, error: "That column name already exists" };
+    }
+    if (keys.includes("type") && (typeof changes.type !== "string" || !changes.type.trim())) return { ok: false, error: "Column type is required" };
+    for (const key of ["nullable", "unique", "primary"]) if (keys.includes(key) && typeof changes[key] !== "boolean") return { ok: false, error: `${key} must be true or false` };
+    return { ok: true, type, payload, table, column, changes: Object.fromEntries(keys.map(key => [key, changes[key]])) };
+  }
+  if (type === "delete_element") {
+    const elementType = String(payload.elementType ?? payload.targetType ?? (payload.columnId || payload.columnName ? "column" : "table")).toLowerCase();
+    if (elementType === "table") return { ok: true, type, payload, table, elementType };
+    if (elementType !== "column") return { ok: false, error: "Only table or column deletion is supported" };
+    const column = aiNamedColumn(table, payload);
+    if (!column) return { ok: false, error: "The target column no longer exists" };
+    if (table.columns.length === 1) return { ok: false, error: "A table needs at least one column" };
+    return { ok: true, type, payload, table, column, elementType };
+  }
+  const fromTable = aiNamedTable(schemaValue, payload, "from") ?? table;
+  const toTable = aiNamedTable(schemaValue, payload, "to");
+  const fromColumn = aiNamedColumn(fromTable, payload, "from");
+  const toColumn = aiNamedColumn(toTable, payload, "to");
+  if (!fromTable || !toTable || !fromColumn || !toColumn) return { ok: false, error: "Both relationship columns must exist" };
+  if (fromColumn.type !== toColumn.type) return { ok: false, error: "Relationship columns must have matching types" };
+  const targetKey = toColumn.primary || toColumn.unique || (toTable.uniqueConstraints ?? []).some(constraint => constraint.columnIds.length === 1 && constraint.columnIds[0] === toColumn.id);
+  if (!targetKey) return { ok: false, error: "The referenced column must be primary or unique" };
+  const constraintName = payload.constraintName ?? payload.name;
+  if (constraintName != null) {
+    const error = validAiName(constraintName, "Relationship constraint name");
+    if (error) return { ok: false, error };
+  }
+  if (schemaValue.relationships.some(item => item.fromTableId === fromTable.id && item.toTableId === toTable.id && relationshipColumnPairs(item).some(pair => pair.fromColumnId === fromColumn.id && pair.toColumnId === toColumn.id))) return { ok: false, error: "That relationship already exists" };
+  return { ok: true, type, payload, table: fromTable, fromTable, toTable, fromColumn, toColumn };
+}
+
+async function applyAiSchemaAction(action) {
+  const validated = validateAiSchemaAction(schema, action);
+  if (!validated.ok) throw new Error(validated.error);
+  const schemaBefore = clone(schema);
+  checkpointHistory();
+  if (validated.type === "add_table") {
+    const rect = elements.workspace.getBoundingClientRect();
+    const columns = validated.payload.columns?.length ? validated.payload.columns : [{ name: "id", type: "uuid", primary: true, nullable: false, unique: true, default: "" }];
+    const table = {
+      id: uid("table"), name: validated.payload.name.trim(),
+      x: (rect.width / 2 - view.x) / view.zoom - TABLE_WIDTH / 2,
+      y: (rect.height / 2 - view.y) / view.zoom - 100,
+      color: COLORS[schema.tables.length % COLORS.length],
+      columns: columns.map(column => ({ id: uid("col"), name: column.name.trim(), type: column.type.trim(), primary: column.primary === true, nullable: column.primary ? false : column.nullable !== false, unique: column.primary || column.unique === true, default: typeof column.default === "string" ? column.default : "" })),
+      uniqueConstraints: [], checks: [], indexes: [], triggers: []
+    };
+    schema.tables.push(table);
+  } else if (validated.type === "rename_table") {
+    const oldName = validated.table.name;
+    validated.table.name = validated.newName;
+    updateTableNameInObjects(validated.table, oldName, validated.newName);
+  } else if (validated.type === "add_column") {
+    const column = validated.column;
+    validated.table.columns.push({ id: uid("col"), name: column.name.trim(), type: column.type.trim(), primary: column.primary === true, nullable: column.primary ? false : column.nullable !== false, unique: column.primary || column.unique === true, default: typeof column.default === "string" ? column.default : "" });
+  } else if (validated.type === "update_column") {
+    const oldName = validated.column.name;
+    Object.assign(validated.column, validated.changes);
+    if (validated.column.primary) {
+      validated.column.nullable = false;
+      validated.column.unique = true;
+    }
+    if (validated.changes.name && oldName !== validated.changes.name) updateColumnNameInObjects(validated.table, validated.column.id, oldName, validated.changes.name);
+  } else if (validated.type === "delete_element" && validated.elementType === "table") {
+    schema.tables = schema.tables.filter(table => table.id !== validated.table.id);
+    schema.relationships = schema.relationships.filter(relation => relation.fromTableId !== validated.table.id && relation.toTableId !== validated.table.id);
+  } else if (validated.type === "delete_element") {
+    const dependent = findColumnDependentObjects(validated.table, validated.column.id);
+    for (const { kind, item } of dependent) {
+      const key = tableDatabaseObjectKey(kind);
+      validated.table[key] = (validated.table[key] ?? []).filter(candidate => candidate.id !== item.id);
+    }
+    validated.table.columns = validated.table.columns.filter(column => column.id !== validated.column.id);
+    validated.table.uniqueConstraints = (validated.table.uniqueConstraints ?? []).filter(constraint => !constraint.columnIds.includes(validated.column.id));
+    schema.relationships = schema.relationships.filter(relation => !relationshipIncludesColumn(relation, validated.column.id));
+  } else if (validated.type === "add_relationship") {
+    schema.relationships.push({
+      id: uid("rel"), fromTableId: validated.fromTable.id, fromColumnId: validated.fromColumn.id,
+      toTableId: validated.toTable.id, toColumnId: validated.toColumn.id,
+      constraintName: validated.payload.constraintName || validated.payload.name || `${validated.fromTable.name}_${validated.fromColumn.name}_fkey`,
+      targetNamespace: validated.toTable.namespace || schema.postgres?.namespace,
+      targetTableName: validated.toTable.name, targetColumnNames: [validated.toColumn.name],
+      onUpdate: validated.payload.onUpdate || "NO ACTION", onDelete: validated.payload.onDelete || "NO ACTION",
+      deferrable: false, initiallyDeferred: false, matchType: "SIMPLE", validated: true
+    });
+  }
+  for (const table of schema.tables) {
+    const primaryColumnIds = table.columns.filter(column => column.primary).map(column => column.id);
+    table.primaryKey = primaryColumnIds.length ? { id: table.primaryKey?.id ?? uid("pk"), ...table.primaryKey, name: table.primaryKey?.name || availablePrimaryKeyName(table.name, table.id), columnIds: primaryColumnIds } : null;
+  }
+  selectedTableId = null;
+  selectedTableIds = new Set();
+  render();
+  elements.saveStatus.textContent = "Saving...";
+  try {
+    await persistCurrentSchema();
+    elements.saveStatus.textContent = "Saved to file";
+  } catch (error) {
+    schema = schemaBefore;
+    render();
+    reportSaveError(error);
+    throw error;
+  }
+}
+
+function setAiPanelOpen(open) {
+  elements.mainLayout.classList.toggle("ai-open", open);
+  elements.toolRail.inert = open;
+  elements.toolRail.setAttribute("aria-hidden", String(open));
+  elements.aiPanel.classList.toggle("open", open);
+  elements.aiPanel.setAttribute("aria-hidden", String(!open));
+  elements.aiButton.classList.toggle("active", open);
+  elements.aiButton.setAttribute("aria-expanded", String(open));
+  if (open) {
+    loadAiStatus();
+    requestAnimationFrame(() => elements.aiInput.focus());
+  }
+}
+
+function setAiBusy(busy) {
+  aiState.busy = busy;
+  elements.aiSendButton.disabled = busy || !aiState.available || !elements.aiModelSelect.value;
+  elements.aiInput.disabled = busy || !aiState.available || !elements.aiModelSelect.value;
+  elements.aiSendButton.textContent = busy ? "Thinking..." : "Send";
+}
+
+function renderAiModels() {
+  const previous = elements.aiModelSelect.value;
+  elements.aiModelSelect.replaceChildren();
+  for (const provider of aiState.providers.filter(item => item.connected && item.models?.length)) {
+    const group = document.createElement("optgroup");
+    group.label = provider.name;
+    for (const model of provider.models) {
+      const option = document.createElement("option");
+      option.value = JSON.stringify({ providerId: provider.id, modelId: model.id });
+      option.textContent = model.name;
+      group.append(option);
+    }
+    elements.aiModelSelect.append(group);
+  }
+  if (previous && [...elements.aiModelSelect.options].some(option => option.value === previous)) elements.aiModelSelect.value = previous;
+  elements.aiModelSelect.disabled = !elements.aiModelSelect.options.length;
+  if (!elements.aiModelSelect.options.length) {
+    const option = document.createElement("option");
+    option.textContent = "Connect a provider in settings";
+    option.value = "";
+    elements.aiModelSelect.append(option);
+  }
+  const hasModel = Boolean(elements.aiModelSelect.value);
+  elements.aiInput.placeholder = hasModel ? "Ask about this schema..." : "Connect a provider in settings to start chatting";
+  if (elements.aiEmptyCopy) {
+    elements.aiEmptyCopy.textContent = hasModel
+      ? "Ask about the active design. Proposed changes and database operations always wait for your confirmation."
+      : "Connect OpenAI, GitHub Copilot, GitLab, or an API-key provider in settings to start chatting.";
+  }
+  setAiBusy(aiState.busy);
+}
+
+function aiAuthMethods(providerId) {
+  const methods = aiState.authMethods?.[providerId] ?? [];
+  if (Array.isArray(methods)) return methods.map(method => typeof method === "string" ? { id: method, name: method } : method);
+  return Object.entries(methods).map(([id, method]) => typeof method === "string" ? { id, name: method } : { id, ...method });
+}
+
+function renderAiProviders() {
+  elements.aiProviders.replaceChildren();
+  for (const provider of aiState.providers) {
+    const card = document.createElement("article");
+    card.className = "ai-provider-card";
+    const heading = document.createElement("div");
+    heading.className = "ai-provider-heading";
+    const name = document.createElement("strong");
+    name.textContent = provider.name;
+    const indicator = document.createElement("span");
+    indicator.className = provider.connected ? "connected" : "";
+    const anonymousFreeAccess = provider.connected && provider.authenticated === false;
+    indicator.textContent = anonymousFreeAccess ? "Free access" : provider.connected ? "Connected" : "Not connected";
+    heading.append(name, indicator);
+    card.append(heading);
+    if (provider.connected && !anonymousFreeAccess) {
+      const disconnect = document.createElement("button");
+      disconnect.type = "button";
+      disconnect.className = "button button-ghost";
+      disconnect.textContent = "Disconnect";
+      disconnect.addEventListener("click", async () => {
+        if (!confirm(`Disconnect ${provider.name}?`)) return;
+        await aiRequest(`/api/ai/auth/${encodeURIComponent(provider.id)}`, { method: "DELETE" });
+        await loadAiStatus(true);
+      });
+      card.append(disconnect);
+    } else {
+      const methods = aiAuthMethods(provider.id);
+      for (const method of methods) card.append(buildAiAuthForm(provider, method));
+      if (!methods.length) {
+        const note = document.createElement("p");
+        note.textContent = "This provider did not advertise a supported authentication method.";
+        card.append(note);
+      }
+    }
+    elements.aiProviders.append(card);
+  }
+}
+
+function buildAiAuthForm(provider, method) {
+  const form = document.createElement("form");
+  form.className = "ai-auth-form";
+  const methodId = Number(method.id);
+  const apiKeyMethod = method.type === "api" || /api.?key/i.test(method.name ?? method.label ?? "");
+  const label = document.createElement("strong");
+  label.textContent = method.name ?? (apiKeyMethod ? "API key" : "OAuth");
+  form.append(label);
+  if (method.helpUrl) {
+    try {
+      const helpUrl = new URL(method.helpUrl);
+      if (["http:", "https:"].includes(helpUrl.protocol)) {
+        const help = document.createElement("a");
+        help.className = "ai-auth-help";
+        help.href = helpUrl.href;
+        help.target = "_blank";
+        help.rel = "noopener noreferrer";
+        help.textContent = method.helpLabel || "Create provider key";
+        form.append(help);
+      }
+    } catch { /* Ignore invalid provider help links. */ }
+  }
+  const appendProviderInputs = () => {
+    for (const inputDefinition of method.inputs ?? method.prompts ?? []) {
+      const inputName = inputDefinition.id ?? inputDefinition.key ?? inputDefinition.name;
+      let input;
+      if (inputDefinition.type === "select") {
+        input = document.createElement("select");
+        for (const item of inputDefinition.options ?? []) {
+          const option = document.createElement("option");
+          option.value = item.value;
+          option.textContent = item.label || item.value;
+          input.append(option);
+        }
+      } else {
+        input = document.createElement("input");
+        input.placeholder = inputDefinition.label ?? inputDefinition.message ?? inputName;
+        input.autocomplete = "off";
+      }
+      input.name = inputName;
+      input.required = inputDefinition.required !== false;
+      form.append(input);
+    }
+  };
+  if (apiKeyMethod) {
+    const input = document.createElement("input");
+    input.type = "password";
+    input.name = "key";
+    input.autocomplete = "off";
+    input.placeholder = "API key";
+    input.required = true;
+    form.append(input);
+    appendProviderInputs();
+  } else {
+    appendProviderInputs();
+  }
+  const submit = document.createElement("button");
+  submit.type = "submit";
+  submit.className = "button button-primary";
+  submit.textContent = apiKeyMethod ? "Connect" : "Start authorization";
+  form.append(submit);
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    submit.disabled = true;
+    try {
+      if (apiKeyMethod) {
+        const keyInput = form.elements.key;
+        const inputs = Object.fromEntries([...new FormData(form)].filter(([name]) => name && name !== "key"));
+        await aiRequest("/api/ai/auth/api", { method: "POST", body: JSON.stringify({ providerId: provider.id, key: keyInput.value, inputs }) });
+        keyInput.value = "";
+        await loadAiStatus(true);
+      } else {
+        const inputs = Object.fromEntries([...new FormData(form)].filter(([name]) => name));
+        const authorization = await aiRequest("/api/ai/auth/oauth/authorize", { method: "POST", body: JSON.stringify({ providerId: provider.id, method: methodId, inputs }) });
+        aiState.oauth = { providerId: provider.id, method: methodId, flow: authorization.method };
+        renderAiOauthCompletion(authorization);
+        if (authorization.url) {
+          try {
+            const url = new URL(authorization.url);
+            if (["http:", "https:"].includes(url.protocol)) window.open(url.href, "_blank", "noopener,noreferrer");
+          } catch { /* Instructions and callback completion remain available without a valid link. */ }
+        }
+      }
+    } catch (error) {
+      elements.aiSettingsStatus.textContent = error.message;
+    } finally {
+      submit.disabled = false;
+    }
+  });
+  return form;
+}
+
+function renderAiOauthCompletion(authorization) {
+  const box = document.createElement("form");
+  box.className = "ai-oauth-completion";
+  const instructions = document.createElement("p");
+  instructions.textContent = authorization.instructions || "Complete authorization in the opened page, then enter the returned code if requested.";
+  const link = document.createElement("a");
+  link.textContent = "Open authorization page";
+  const authorizationUrl = (() => {
+    try {
+      const parsed = new URL(authorization.url);
+      return ["http:", "https:"].includes(parsed.protocol) ? parsed.href : "";
+    } catch { return ""; }
+  })();
+  link.href = authorizationUrl || "#";
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  const code = document.createElement("input");
+  code.name = "code";
+  code.autocomplete = "off";
+  code.placeholder = "Callback code (if provided)";
+  const finish = document.createElement("button");
+  finish.className = "button button-primary";
+  finish.type = "submit";
+  finish.textContent = "Complete connection";
+  box.append(instructions);
+  if (authorizationUrl) box.append(link);
+  box.append(code, finish);
+  box.addEventListener("submit", async event => {
+    event.preventDefault();
+    const oauth = aiState.oauth;
+    if (!oauth) return;
+    try {
+      await aiRequest("/api/ai/auth/oauth/callback", { method: "POST", body: JSON.stringify({ providerId: oauth.providerId, method: oauth.method, ...(code.value.trim() ? { code: code.value.trim() } : {}) }) });
+      code.value = "";
+      aiState.oauth = null;
+      await loadAiStatus(true);
+    } catch (error) {
+      elements.aiSettingsStatus.textContent = error.message;
+    }
+  });
+  elements.aiSettingsStatus.replaceChildren(box);
+}
+
+async function loadAiStatus(renderSettings = false) {
+  elements.aiStatusPill.textContent = "Checking";
+  try {
+    const status = await aiRequest("/api/ai/status", { method: "GET" });
+    Object.assign(aiState, { loaded: true, available: status.available === true || status.healthy === true, version: status.version ?? "", providers: status.providers ?? [], authMethods: status.authMethods ?? {}, skills: status.skills ?? [] });
+    const connected = aiState.providers.filter(provider => provider.connected).length;
+    elements.aiStatusPill.textContent = aiState.available ? `${connected} connected` : "Unavailable";
+    elements.aiStatusPill.classList.toggle("available", aiState.available);
+    elements.aiRailStatus.classList.toggle("available", aiState.available);
+    elements.aiSettingsStatus.textContent = aiState.available ? `OpenCode ${aiState.version || "available"}` : "OpenCode is unavailable. Schema design remains fully usable without AI.";
+    renderAiModels();
+    if (renderSettings || elements.aiSettingsDialog.open) renderAiProviders();
+  } catch (error) {
+    Object.assign(aiState, { loaded: true, available: false, providers: [] });
+    elements.aiStatusPill.textContent = "Offline";
+    elements.aiSettingsStatus.textContent = `AI unavailable: ${error.message}`;
+    renderAiModels();
+    if (renderSettings || elements.aiSettingsDialog.open) renderAiProviders();
+  }
+}
+
+function appendAiMessage(role, text) {
+  elements.aiMessages.querySelector(".ai-empty-state")?.remove();
+  const message = document.createElement("article");
+  message.className = `ai-message ${role}`;
+  const label = document.createElement("span");
+  label.textContent = role === "assistant" ? "Assistant" : role === "tool" ? "Query result" : "You";
+  const body = document.createElement("p");
+  body.textContent = String(text ?? "");
+  message.append(label, body);
+  elements.aiMessages.append(message);
+  elements.aiMessages.scrollTop = elements.aiMessages.scrollHeight;
+  return message;
+}
+
+function aiActionSummary(action) {
+  const type = aiActionType(action);
+  const payload = aiActionPayload(action);
+  if (type === "schema_read_query") return "Read-only SQL query";
+  if (type === "connection_setup") return "Set up a PostgreSQL connection";
+  if (type === "migration_preview") return "Preview migration";
+  if (type === "migration_apply") return "Review migration for apply";
+  return String(action.title ?? payload.title ?? type.replaceAll("_", " ") ?? "Proposed action");
+}
+
+function renderAiAction(action, context) {
+  const card = document.createElement("section");
+  card.className = "ai-action-card";
+  const title = document.createElement("strong");
+  title.textContent = aiActionSummary(action);
+  const detail = document.createElement("p");
+  detail.textContent = String(action.description ?? aiActionPayload(action).description ?? "Review this action before continuing.");
+  card.append(title, detail);
+  const type = aiActionType(action);
+  if (type === "schema_read_query") {
+    const sql = document.createElement("pre");
+    sql.textContent = String(aiActionPayload(action).sql ?? "");
+    card.append(sql);
+  } else {
+    const payload = aiActionPayload(action);
+    const review = document.createElement("pre");
+    review.className = "ai-action-review";
+    review.textContent = JSON.stringify(payload, null, 2);
+    card.append(review);
+  }
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = AI_SCHEMA_ACTIONS.has(type) || ["connection_setup", "migration_preview", "migration_apply"].includes(type) ? "button button-primary" : "button button-ghost";
+  button.textContent = type === "schema_read_query" ? "Run query" : "Review & confirm";
+  if (type === "schema_read_query" && elements.aiSqlPolicy.value === "disabled") {
+    button.disabled = true;
+    detail.textContent = "Rejected: SQL policy is disabled. The generated SQL is shown for review.";
+  }
+  button.addEventListener("click", () => confirmAiAction(action, context, card, button));
+  card.append(button);
+  elements.aiMessages.append(card);
+  if (type === "schema_read_query" && elements.aiSqlPolicy.value === "allow-session" && aiState.sqlPolicyDeliberatelySelected) {
+    button.disabled = true;
+    executeAiReadQuery(action, context, card, button);
+  }
+}
+
+async function confirmAiAction(action, context, card, button) {
+  const type = aiActionType(action);
+  if (type === "schema_read_query") {
+    if (elements.aiSqlPolicy.value === "disabled") return;
+    if (elements.aiSqlPolicy.value === "ask" && !confirm("Run this generated read-only SQL query? PostgreSQL functions can still have side effects outside the database.")) return;
+    return executeAiReadQuery(action, context, card, button);
+  }
+  if (!confirm(`Confirm action: ${aiActionSummary(action)}?`)) return;
+  if (activeSchemaId !== context.schemaId) return showToast("The active design changed. Ask the assistant for a fresh proposal");
+  if (AI_SCHEMA_ACTIONS.has(type)) {
+    if (JSON.stringify(schema) !== context.schemaSnapshot) return showToast("The design changed. Ask the assistant for a fresh proposal");
+    try {
+      await applyAiSchemaAction(action);
+      button.disabled = true;
+      button.textContent = "Applied";
+      showToast("Confirmed AI schema proposal applied");
+    } catch (error) {
+      detailAiActionError(card, error.message);
+    }
+    return;
+  }
+  if (type === "connection_setup") {
+    const profile = aiActionPayload(action).profile ?? aiActionPayload(action);
+    openPostgresProfileEditor();
+    elements.postgresProfileName.value = profile.name ?? "";
+    elements.postgresProfileHost.value = profile.host ?? "127.0.0.1";
+    elements.postgresProfilePort.value = profile.port ?? 5432;
+    elements.postgresProfileDatabase.value = profile.dbname ?? profile.database ?? "";
+    elements.postgresProfileUser.value = profile.user ?? "";
+    elements.postgresProfilePassword.value = "";
+    if ([...elements.postgresProfileSslmode.options].some(option => option.value === profile.sslmode)) elements.postgresProfileSslmode.value = profile.sslmode;
+    return;
+  }
+  if (["migration_preview", "migration_apply"].includes(type)) {
+    if (!context.profileId || !context.namespace || postgresState.selectedProfileId !== context.profileId || postgresState.namespace !== context.namespace) return showToast("Select the original PostgreSQL profile and namespace before previewing");
+    await previewPostgresMigration();
+    return;
+  }
+  detailAiActionError(card, "This action type is not supported by the frontend");
+}
+
+function detailAiActionError(card, message) {
+  const error = document.createElement("p");
+  error.className = "ai-action-error";
+  error.textContent = message;
+  card.append(error);
+}
+
+function boundedAiQueryResult(result) {
+  const columns = (result.columns ?? []).slice(0, 50).map(column => column.name ?? String(column));
+  const rows = (result.rows ?? []).slice(0, 50).map(row => Array.isArray(row) ? row.slice(0, 50) : row);
+  const serialized = JSON.stringify({ columns, rows, truncated: Boolean(result.truncated || (result.rows?.length ?? 0) > rows.length) });
+  return serialized.length > 24000 ? `${serialized.slice(0, 24000)}…` : serialized;
+}
+
+async function executeAiReadQuery(action, context, card, button) {
+  const sql = String(aiActionPayload(action).sql ?? "").trim();
+  if (!sql) return detailAiActionError(card, "No SQL was supplied");
+  if (elements.aiSqlPolicy.value === "disabled") return detailAiActionError(card, "SQL policy is disabled");
+  if (!context.profileId || !context.namespace || postgresState.selectedProfileId !== context.profileId || postgresState.namespace !== context.namespace) return detailAiActionError(card, "The selected PostgreSQL profile or namespace changed");
+  button.disabled = true;
+  button.textContent = "Running...";
+  try {
+    const result = await postgresRequest(`/api/postgres/profiles/${encodeURIComponent(context.profileId)}/sql`, { method: "POST", body: JSON.stringify({ namespace: context.namespace, sql }) });
+    const text = `Tool result for SQL:\n${sql}\n${boundedAiQueryResult(result)}`;
+    appendAiMessage("tool", text);
+    button.textContent = "Ran query";
+    await sendAiMessage(text, "tool");
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = "Run query";
+    detailAiActionError(card, error.message);
+  }
+}
+
+async function ensureAiSession(model) {
+  if (aiState.sessionId) return aiState.sessionId;
+  const session = await aiRequest("/api/ai/sessions", { method: "POST", body: JSON.stringify({ title: schema.projectName || "Schema Foundry chat", model }) });
+  aiState.sessionId = session.id;
+  return session.id;
+}
+
+async function sendAiMessage(text, renderedRole = "user") {
+  if (!text.trim() || aiState.busy) return;
+  let model;
+  try {
+    model = JSON.parse(elements.aiModelSelect.value);
+  } catch {
+    return showToast("Connect and select an AI model first");
+  }
+  if (renderedRole === "user") appendAiMessage("user", text);
+  const linkedProfileId = schema.postgres?.sourceProfileId;
+  const linkedNamespace = schema.postgres?.namespace;
+  const selectedProfileId = postgresState.selectedProfileId || linkedProfileId;
+  const selectedNamespace = postgresState.selectedProfileId ? postgresState.namespace : linkedNamespace;
+  const context = {
+    schemaId: activeSchemaId,
+    schemaSnapshot: JSON.stringify(schema),
+    profileId: selectedProfileId || undefined,
+    namespace: selectedNamespace || undefined
+  };
+  setAiBusy(true);
+  try {
+    const sessionId = await ensureAiSession(model);
+    const response = await aiRequest(`/api/ai/sessions/${encodeURIComponent(sessionId)}/messages`, {
+      method: "POST",
+      body: JSON.stringify({
+        text, model, schemaId: activeSchemaId, accessLevel: elements.aiAccessSelect.value,
+        ...(context.profileId ? { profileId: context.profileId } : {}),
+        ...(context.profileId && context.namespace ? { namespace: context.namespace } : {})
+      })
+    });
+    const assistantText = response.text ?? (response.parts ?? []).filter(part => typeof part?.text === "string").map(part => part.text).join("\n");
+    if (assistantText) appendAiMessage("assistant", assistantText);
+    for (const action of response.actions ?? []) renderAiAction(action, context);
+  } catch (error) {
+    appendAiMessage("assistant", `AI unavailable: ${error.message}`);
+  } finally {
+    setAiBusy(false);
+  }
+}
+
+async function startNewAiChat() {
+  if (aiState.sessionId) {
+    try { await aiRequest(`/api/ai/sessions/${encodeURIComponent(aiState.sessionId)}`, { method: "DELETE" }); } catch { /* A stale remote session must not block a local reset. */ }
+  }
+  aiState.sessionId = null;
+  aiState.sqlPolicyDeliberatelySelected = false;
+  elements.aiSqlPolicy.value = "disabled";
+  elements.aiMessages.replaceChildren();
+  const empty = document.createElement("div");
+  empty.className = "ai-empty-state";
+  const title = document.createElement("strong");
+  title.textContent = "New conversation";
+  const copy = document.createElement("p");
+  copy.textContent = "Proposals will use the currently active design.";
+  empty.append(title, copy);
+  elements.aiMessages.append(empty);
+}
+
+function updateAiAccessDisclosure() {
+  const access = elements.aiAccessSelect.value;
+  elements.aiSqlPolicyWrap.hidden = access !== "data";
+  elements.aiFunctionCaveat.hidden = access !== "data";
+  elements.aiAccessDisclosure.textContent = access === "metadata"
+    ? "Only schema names and basic counts are sent to the selected external AI provider."
+    : access === "schema"
+      ? "The active schema definition is disclosed to the selected external AI provider; database rows are not included."
+      : "Schema context and explicitly approved query results may be disclosed to the selected external AI provider. Queries use the selected UI profile only.";
+}
+
 elements.tablesLayer.addEventListener("pointerdown", event => {
   if (wheelZoomTimer !== null) finishWheelZoom();
   const card = event.target.closest(".table-card");
@@ -4264,6 +4974,30 @@ elements.postgresButton.addEventListener("click", async () => {
   renderPostgresCatalogSummary();
   elements.postgresDialog.showModal();
   await loadPostgresProfiles();
+});
+elements.aiButton.addEventListener("click", () => setAiPanelOpen(!elements.aiPanel.classList.contains("open")));
+document.querySelector("#ai-close-button").addEventListener("click", () => setAiPanelOpen(false));
+elements.aiNewChat.addEventListener("click", startNewAiChat);
+document.querySelector("#ai-settings-button").addEventListener("click", async () => {
+  elements.aiSettingsDialog.showModal();
+  await loadAiStatus(true);
+});
+document.querySelector("#ai-settings-close").addEventListener("click", () => elements.aiSettingsDialog.close());
+elements.aiAccessSelect.addEventListener("change", updateAiAccessDisclosure);
+elements.aiSqlPolicy.addEventListener("change", () => {
+  aiState.sqlPolicyDeliberatelySelected = true;
+});
+elements.aiComposer.addEventListener("submit", event => {
+  event.preventDefault();
+  const text = elements.aiInput.value.trim();
+  if (!text) return;
+  elements.aiInput.value = "";
+  sendAiMessage(text);
+});
+elements.aiInput.addEventListener("keydown", event => {
+  if (event.key !== "Enter" || event.shiftKey) return;
+  event.preventDefault();
+  elements.aiComposer.requestSubmit();
 });
 document.querySelector("#close-postgres-dialog").addEventListener("click", () => elements.postgresDialog.close());
 document.querySelector("#add-postgres-profile-button").addEventListener("click", () => openPostgresProfileEditor());

@@ -88,6 +88,14 @@ class SchemaStore:
         with self._lock:
             return [{**record, "layoutToken": schema_layout_token(record)} for _, record in self._records()]
 
+    def get(self, schema_id: str) -> dict[str, Any]:
+        schema_id = self.validate_id(schema_id)
+        with self._lock:
+            found = self._find(schema_id)
+            if found is None:
+                raise SchemaStoreError(404, "not_found", "Schema was not found")
+            return json.loads(json.dumps(found[1]))
+
     def _find(self, schema_id: str) -> tuple[Path, dict[str, Any]] | None:
         for path, record in self._records():
             if record["id"] == schema_id:

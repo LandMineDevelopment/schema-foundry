@@ -1,0 +1,9 @@
+# Combine after compose.local-db.yaml and compose.ai.yaml on Linux.
+services:
+  schema-foundry:
+    environment:
+      SCHEMA_FOUNDRY_OPENCODE_URL: http://127.0.0.1:4096
+
+  opencode:
+    ports:
+      - "127.0.0.1:4096:4096"

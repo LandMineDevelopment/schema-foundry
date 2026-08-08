@@ -70,6 +70,43 @@ class FakePostgresService:
         return {"projectName": "demo.public", "tables": [], "relationships": [], "functions": []}
 
 
+class FakeAIService:
+    def __init__(self):
+        self.calls = []
+
+    def status(self):
+        self.calls.append(("status",))
+        return {"enabled": True, "healthy": True, "version": "1.18.15", "providers": [], "authMethods": {}}
+
+    def set_api_key(self, provider_id, key, inputs=None):
+        self.calls.append(("set_api_key", provider_id, key, inputs))
+        return {"saved": True}
+
+    def delete_api_key(self, provider_id):
+        self.calls.append(("delete_api_key", provider_id))
+        return {"deleted": True}
+
+    def oauth_authorize(self, provider_id, method, inputs):
+        self.calls.append(("oauth_authorize", provider_id, method, inputs))
+        return {"url": "https://login.example", "method": "code", "instructions": "Enter code"}
+
+    def oauth_callback(self, provider_id, method, code=None):
+        self.calls.append(("oauth_callback", provider_id, method, code))
+        return {"authenticated": True}
+
+    def create_session(self, title=None, model=None):
+        self.calls.append(("create_session", title, model))
+        return {"id": "ses_1", "title": title or ""}
+
+    def delete_session(self, session_id):
+        self.calls.append(("delete_session", session_id))
+        return {"deleted": True}
+
+    def prompt(self, session_id, text, model, system, *, allow_data=False):
+        self.calls.append(("prompt", session_id, text, model, system, allow_data))
+        return {"text": "Proposed.", "parts": [{"type": "text", "text": "Proposed."}], "actions": []}
+
+
 class QuietHandlerMixin:
     def log_message(self, format, *args):
         pass
@@ -79,8 +116,12 @@ class ServerTests(unittest.TestCase):
     def setUp(self):
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.service = FakePostgresService()
+        self.ai_service = FakeAIService()
         self.store = SchemaStore(Path(self.temporary_directory.name) / "schemas")
-        handler = make_handler(ROOT / "src" / "schema_foundry" / "web", self.service, self.store, "session-token")
+        handler = make_handler(
+            ROOT / "src" / "schema_foundry" / "web", self.service, self.store, "session-token",
+            ai_service=self.ai_service,
+        )
         quiet_handler = type("QuietSchemaFoundryHandler", (QuietHandlerMixin, handler), {})
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), quiet_handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -208,6 +249,88 @@ class ServerTests(unittest.TestCase):
             self.request("/api/schemas/schema_one", "PUT", payload, content_type="text/plain")[0],
             415,
         )
+
+    def test_ai_routes_require_session_and_forward_auth_and_sessions(self):
+        requests = [
+            ("/api/ai/auth/api", "POST", {"providerId": "anthropic", "key": "secret"}),
+            ("/api/ai/auth/oauth/authorize", "POST", {"providerId": "anthropic", "method": 1, "inputs": {"region": "us"}}),
+            ("/api/ai/auth/oauth/callback", "POST", {"providerId": "anthropic", "method": 1, "code": "code"}),
+            ("/api/ai/sessions", "POST", {"title": "Schema chat", "model": {"providerID": "anthropic", "modelID": "claude"}}),
+            ("/api/ai/auth/anthropic", "DELETE", None),
+            ("/api/ai/sessions/ses_1", "DELETE", None),
+        ]
+        self.assertEqual(self.request("/api/ai/status")[0], 403)
+        self.assertEqual(self.request("/api/ai/status", authorized=True)[0], 200)
+        for path, method, payload in requests:
+            with self.subTest(path=path):
+                self.assertEqual(self.request(path, method, payload)[0], 403)
+                self.assertIn(self.request(path, method, payload, authorized=True)[0], {200, 201})
+
+        self.assertIn(("set_api_key", "anthropic", "secret", None), self.ai_service.calls)
+        self.assertIn(("oauth_authorize", "anthropic", 1, {"region": "us"}), self.ai_service.calls)
+        self.assertIn(("oauth_callback", "anthropic", 1, "code"), self.ai_service.calls)
+        self.assertIn(("delete_api_key", "anthropic"), self.ai_service.calls)
+        self.assertIn(("delete_session", "ses_1"), self.ai_service.calls)
+
+    def test_ai_message_loads_schema_and_sends_bounded_redacted_context(self):
+        self.service.profiles = [{
+            "id": "local", "name": "Local", "host": "db.internal", "port": 5432,
+            "dbname": "demo", "user": "admin", "password": "profile-secret",
+        }]
+        record = {
+            "id": "schema_one",
+            "configPath": "/home/user/private.json",
+            "schema": {
+                "projectName": "Demo\x01 project",
+                "tables": [{
+                    "id": "table_events", "name": "events", "password": "table-secret",
+                    "columns": [{"id": "column_id", "name": "id", "type": "uuid", "nullable": False, "rows": ["row-secret"]}],
+                    "primaryKey": {"id": "pk_events", "name": "events_pkey", "columnIds": ["column_id"], "definition": "PRIMARY KEY (id)"},
+                }],
+                "relationships": [], "functions": [], "views": [],
+                "postgres": {"sourceProfileId": "local", "database": "demo", "namespace": "public", "configPath": "/private"},
+                "rows": [{"password": "row-secret"}],
+            },
+        }
+        self.store.save("schema_one", record, expected_layout_token=None, layout_protocol=None)
+        model = {"providerID": "anthropic", "modelID": "claude"}
+        payload = {
+            "text": "Add an audit column", "model": model, "schemaId": "schema_one",
+            "accessLevel": "schema", "profileId": "local", "namespace": "public",
+        }
+
+        status, body, _ = self.request("/api/ai/sessions/ses_1/messages", "POST", payload, authorized=True)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["text"], "Proposed.")
+        call = self.ai_service.calls[-1]
+        self.assertEqual(call[0:2], ("prompt", "ses_1"))
+        self.assertEqual(call[3], model)
+        context_and_text = call[2]
+        self.assertIn('"accessLevel":"schema"', context_and_text)
+        self.assertIn('"database":"demo"', context_and_text)
+        self.assertIn('"primaryKey"', context_and_text)
+        self.assertIn("Add an audit column", context_and_text)
+        for secret in ("profile-secret", "table-secret", "row-secret", "db.internal", "admin", "/home/user", "/private"):
+            self.assertNotIn(secret, context_and_text)
+        self.assertIn("proposals are not executed", call[4].lower())
+        self.assertFalse(call[5])
+
+        payload["accessLevel"] = "data"
+        self.assertEqual(self.request("/api/ai/sessions/ses_1/messages", "POST", payload, authorized=True)[0], 200)
+        self.assertTrue(self.ai_service.calls[-1][5])
+        self.assertNotIn("row-secret", self.ai_service.calls[-1][2])
+
+    def test_ai_message_metadata_omits_schema_and_rejects_unknown_schema(self):
+        record = {"id": "schema_one", "schema": {"projectName": "Demo", "tables": [{"id": "t", "name": "secret_table", "columns": []}], "relationships": [], "functions": []}}
+        self.store.save("schema_one", record, expected_layout_token=None, layout_protocol=None)
+        payload = {
+            "text": "Describe it", "model": {"providerID": "anthropic", "modelID": "claude"},
+            "schemaId": "schema_one", "accessLevel": "metadata",
+        }
+        self.assertEqual(self.request("/api/ai/sessions/ses_1/messages", "POST", payload, authorized=True)[0], 200)
+        self.assertNotIn("secret_table", self.ai_service.calls[-1][2])
+        payload["schemaId"] = "missing"
+        self.assertEqual(self.request("/api/ai/sessions/ses_1/messages", "POST", payload, authorized=True)[0], 404)
 
 
 if __name__ == "__main__":
