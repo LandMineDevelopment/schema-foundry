@@ -9,6 +9,6 @@ export default tool({
     purpose: tool.schema.string().trim().min(1).max(500),
   },
   async execute(args) {
-    return "SCHEMA_FOUNDRY_ACTION:" + JSON.stringify({ type: "add_table", ...args, requiresConfirmation: true })
+    return "SCHEMII_ACTION:" + JSON.stringify({ type: "add_table", ...args, requiresConfirmation: true })
   },
 })

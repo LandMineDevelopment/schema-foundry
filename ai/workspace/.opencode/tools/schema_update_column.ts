@@ -17,6 +17,6 @@ export default tool({
     changes,
   },
   async execute(args) {
-    return "SCHEMA_FOUNDRY_ACTION:" + JSON.stringify({ type: "update_column", ...args, requiresConfirmation: true })
+    return "SCHEMII_ACTION:" + JSON.stringify({ type: "update_column", ...args, requiresConfirmation: true })
   },
 })

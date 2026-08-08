@@ -12,7 +12,7 @@ from uuid import UUID
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from schema_foundry.postgres_service import (
+from schemii.postgres_service import (
     ConflictError,
     PostgresService,
     PostgresServiceError,

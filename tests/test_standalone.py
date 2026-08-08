@@ -7,11 +7,11 @@ from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src" / "schema_foundry"
+SRC = ROOT / "src" / "schemii"
 WEB = SRC / "web"
 sys.path.insert(0, str(ROOT / "src"))
 
-from schema_foundry.server import _paths
+from schemii.server import _paths
 
 
 class StandaloneRuntimeTests(unittest.TestCase):
@@ -58,7 +58,7 @@ class StandaloneRuntimeTests(unittest.TestCase):
     def test_storage_paths_are_absolute_and_independent_of_launch_directory(self):
         with patch.dict(
             "os.environ",
-            {"SCHEMA_FOUNDRY_CONFIG_DIR": "relative-config", "SCHEMA_FOUNDRY_SCHEMA_DIR": "relative-schemas"},
+            {"SCHEMII_CONFIG_DIR": "relative-config", "SCHEMII_SCHEMA_DIR": "relative-schemas"},
         ):
             _, config_dir, schema_dir = _paths()
         self.assertTrue(config_dir.is_absolute())

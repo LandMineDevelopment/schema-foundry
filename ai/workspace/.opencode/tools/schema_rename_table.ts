@@ -9,6 +9,6 @@ export default tool({
     newName: tool.schema.string().trim().min(1).max(63),
   },
   async execute(args) {
-    return "SCHEMA_FOUNDRY_ACTION:" + JSON.stringify({ type: "rename_table", ...args, requiresConfirmation: true })
+    return "SCHEMII_ACTION:" + JSON.stringify({ type: "rename_table", ...args, requiresConfirmation: true })
   },
 })

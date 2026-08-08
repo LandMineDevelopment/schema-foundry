@@ -2,9 +2,9 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 
-const source = fs.readFileSync("src/schema_foundry/web/app.js", "utf8");
-const html = fs.readFileSync("src/schema_foundry/web/index.html", "utf8");
-const styles = fs.readFileSync("src/schema_foundry/web/styles.css", "utf8");
+const source = fs.readFileSync("src/schemii/web/app.js", "utf8");
+const html = fs.readFileSync("src/schemii/web/index.html", "utf8");
+const styles = fs.readFileSync("src/schemii/web/styles.css", "utf8");
 const start = source.indexOf("const AI_SCHEMA_ACTIONS");
 const end = source.indexOf("async function applyAiSchemaAction", start);
 assert.notEqual(start, -1, "AI action validation marker is missing");

@@ -43,7 +43,7 @@ Never preview or apply a saved schema against an unverified database or namespac
 
 Canvas positions, colors, and viewport state are user-owned data. Introspection may update semantic schema content but must not regenerate or normalize established layout.
 
-For any generated schema JSON write or introspection synchronization, load and follow `.opencode/skills/preserve-foundry-layout/SKILL.md`. Resolve the schema directory from `SCHEMA_FOUNDRY_SCHEMA_DIR`, falling back to `~/.local/share/schema-foundry/schemas`; do not assume schemas live inside the repository.
+For any generated schema JSON write or introspection synchronization, load and follow `.opencode/skills/preserve-schemii-layout/SKILL.md`. Resolve the schema directory from `SCHEMII_SCHEMA_DIR`, falling back to `~/.local/share/schemii/schemas`; do not assume schemas live inside the repository.
 
 Treat `layout_conflict` as a hard-refresh requirement. Never bypass the layout token guard or use a stale browser tab to overwrite a current layout.
 
@@ -64,7 +64,7 @@ Run at least:
 ```bash
 python3 -m unittest discover -s tests
 python3 -m compileall -q src
-node --check src/schema_foundry/web/app.js
+node --check src/schemii/web/app.js
 git diff --check
 ```
 

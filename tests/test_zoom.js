@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 
-const source = fs.readFileSync("src/schema_foundry/web/app.js", "utf8");
+const source = fs.readFileSync("src/schemii/web/app.js", "utf8");
 const start = source.indexOf("const MIN_ZOOM");
 const end = source.indexOf("const COLORS", start);
 assert.notEqual(start, -1, "zoom constants marker is missing");
@@ -24,6 +24,6 @@ assert.match(wheelSource, /setTimeout\(finishWheelZoom, WHEEL_ZOOM_IDLE_MS\)/, "
 assert.doesNotMatch(wheelSource, /applyView\(\)/, "wheel events must not repaint the complete view directly");
 assert.match(source, /function finishWheelZoom\(\)[\s\S]*?applyView\(\);[\s\S]*?saveSchema\(LAYOUT_SAVE_DELAY_MS\)/, "zoom completion must synchronize and save once");
 assert.match(source, /const WHEEL_ZOOM_IDLE_MS = 140/, "wheel zoom idle delay must remain explicit");
-assert.match(fs.readFileSync("src/schema_foundry/web/styles.css", "utf8"), /\.workspace\.zooming \.connections\s*\{[^}]*visibility:\s*hidden;/, "relationship painting must be disabled during wheel zoom");
+assert.match(fs.readFileSync("src/schemii/web/styles.css", "utf8"), /\.workspace\.zooming \.connections\s*\{[^}]*visibility:\s*hidden;/, "relationship painting must be disabled during wheel zoom");
 
 console.log("Zoom limit tests passed");

@@ -10,7 +10,7 @@ from urllib.error import HTTPError, URLError
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from schema_foundry.opencode_service import CUSTOM_TOOLS, OpenCodeService, OpenCodeServiceError
+from schemii.opencode_service import CUSTOM_TOOLS, OpenCodeService, OpenCodeServiceError
 
 
 class Response:
@@ -79,7 +79,7 @@ class OpenCodeServiceTests(unittest.TestCase):
                 "default": {"anthropic": "claude", "opencode": "deepseek-v4-flash-free"}, "connected": ["anthropic", "opencode"],
             },
             {"anthropic": [{"type": "api", "label": "API key"}]},
-            [{"name": "schema-foundry-help", "description": "Product help"}],
+            [{"name": "schemii-help", "description": "Product help"}],
         )
         result = self.service(opener).status()
 
@@ -100,7 +100,7 @@ class OpenCodeServiceTests(unittest.TestCase):
         self.assertEqual([model["id"] for model in zen["models"]], ["deepseek-v4-flash-free"])
         self.assertEqual(result["authMethods"]["opencode"][0]["helpUrl"], "https://opencode.ai/auth")
         self.assertEqual(result["authMethods"]["anthropic"][0]["id"], 0)
-        self.assertEqual(result["skills"][0]["name"], "schema-foundry-help")
+        self.assertEqual(result["skills"][0]["name"], "schemii-help")
         self.assertNotIn("secret", json.dumps(result).lower())
 
     def test_auth_oauth_and_session_methods_pin_upstream_shapes(self):
@@ -138,15 +138,15 @@ class OpenCodeServiceTests(unittest.TestCase):
         self.assertTrue(provider["authenticated"])
         self.assertEqual([model["id"] for model in provider["models"]], ["north-mini-code-free", "paid"])
 
-    def test_prompt_enables_only_foundry_tools_and_normalizes_actions(self):
+    def test_prompt_enables_only_schemii_tools_and_normalizes_actions(self):
         valid = {"kind": "add_table", "table": {"name": "events"}}
         opener = Opener({"info": {"path": {"cwd": "/secret"}}, "parts": [
             {"type": "text", "text": "I propose a table."},
             {"type": "reasoning", "text": "Checked constraints.", "time": {"start": 1000, "end": 1350}},
             {"type": "tool", "tool": "skill", "state": {"status": "completed", "input": {"name": "schema-design-layout"}, "output": "/secret/skill/path"}},
-            {"type": "tool", "tool": "schema_add_table", "state": {"status": "completed", "output": "SCHEMA_FOUNDRY_ACTION:" + json.dumps(valid)}},
-            {"type": "tool", "tool": "schema_add_table", "state": {"status": "completed", "output": " SCHEMA_FOUNDRY_ACTION:{}"}},
-            {"type": "tool", "tool": "bash", "state": {"status": "completed", "output": "SCHEMA_FOUNDRY_ACTION:{}"}},
+            {"type": "tool", "tool": "schema_add_table", "state": {"status": "completed", "output": "SCHEMII_ACTION:" + json.dumps(valid)}},
+            {"type": "tool", "tool": "schema_add_table", "state": {"status": "completed", "output": " SCHEMII_ACTION:{}"}},
+            {"type": "tool", "tool": "bash", "state": {"status": "completed", "output": "SCHEMII_ACTION:{}"}},
         ]})
         result = self.service(opener).prompt(
             "ses_1", "Create events", {"providerID": "anthropic", "modelID": "claude"}, "Fixed system",

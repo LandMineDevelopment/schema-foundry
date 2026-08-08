@@ -1,7 +1,7 @@
 import { tool } from "/opt/opencode/node_modules/@opencode-ai/plugin/dist/index.js"
 
 export default tool({
-  description: "Propose a read-only PostgreSQL query for an exact Schema Foundry profile and namespace. Raw SQL always requires UI approval.",
+  description: "Propose a read-only PostgreSQL query for an exact Schemii profile and namespace. Raw SQL always requires UI approval.",
   args: {
     profileId: tool.schema.string().min(1).max(128).describe("Exact selected connection profile ID"),
     namespace: tool.schema.string().min(1).max(63).describe("Exact selected PostgreSQL namespace"),
@@ -9,7 +9,7 @@ export default tool({
     purpose: tool.schema.string().trim().min(1).max(500).describe("Why this query is needed and what it will inspect"),
   },
   async execute(args) {
-    return "SCHEMA_FOUNDRY_ACTION:" + JSON.stringify({
+    return "SCHEMII_ACTION:" + JSON.stringify({
       action: "schema_read_query",
       ...args,
       readOnly: true,

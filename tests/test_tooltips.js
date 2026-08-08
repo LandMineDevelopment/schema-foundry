@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 
-const source = fs.readFileSync("src/schema_foundry/web/app.js", "utf8");
+const source = fs.readFileSync("src/schemii/web/app.js", "utf8");
 const start = source.indexOf("function elementHasTruncatedText");
 const end = source.indexOf("function positionTooltip", start);
 assert.notEqual(start, -1, "truncated tooltip helper marker is missing");

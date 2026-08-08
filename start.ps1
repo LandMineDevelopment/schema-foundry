@@ -38,22 +38,22 @@ switch ($Mode) {
         $composeArgs += @("-f", "compose.postgres.yaml", "-f", "compose.ai.yaml")
     }
 }
-if ($Mode.StartsWith("ai") -and -not $env:SCHEMA_FOUNDRY_OPENCODE_PASSWORD) {
+if ($Mode.StartsWith("ai") -and -not $env:SCHEMII_OPENCODE_PASSWORD) {
     $secret = [byte[]]::new(32)
     [System.Security.Cryptography.RandomNumberGenerator]::Fill($secret)
-    $env:SCHEMA_FOUNDRY_OPENCODE_PASSWORD = [Convert]::ToHexString($secret).ToLowerInvariant()
+    $env:SCHEMII_OPENCODE_PASSWORD = [Convert]::ToHexString($secret).ToLowerInvariant()
 }
 $composeArgs += @("up", "--build", "-d", "--remove-orphans")
 
 & docker @composeArgs
 if ($LASTEXITCODE -ne 0) {
-    throw "Schema Foundry could not be started. Review the Docker output above."
+    throw "Schemii could not be started. Review the Docker output above."
 }
 
-$port = if ($env:SCHEMA_FOUNDRY_HOST_PORT) { $env:SCHEMA_FOUNDRY_HOST_PORT } else { "8080" }
+$port = if ($env:SCHEMII_HOST_PORT) { $env:SCHEMII_HOST_PORT } else { "8080" }
 $url = "http://127.0.0.1:$port/"
 Write-Host ""
-Write-Host "Schema Foundry is ready at $url"
+Write-Host "Schemii is ready at $url"
 Write-Host "Mode: $Mode"
 Write-Host "Saved data remains in Docker named volumes."
 

@@ -1,19 +1,21 @@
+name: schemii
+
 services:
-  schema-foundry:
+  schemii:
     build:
       context: .
-    image: schema-foundry:local
+    image: schemii:local
     ports:
-      - "127.0.0.1:${SCHEMA_FOUNDRY_HOST_PORT:-8080}:8080"
+      - "127.0.0.1:${SCHEMII_HOST_PORT:-8080}:8080"
     environment:
-      SCHEMA_FOUNDRY_HOST: 0.0.0.0
-      SCHEMA_FOUNDRY_PORT: 8080
-      SCHEMA_FOUNDRY_CONFIG_DIR: /data/config
-      SCHEMA_FOUNDRY_SCHEMA_DIR: /data/schemas
-      SCHEMA_FOUNDRY_BEHIND_LOOPBACK_PROXY: 1
+      SCHEMII_HOST: 0.0.0.0
+      SCHEMII_PORT: 8080
+      SCHEMII_CONFIG_DIR: /data/config
+      SCHEMII_SCHEMA_DIR: /data/schemas
+      SCHEMII_BEHIND_LOOPBACK_PROXY: 1
     volumes:
-      - schema-foundry-config:/data/config
-      - schema-foundry-schemas:/data/schemas
+      - schemii-config:/data/config
+      - schemii-schemas:/data/schemas
     extra_hosts:
       - "host.docker.internal:host-gateway"
     read_only: true
@@ -26,5 +28,5 @@ services:
     restart: unless-stopped
 
 volumes:
-  schema-foundry-config:
-  schema-foundry-schemas:
+  schemii-config:
+  schemii-schemas:

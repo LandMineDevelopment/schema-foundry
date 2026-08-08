@@ -12,6 +12,6 @@ export default tool({
     default: tool.schema.string().trim().max(1000).optional(),
   },
   async execute(args) {
-    return "SCHEMA_FOUNDRY_ACTION:" + JSON.stringify({ type: "add_column", ...args, requiresConfirmation: true })
+    return "SCHEMII_ACTION:" + JSON.stringify({ type: "add_column", ...args, requiresConfirmation: true })
   },
 })

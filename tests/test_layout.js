@@ -2,9 +2,9 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 
-const source = fs.readFileSync("src/schema_foundry/web/app.js", "utf8");
-assert.match(source, /"X-Schema-Foundry-Layout-Token": record\.layoutToken/);
-assert.match(source, /"X-Schema-Foundry-Layout-Protocol": "2"/);
+const source = fs.readFileSync("src/schemii/web/app.js", "utf8");
+assert.match(source, /"X-Schemii-Layout-Token": record\.layoutToken/);
+assert.match(source, /"X-Schemii-Layout-Protocol": "2"/);
 assert.match(source, /layoutToken: record\?\.layoutToken/);
 assert.match(source, /table\.x = Number\.isFinite\(layout\?\.x\) \? layout\.x : Number\.isFinite\(table\.x\)/);
 assert.match(source, /table\.y = Number\.isFinite\(layout\?\.y\) \? layout\.y : Number\.isFinite\(table\.y\)/);

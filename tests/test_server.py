@@ -11,8 +11,8 @@ from urllib.request import Request, urlopen
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from schema_foundry.schema_store import SchemaStore
-from schema_foundry.server import CONTENT_SECURITY_POLICY, ThreadingHTTPServer, _is_local_request, make_handler
+from schemii.schema_store import SchemaStore
+from schemii.server import CONTENT_SECURITY_POLICY, ThreadingHTTPServer, _is_local_request, make_handler
 
 
 class FakePostgresService:
@@ -130,10 +130,10 @@ class ServerTests(unittest.TestCase):
         self.ai_service = FakeAIService()
         self.store = SchemaStore(Path(self.temporary_directory.name) / "schemas")
         handler = make_handler(
-            ROOT / "src" / "schema_foundry" / "web", self.service, self.store, "session-token",
+            ROOT / "src" / "schemii" / "web", self.service, self.store, "session-token",
             ai_service=self.ai_service,
         )
-        quiet_handler = type("QuietSchemaFoundryHandler", (QuietHandlerMixin, handler), {})
+        quiet_handler = type("QuietSchemiiHandler", (QuietHandlerMixin, handler), {})
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), quiet_handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -151,7 +151,7 @@ class ServerTests(unittest.TestCase):
         if data is not None:
             request.add_header("Content-Type", content_type)
         if authorized:
-            request.add_header("X-Schema-Foundry-Token", "session-token")
+            request.add_header("X-Schemii-Token", "session-token")
         try:
             with urlopen(request) as response:
                 return response.status, response.read(), response.headers
@@ -164,10 +164,10 @@ class ServerTests(unittest.TestCase):
     def test_static_and_session_routes(self):
         status, body, headers = self.request("/")
         self.assertEqual(status, 200)
-        self.assertIn(b"Schema Foundry", body)
+        self.assertIn(b"Schemii", body)
         self.assertEqual(headers["Content-Security-Policy"], CONTENT_SECURITY_POLICY)
         self.assertEqual(self.request("/.git/config")[0], 404)
-        self.assertEqual(self.request("/src/schema_foundry/server.py")[0], 404)
+        self.assertEqual(self.request("/src/schemii/server.py")[0], 404)
 
         status, body, _ = self.request("/api/session")
         self.assertEqual(status, 200)

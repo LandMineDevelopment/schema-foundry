@@ -42,7 +42,7 @@
     "doom_loop": "deny",
     "skill": {
       "*": "deny",
-      "schema-foundry-help": "allow",
+      "schemii-help": "allow",
       "connection-setup": "allow",
       "migration-safety": "allow",
       "schema-design-layout": "allow",

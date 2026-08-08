@@ -14,6 +14,6 @@ export default tool({
     if (args.elementType === "column" && !args.columnId) {
       throw new Error("columnId is required when deleting a column")
     }
-    return "SCHEMA_FOUNDRY_ACTION:" + JSON.stringify({ type: "delete_element", ...args, destructive: true, requiresConfirmation: true })
+    return "SCHEMII_ACTION:" + JSON.stringify({ type: "delete_element", ...args, destructive: true, requiresConfirmation: true })
   },
 })

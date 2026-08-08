@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from schema_foundry.schema_store import SchemaStore, SchemaStoreError
+from schemii.schema_store import SchemaStore, SchemaStoreError
 
 
 def record(schema_id, project_name="Untitled schema"):

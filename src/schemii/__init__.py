@@ -1,4 +1,4 @@
-"""Standalone Schema Foundry backend."""
+"""Standalone Schemii backend."""
 
 from .postgres_service import PostgresService, PostgresServiceError
 from .schema_store import SchemaStore

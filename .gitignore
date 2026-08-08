@@ -16,8 +16,8 @@ venv/
 .env.*
 !.env.example
 
-# Local Schema Foundry runtime data and credentials.
-.schema-foundry/
+# Local Schemii runtime data and credentials.
+.schemii/
 postgres_profiles.json
 migration_history.json
 

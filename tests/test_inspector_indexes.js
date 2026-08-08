@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 
-const source = fs.readFileSync("src/schema_foundry/web/app.js", "utf8");
+const source = fs.readFileSync("src/schemii/web/app.js", "utf8");
 const keyStart = source.indexOf("function tableDatabaseObjectKey(kind)");
 const keyEnd = source.indexOf("function findDatabaseObject(reference)", keyStart);
 const start = source.indexOf("function describeInspectorIndex(index)");

@@ -1,6 +1,6 @@
 ---
 name: schema-design-layout
-description: Use for adding, renaming, updating, relating, or deleting Schema Foundry tables, columns, constraints, and relationships while preserving layout.
+description: Use for adding, renaming, updating, relating, or deleting Schemii tables, columns, constraints, and relationships while preserving layout.
 ---
 
 # Schema Design And Layout
@@ -10,4 +10,4 @@ description: Use for adding, renaming, updating, relating, or deleting Schema Fo
 - Prefer PostgreSQL constraints for primary keys, foreign keys, uniqueness, checks, and nullability.
 - Before risky type, nullability, default, or relationship changes, identify existing-row compatibility, table rewrite, lock, and validation concerns.
 - Deletion is destructive. State what can be lost before emitting a delete proposal.
-- Every write proposal requires confirmation in Schema Foundry. Chat text is never confirmation.
+- Every write proposal requires confirmation in Schemii. Chat text is never confirmation.

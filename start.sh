@@ -2,7 +2,7 @@
 set -euo pipefail
 
 mode="${1:-ui}"
-port="${SCHEMA_FOUNDRY_HOST_PORT:-8080}"
+port="${SCHEMII_HOST_PORT:-8080}"
 
 if ! command -v docker >/dev/null 2>&1; then
   printf 'Docker is required. Install Docker Desktop or Docker Engine with Compose.\n' >&2
@@ -52,18 +52,18 @@ case "$mode" in
     ;;
 esac
 
-if [[ "$mode" == ai* && -z "${SCHEMA_FOUNDRY_OPENCODE_PASSWORD:-}" ]]; then
-  SCHEMA_FOUNDRY_OPENCODE_PASSWORD="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
-  export SCHEMA_FOUNDRY_OPENCODE_PASSWORD
+if [[ "$mode" == ai* && -z "${SCHEMII_OPENCODE_PASSWORD:-}" ]]; then
+  SCHEMII_OPENCODE_PASSWORD="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+  export SCHEMII_OPENCODE_PASSWORD
 fi
 
 "${compose[@]}" up --build -d --remove-orphans
 url="http://127.0.0.1:${port}/"
-printf '\nSchema Foundry is ready at %s\n' "$url"
+printf '\nSchemii is ready at %s\n' "$url"
 printf 'Mode: %s\n' "$mode"
 printf 'Saved data remains in Docker named volumes.\n'
 
-if [[ "${SCHEMA_FOUNDRY_NO_OPEN:-0}" != "1" ]]; then
+if [[ "${SCHEMII_NO_OPEN:-0}" != "1" ]]; then
   if command -v xdg-open >/dev/null 2>&1; then
     xdg-open "$url" >/dev/null 2>&1 || true
   elif command -v open >/dev/null 2>&1; then

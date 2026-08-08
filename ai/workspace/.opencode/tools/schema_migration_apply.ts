@@ -9,6 +9,6 @@ export default tool({
     planFingerprint: tool.schema.string().min(16).max(256),
   },
   async execute(args) {
-    return "SCHEMA_FOUNDRY_ACTION:" + JSON.stringify({ type: "migration_apply", ...args, requiresConfirmation: true })
+    return "SCHEMII_ACTION:" + JSON.stringify({ type: "migration_apply", ...args, requiresConfirmation: true })
   },
 })

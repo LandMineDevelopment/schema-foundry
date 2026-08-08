@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 
-const source = fs.readFileSync("src/schema_foundry/web/app.js", "utf8");
+const source = fs.readFileSync("src/schemii/web/app.js", "utf8");
 const start = source.indexOf("function formatDatabaseObjectDefinition(definition, kind)");
 const end = source.indexOf("function updateDatabaseObjectTableState()", start);
 assert.notEqual(start, -1, "formatter marker is missing");

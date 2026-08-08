@@ -1,26 +1,26 @@
-# Schema Foundry
+# Schemii
 
-Schema Foundry is a standalone, local browser application for designing PostgreSQL schemas, inspecting live namespaces, previewing schema differences, and applying reviewed migrations. PostgreSQL remains the authority for live database state, while saved JSON schema records retain the editable design and canvas layout.
+Schemii is a standalone, local browser application for designing PostgreSQL schemas, inspecting live namespaces, previewing schema differences, and applying reviewed migrations. PostgreSQL remains the authority for live database state, while saved JSON schema records retain the editable design and canvas layout.
 
-Schema Foundry has no Tagg, workflow, backlog, or coordinator behavior. It is a generic PostgreSQL schema design and migration tool.
+Schemii has no Tagg, workflow, backlog, or coordinator behavior. It is a generic PostgreSQL schema design and migration tool.
 
 ## Try It In One Command
 
-The default trial starts only Schema Foundry. It does not install, start, or contact PostgreSQL. Docker is the only prerequisite, and saved schemas persist across restarts.
+The default trial starts only Schemii. It does not install, start, or contact PostgreSQL. Docker is the only prerequisite, and saved schemas persist across restarts.
 
 Linux or macOS:
 
 ```bash
-git clone https://github.com/LandMineDevelopment/schema-foundry.git
-cd schema-foundry
+git clone https://github.com/LandMineDevelopment/schemii.git
+cd schemii
 ./start.sh
 ```
 
 Windows PowerShell with Docker Desktop running in Linux container mode:
 
 ```powershell
-git clone https://github.com/LandMineDevelopment/schema-foundry.git
-Set-Location schema-foundry
+git clone https://github.com/LandMineDevelopment/schemii.git
+Set-Location schemii
 powershell -ExecutionPolicy Bypass -File .\start.ps1
 ```
 
@@ -48,7 +48,7 @@ The embedded assistant runs in a pinned, containerized OpenCode sidecar. It is n
 
 Use `ai` for design-only chat, `ai-local-db` for a Linux host PostgreSQL server, or `ai-docker-db` for the included PostgreSQL container. Windows PowerShell supports `-Mode ai` and `-Mode ai-docker-db`; use `ai` with profile host `host.docker.internal` for a Windows host database.
 
-The AI panel discovers providers, subscription/API-key sign-in methods, connected models, and packaged Schema Foundry skills from OpenCode. Working temporary OpenCode free models are available without a key; provider settings also support an optional OpenCode Zen key. A session-scoped activity timeline visualizes model work, retries, safe skill/tool stages, elapsed time, reasoning, and completion while filtering sensitive event fields in the backend. Users control whether the model receives metadata, full schema structure, or explicitly approved query results. Raw SQL is always visible, every write requires separate UI confirmation, and migration apply continues through the existing reviewed plan workflow.
+The AI panel discovers providers, subscription/API-key sign-in methods, connected models, and packaged Schemii skills from OpenCode. Working temporary OpenCode free models are available without a key; provider settings also support an optional OpenCode Zen key. A session-scoped activity timeline visualizes model work, retries, safe skill/tool stages, elapsed time, reasoning, and completion while filtering sensitive event fields in the backend. Users control whether the model receives metadata, full schema structure, or explicitly approved query results. Raw SQL is always visible, every write requires separate UI confirmation, and migration apply continues through the existing reviewed plan workflow.
 
 See [`docs/AI_ASSISTANT.md`](docs/AI_ASSISTANT.md) for provider sign-in, model selection, data disclosure, tools, skills, confirmations, credential storage, and limitations.
 
@@ -56,49 +56,49 @@ See [`docs/AI_ASSISTANT.md`](docs/AI_ASSISTANT.md) for provider sign-in, model s
 
 ### Schema Canvas
 
-![Schema canvas with related tables](docs/screenshots/schema-foundry-overview.png)
+![Schema canvas with related tables](docs/screenshots/schemii-overview.png)
 
 ### PostgreSQL Workflow
 
-![PostgreSQL profile and migration dialog](docs/screenshots/schema-foundry-postgres.png)
+![PostgreSQL profile and migration dialog](docs/screenshots/schemii-postgres.png)
 
 ## Quick Start: UI Only
 
-This is the simplest way to use Schema Foundry. It starts only the UI and its local API. PostgreSQL is not installed, started, or contacted, and no database profile is required. You can design schemas, save and reopen multiple designs, import SQL files, and export JSON or SQL.
+This is the simplest way to use Schemii. It starts only the UI and its local API. PostgreSQL is not installed, started, or contacted, and no database profile is required. You can design schemas, save and reopen multiple designs, import SQL files, and export JSON or SQL.
 
 Install Docker Desktop on Windows or macOS, or Docker Engine with the Compose plugin on Linux. On Windows, use Docker Desktop's Linux container mode.
 
 Use the launcher shown above, or run Compose directly:
 
 ```bash
-git clone https://github.com/LandMineDevelopment/schema-foundry.git
-cd schema-foundry
+git clone https://github.com/LandMineDevelopment/schemii.git
+cd schemii
 docker compose up --build -d
 ```
 
-Open `http://127.0.0.1:8080/`. The built-in sample design is immediately editable. Use the disk button in the top toolbar to save, the folder button to reopen a saved design, and the plus button to create another design. Saved designs remain in the `schema-foundry-schemas` Docker volume across container restarts and upgrades.
+Open `http://127.0.0.1:8080/`. The built-in sample design is immediately editable. Use the disk button in the top toolbar to save, the folder button to reopen a saved design, and the plus button to create another design. Saved designs remain in the `schemii-schemas` Docker volume across container restarts and upgrades.
 
-View startup output with `docker compose logs -f schema-foundry` and stop the application with `docker compose down`. Starting it again with `docker compose up -d` restores saved designs. Do not run `docker compose down --volumes` unless you intend to delete them.
+View startup output with `docker compose logs -f schemii` and stop the application with `docker compose down`. Starting it again with `docker compose up -d` restores saved designs. Do not run `docker compose down --volumes` unless you intend to delete them.
 
 The Compose configuration:
 
 - Publishes the application only on the host loopback interface, not the LAN.
 - Runs as an unprivileged user with a read-only container filesystem and dropped capabilities.
-- Persists profiles and migration history in `schema-foundry-config`.
-- Persists schema JSON records in `schema-foundry-schemas`.
+- Persists profiles and migration history in `schemii-config`.
+- Persists schema JSON records in `schemii-schemas`.
 - Does not start PostgreSQL unless the separate PostgreSQL Compose file is explicitly selected.
 
 To use another host port:
 
 ```bash
-SCHEMA_FOUNDRY_HOST_PORT=8081 docker compose up --build -d
+SCHEMII_HOST_PORT=8081 docker compose up --build -d
 ```
 
-On PowerShell, set `$env:SCHEMA_FOUNDRY_HOST_PORT = "8081"` before running `docker compose up --build -d`.
+On PowerShell, set `$env:SCHEMII_HOST_PORT = "8081"` before running `docker compose up --build -d`.
 
 ## Quick Start: UI And PostgreSQL
 
-Use the optional Compose file to start Schema Foundry with a private PostgreSQL 17 container. The database port is not published to the host or LAN; only Schema Foundry can reach it on the Compose network.
+Use the optional Compose file to start Schemii with a private PostgreSQL 17 container. The database port is not published to the host or LAN; only Schemii can reach it on the Compose network.
 
 ```bash
 ./start.sh docker-db
@@ -113,9 +113,9 @@ Open `http://127.0.0.1:8080/`, select the database icon labeled **PostgreSQL syn
 | Name | `Local Docker PostgreSQL` |
 | Host | `postgres` |
 | Port | `5432` |
-| Database | `schema_foundry` |
-| User | `schema_foundry` |
-| Password | `schema-foundry-local` |
+| Database | `schemii` |
+| User | `schemii` |
+| Password | `schemii-local` |
 | SSL mode | `disable` |
 | Timeout | `10` |
 
@@ -143,19 +143,19 @@ notepad .env
 docker compose -f compose.yaml -f compose.postgres.yaml up --build -d
 ```
 
-PostgreSQL data persists in `schema-foundry-postgres`. Stop this stack with `docker compose -f compose.yaml -f compose.postgres.yaml down`. Adding `--volumes` deletes the PostgreSQL database as well as Schema Foundry profiles and saved designs.
+PostgreSQL data persists in `schemii-postgres`. Stop this stack with `docker compose -f compose.yaml -f compose.postgres.yaml down`. Adding `--volumes` deletes the PostgreSQL database as well as Schemii profiles and saved designs.
 
 Back up the optional database with PostgreSQL's own tools before migration testing or upgrades:
 
 ```bash
-docker compose -f compose.yaml -f compose.postgres.yaml exec -T postgres pg_dump -U schema_foundry -d schema_foundry > schema-foundry-postgres.sql
+docker compose -f compose.yaml -f compose.postgres.yaml exec -T postgres pg_dump -U schemii -d schemii > schemii-postgres.sql
 ```
 
 If `.env` changes the database or user, substitute those values in the command.
 
 ## Connect To PostgreSQL
 
-Open Schema Foundry, choose **PostgreSQL**, create a profile, and enter the database host, port, database name, user, password, SSL mode, and connection timeout. Use **Test connection** before selecting a namespace or introspecting.
+Open Schemii, choose **PostgreSQL**, create a profile, and enter the database host, port, database name, user, password, SSL mode, and connection timeout. Use **Test connection** before selecting a namespace or introspecting.
 
 Choose the launch mode and profile host according to where PostgreSQL runs:
 
@@ -166,11 +166,11 @@ Choose the launch mode and profile host according to where PostgreSQL runs:
 | Supplied PostgreSQL container | `compose.yaml` + `compose.postgres.yaml` | `postgres` |
 | Existing container on the same Docker network | `compose.yaml` | Its service name or network alias |
 | Another machine or managed service | `compose.yaml` | Its DNS name or IP address |
-| Native Schema Foundry and native PostgreSQL | Not applicable | Usually `127.0.0.1` |
+| Native Schemii and native PostgreSQL | Not applicable | Usually `127.0.0.1` |
 
 ### Linux Host PostgreSQL
 
-Linux containers cannot normally reach a PostgreSQL server listening only on host `127.0.0.1`. The Linux-only override gives Schema Foundry the host network namespace while keeping the UI bound to host loopback:
+Linux containers cannot normally reach a PostgreSQL server listening only on host `127.0.0.1`. The Linux-only override gives Schemii the host network namespace while keeping the UI bound to host loopback:
 
 ```bash
 ./start.sh local-db
@@ -204,7 +204,7 @@ Use `sslmode=verify-full` with trusted certificates for remote production databa
 - If **Save & test** reports connection refused, confirm the PostgreSQL container is healthy with `docker compose -f compose.yaml -f compose.postgres.yaml ps`.
 - If a host PostgreSQL server is unreachable from Docker on Linux, use `compose.local-db.yaml` and confirm PostgreSQL is listening on host loopback. If using bridge networking instead, verify `listen_addresses`, `pg_hba.conf`, the host firewall, and the Docker bridge source address.
 - On Windows, confirm Docker Desktop is running in Linux container mode and that `docker compose version` succeeds in PowerShell or Command Prompt.
-- If port `8080` is already in use, set `SCHEMA_FOUNDRY_HOST_PORT` to another host port as shown in the UI-only quick start.
+- If port `8080` is already in use, set `SCHEMII_HOST_PORT` to another host port as shown in the UI-only quick start.
 
 ## Windows Native Launch
 
@@ -213,26 +213,26 @@ Docker Desktop is recommended on Windows because it provides the same environmen
 PowerShell:
 
 ```powershell
-git clone https://github.com/LandMineDevelopment/schema-foundry.git
-Set-Location schema-foundry
+git clone https://github.com/LandMineDevelopment/schemii.git
+Set-Location schemii
 py -3 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -e .
-schema-foundry
+schemii
 ```
 
 If PowerShell execution policy prevents activation, use Command Prompt:
 
 ```bat
-git clone https://github.com/LandMineDevelopment/schema-foundry.git
-cd schema-foundry
+git clone https://github.com/LandMineDevelopment/schemii.git
+cd schemii
 py -3 -m venv .venv
 .venv\Scripts\activate.bat
 python -m pip install -e .
-schema-foundry
+schemii
 ```
 
-Open `http://127.0.0.1:8080/`. Native Windows schema files default to `%USERPROFILE%\.local\share\schema-foundry\schemas`; profiles and migration history default to `%USERPROFILE%\.config\schema-foundry`.
+Open `http://127.0.0.1:8080/`. Native Windows schema files default to `%USERPROFILE%\.local\share\schemii\schemas`; profiles and migration history default to `%USERPROFILE%\.config\schemii`.
 
 ## Linux And macOS Native Launch
 
@@ -242,7 +242,7 @@ Native use requires Python 3.10 or newer. PostgreSQL is optional until a databas
 python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install -e .
-schema-foundry
+schemii
 ```
 
 Open `http://127.0.0.1:8080/` and stop the process with `Ctrl-C`.
@@ -251,38 +251,38 @@ For source-tree development without installation:
 
 ```bash
 python3 -m pip install -r requirements.txt
-PYTHONPATH=src python3 -m schema_foundry.server
+PYTHONPATH=src python3 -m schemii.server
 ```
 
 ## Configuration
 
-Schema Foundry reads these environment variables at startup:
+Schemii reads these environment variables at startup:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `SCHEMA_FOUNDRY_HOST` | `127.0.0.1` | HTTP bind address |
-| `SCHEMA_FOUNDRY_PORT` | `8080` | HTTP port, from 1 through 65535 |
-| `SCHEMA_FOUNDRY_CONFIG_DIR` | `~/.config/schema-foundry` | PostgreSQL profiles and migration history |
-| `SCHEMA_FOUNDRY_SCHEMA_DIR` | `~/.local/share/schema-foundry/schemas` | Saved schema JSON records |
-| `SCHEMA_FOUNDRY_BEHIND_LOOPBACK_PROXY` | `0` | Trust a loopback-only container or proxy boundary; accepts only `0` or `1` |
-| `SCHEMA_FOUNDRY_OPENCODE_URL` | empty | Fixed OpenCode server URL; empty disables embedded AI |
-| `SCHEMA_FOUNDRY_OPENCODE_USERNAME` | `opencode` | OpenCode Basic-auth username |
-| `SCHEMA_FOUNDRY_OPENCODE_PASSWORD` | empty | OpenCode Basic-auth password; AI launchers generate one |
-| `SCHEMA_FOUNDRY_OPENCODE_TIMEOUT` | `45` | OpenCode request timeout from 1 through 300 seconds; failed chat abort adds at most 5 seconds |
+| `SCHEMII_HOST` | `127.0.0.1` | HTTP bind address |
+| `SCHEMII_PORT` | `8080` | HTTP port, from 1 through 65535 |
+| `SCHEMII_CONFIG_DIR` | `~/.config/schemii` | PostgreSQL profiles and migration history |
+| `SCHEMII_SCHEMA_DIR` | `~/.local/share/schemii/schemas` | Saved schema JSON records |
+| `SCHEMII_BEHIND_LOOPBACK_PROXY` | `0` | Trust a loopback-only container or proxy boundary; accepts only `0` or `1` |
+| `SCHEMII_OPENCODE_URL` | empty | Fixed OpenCode server URL; empty disables embedded AI |
+| `SCHEMII_OPENCODE_USERNAME` | `opencode` | OpenCode Basic-auth username |
+| `SCHEMII_OPENCODE_PASSWORD` | empty | OpenCode Basic-auth password; AI launchers generate one |
+| `SCHEMII_OPENCODE_TIMEOUT` | `45` | OpenCode request timeout from 1 through 300 seconds; failed chat abort adds at most 5 seconds |
 
-The default schema data directory is therefore `~/.local/share/schema-foundry/schemas`. To use a project-specific or external schema directory:
+The default schema data directory is therefore `~/.local/share/schemii/schemas`. To use a project-specific or external schema directory:
 
 ```bash
-SCHEMA_FOUNDRY_SCHEMA_DIR=/absolute/path/to/schemas schema-foundry
+SCHEMII_SCHEMA_DIR=/absolute/path/to/schemas schemii
 ```
 
-The PostgreSQL API is designed for local browser use and requires both a local origin and the per-process session token. Keep the default loopback host unless you have separately provided an appropriate secure access boundary. `SCHEMA_FOUNDRY_BEHIND_LOOPBACK_PROXY=1` relaxes only the source-IP check needed after Docker port forwarding; it still requires a localhost host and origin. Do not enable it unless the forwarding port is bound exclusively to host loopback as it is in `compose.yaml`.
+The PostgreSQL API is designed for local browser use and requires both a local origin and the per-process session token. Keep the default loopback host unless you have separately provided an appropriate secure access boundary. `SCHEMII_BEHIND_LOOPBACK_PROXY=1` relaxes only the source-IP check needed after Docker port forwarding; it still requires a localhost host and origin. Do not enable it unless the forwarding port is bound exclusively to host loopback as it is in `compose.yaml`.
 
 ## Standalone Runtime
 
-In non-AI modes, Schema Foundry runs as one Python process and serves all browser HTML, CSS, JavaScript, schema storage, and API routes itself. It has no CDN assets, telemetry, external HTTP APIs, or subprocess helpers. Browser connections are restricted to the same Schema Foundry origin by Content Security Policy. The only application-initiated connection outside that origin is a PostgreSQL connection explicitly selected from a saved profile; offline schema design does not require PostgreSQL to be available.
+In non-AI modes, Schemii runs as one Python process and serves all browser HTML, CSS, JavaScript, schema storage, and API routes itself. It has no CDN assets, telemetry, external HTTP APIs, or subprocess helpers. Browser connections are restricted to the same Schemii origin by Content Security Policy. The only application-initiated connection outside that origin is a PostgreSQL connection explicitly selected from a saved profile; offline schema design does not require PostgreSQL to be available.
 
-AI modes additionally start the pinned OpenCode sidecar. The browser still uses only Schema Foundry's same-origin API, while the backend proxies a narrow allowlist of OpenCode operations. OpenCode contacts only the model provider selected and authenticated by the user. UI-only operation remains available when OpenCode is absent or offline.
+AI modes additionally start the pinned OpenCode sidecar. The browser still uses only Schemii's same-origin API, while the backend proxies a narrow allowlist of OpenCode operations. OpenCode contacts only the model provider selected and authenticated by the user. UI-only operation remains available when OpenCode is absent or offline.
 
 Configured storage paths are expanded and resolved to absolute paths at startup, so runtime data does not depend on the directory from which the process was launched. Psycopg is the only third-party runtime package. Node.js is used by development checks and tests only, not by the running application.
 
@@ -300,10 +300,10 @@ docker compose up --build -d
 Back up both volumes before upgrades or migration work. One portable approach is to stop the service and archive each volume with a temporary container:
 
 ```bash
-docker compose stop schema-foundry
-docker run --rm -v schema_foundry_schema-foundry-config:/source:ro -v "$PWD":/backup alpine tar -czf /backup/schema-foundry-config.tgz -C /source .
-docker run --rm -v schema_foundry_schema-foundry-schemas:/source:ro -v "$PWD":/backup alpine tar -czf /backup/schema-foundry-schemas.tgz -C /source .
-docker compose start schema-foundry
+docker compose stop schemii
+docker run --rm -v schemii_schemii-config:/source:ro -v "$PWD":/backup alpine tar -czf /backup/schemii-config.tgz -C /source .
+docker run --rm -v schemii_schemii-schemas:/source:ro -v "$PWD":/backup alpine tar -czf /backup/schemii-schemas.tgz -C /source .
+docker compose start schemii
 ```
 
 The volume prefix normally comes from the project directory name. Confirm actual names with `docker volume ls` before backup or restore. On PowerShell, replace `"$PWD"` with an absolute host path accepted by Docker Desktop.
@@ -325,11 +325,11 @@ The volume prefix normally comes from the project directory name. Confirm actual
 - `POST /api/postgres/profiles/{profileId}/plans/{planId}/apply`: apply a still-current plan transactionally.
 - `GET /api/postgres/history`: list local migration history.
 
-PostgreSQL endpoints require the token returned by `/api/session` in the `X-Schema-Foundry-Token` header. Schema saves use revision checks and the layout protocol headers managed by the browser application.
+PostgreSQL endpoints require the token returned by `/api/session` in the `X-Schemii-Token` header. Schema saves use revision checks and the layout protocol headers managed by the browser application.
 
 ## Profiles And Passwords
 
-Profiles are stored in `postgres_profiles.json` under `SCHEMA_FOUNDRY_CONFIG_DIR`. Passwords are stored in that local JSON file, not in an operating-system keyring. The configuration directory is set to mode `0700`, and profile and migration-history files are set to mode `0600` where supported. Profile API responses redact passwords.
+Profiles are stored in `postgres_profiles.json` under `SCHEMII_CONFIG_DIR`. Passwords are stored in that local JSON file, not in an operating-system keyring. The configuration directory is set to mode `0700`, and profile and migration-history files are set to mode `0600` where supported. Profile API responses redact passwords.
 
 Protect the configuration directory, do not commit it, and use a PostgreSQL role with only the privileges needed for inspection or the intended migration. An empty password during profile update preserves the existing stored password.
 
@@ -344,7 +344,7 @@ Protect the configuration directory, do not commit it, and use a PostgreSQL role
 
 Apply takes a namespace-scoped PostgreSQL advisory transaction lock, sets lock and statement timeouts, rechecks the live fingerprint, and executes all planned steps in one transaction. A failed step rolls the transaction back. Partitioned tables may be introspected but require manual migrations.
 
-Treat saved canvas layout as user-owned data. Before scripts or tools rewrite schema JSON, follow `.opencode/skills/preserve-foundry-layout/SKILL.md`, including snapshots and parsed-layout equality checks.
+Treat saved canvas layout as user-owned data. Before scripts or tools rewrite schema JSON, follow `.opencode/skills/preserve-schemii-layout/SKILL.md`, including snapshots and parsed-layout equality checks.
 
 ## Starter Schema
 
@@ -357,7 +357,7 @@ Development checks require Python 3.10 or newer and Node.js. Node.js is not need
 ```bash
 python3 -m unittest discover -s tests
 python3 -m compileall -q src
-node --check src/schema_foundry/web/app.js
+node --check src/schemii/web/app.js
 for test_file in tests/test_*.js; do node "$test_file" || exit 1; done
 git diff --check
 docker compose build
@@ -367,4 +367,4 @@ Database integration testing should use a disposable PostgreSQL database or roll
 
 ## License
 
-Schema Foundry is released under the permissive [MIT License](LICENSE). It may be used, copied, modified, merged, published, distributed, sublicensed, and sold, provided the copyright and license notice are retained. The software is provided "as is," without warranty, and the license disclaims author and copyright-holder liability to the extent permitted by applicable law.
+Schemii is released under the permissive [MIT License](LICENSE). It may be used, copied, modified, merged, published, distributed, sublicensed, and sold, provided the copyright and license notice are retained. The software is provided "as is," without warranty, and the license disclaims author and copyright-holder liability to the extent permitted by applicable law.

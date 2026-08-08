@@ -2,8 +2,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 
-const source = fs.readFileSync("src/schema_foundry/web/app.js", "utf8");
-const styles = fs.readFileSync("src/schema_foundry/web/styles.css", "utf8");
+const source = fs.readFileSync("src/schemii/web/app.js", "utf8");
+const styles = fs.readFileSync("src/schemii/web/styles.css", "utf8");
 const start = source.indexOf("function relationshipColumnPairs");
 const end = source.indexOf("function relationshipIncludesColumn", start);
 assert.notEqual(start, -1, "relationship helper start marker is missing");

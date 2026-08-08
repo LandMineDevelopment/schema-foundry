@@ -1,11 +1,11 @@
 ---
-name: schema-foundry-help
-description: Use for help with Schema Foundry concepts, workflow, saved schemas, introspection, design, query preview, migration preview, and confirmations.
+name: schemii-help
+description: Use for help with Schemii concepts, workflow, saved schemas, introspection, design, query preview, migration preview, and confirmations.
 ---
 
-# Schema Foundry Help
+# Schemii Help
 
-Schema Foundry designs saved PostgreSQL schemas, introspects live catalogs, previews read-only data queries, and previews or applies migrations. Explain workflows using these boundaries:
+Schemii designs saved PostgreSQL schemas, introspects live catalogs, previews read-only data queries, and previews or applies migrations. Explain workflows using these boundaries:
 
 - PostgreSQL is authoritative for current live database state.
 - The saved schema selected for the exact profile, database, and namespace is authoritative for intended state.

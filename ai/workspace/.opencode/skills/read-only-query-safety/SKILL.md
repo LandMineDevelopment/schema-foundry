@@ -8,6 +8,6 @@ description: Use for PostgreSQL SQL, data inspection, catalog queries, or schema
 - Propose one bounded, read-only statement. Do not propose DDL, DML, transaction control, `COPY ... PROGRAM`, locking clauses, or multi-statement SQL.
 - Prefer PostgreSQL catalog and `information_schema` queries with explicit columns and useful limits.
 - Explain what data the query reads and why it is needed.
-- Raw SQL requires approval in Schema Foundry even when marked read-only.
+- Raw SQL requires approval in Schemii even when marked read-only.
 - PostgreSQL read-only transactions prevent ordinary database writes, but functions can still produce external side effects. Warn the user before any function call whose behavior is not known to be side-effect free.
 - Never claim the query ran or that displayed chat text approved it.

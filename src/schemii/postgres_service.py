@@ -534,7 +534,7 @@ class PostgresService:
         kwargs = {
             "host": profile["host"], "port": profile["port"], "dbname": profile["dbname"],
             "user": profile["user"], "password": profile["password"], "sslmode": profile["sslmode"],
-            "connect_timeout": profile["timeout"], "application_name": "schema_foundry",
+            "connect_timeout": profile["timeout"], "application_name": "schemii",
         }
         try:
             if self._connect_factory is not None:
@@ -2013,7 +2013,7 @@ class PostgresService:
                 cursor.execute("BEGIN")
                 cursor.execute(f"SET LOCAL lock_timeout = '{self._lock_timeout_ms}ms'")
                 cursor.execute(f"SET LOCAL statement_timeout = '{self._statement_timeout_ms}ms'")
-                cursor.execute("SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext(%s))", (f"schema_foundry:{plan['namespace']}",))
+                cursor.execute("SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext(%s))", (f"schemii:{plan['namespace']}",))
                 current = self._introspect_connection(connection, profile_id, plan["namespace"])
                 if current["postgres"]["fingerprint"] != plan["liveFingerprint"]:
                     raise ConflictError("stale_plan", "Database schema changed after preview")

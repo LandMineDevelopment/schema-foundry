@@ -1,6 +1,6 @@
 # AI Agent Setup Guide
 
-This guide is for an AI coding or terminal agent helping a user install, start, verify, or connect Schema Foundry. Read `README.md` for user-facing instructions and `agent_guide.md` before changing application code or saved schemas.
+This guide is for an AI coding or terminal agent helping a user install, start, verify, or connect Schemii. Read `README.md` for user-facing instructions and `agent_guide.md` before changing application code or saved schemas.
 
 ## Default Goal
 
@@ -18,7 +18,7 @@ Windows PowerShell:
 powershell -ExecutionPolicy Bypass -File .\start.ps1 -Mode ui
 ```
 
-The expected URL is `http://127.0.0.1:8080/`. Verify `GET /` and `GET /api/session` return HTTP 200. Verify `docker compose ps` shows only `schema-foundry` in UI-only mode.
+The expected URL is `http://127.0.0.1:8080/`. Verify `GET /` and `GET /api/session` return HTTP 200. Verify `docker compose ps` shows only `schemii` in UI-only mode.
 
 ## Prerequisite Checks
 
@@ -30,7 +30,7 @@ docker compose version
 docker compose config
 ```
 
-On Windows, Docker Desktop must be running in Linux container mode. If port 8080 is occupied, set `SCHEMA_FOUNDRY_HOST_PORT` before starting bridge-mode stacks. Do not change the container port.
+On Windows, Docker Desktop must be running in Linux container mode. If port 8080 is occupied, set `SCHEMII_HOST_PORT` before starting bridge-mode stacks. Do not change the container port.
 
 ## Select One Mode
 
@@ -62,7 +62,7 @@ Use this for a disposable local PostgreSQL instance:
 ./start.sh docker-db
 ```
 
-Use profile host `postgres`, port `5432`, database `schema_foundry`, user `schema_foundry`, password `schema-foundry-local`, and SSL mode `disable`. The defaults are for local evaluation only. Copy `.env.example` to `.env` before first startup to customize them.
+Use profile host `postgres`, port `5432`, database `schemii`, user `schemii`, password `schemii-local`, and SSL mode `disable`. The defaults are for local evaluation only. Copy `.env.example` to `.env` before first startup to customize them.
 
 ### Docker Desktop Host PostgreSQL
 
@@ -82,31 +82,31 @@ AI is opt-in and must never be added to a user's default UI-only launch without 
 ./start.sh ai-docker-db
 ```
 
-The launcher generates the internal OpenCode password. Direct Compose operation must set `SCHEMA_FOUNDRY_OPENCODE_PASSWORD` and include `compose.ai.yaml`; Linux host-database AI also includes `compose.ai.local-db.yaml`.
+The launcher generates the internal OpenCode password. Direct Compose operation must set `SCHEMII_OPENCODE_PASSWORD` and include `compose.ai.yaml`; Linux host-database AI also includes `compose.ai.local-db.yaml`.
 
-Read `docs/AI_ASSISTANT.md` before changing the embedded agent. Keep OpenCode pinned, private, Basic-authenticated, and restricted to the packaged read-only workspace, explicit tools, and six allowlisted skills. Never expose raw OpenCode file, shell, PTY, auth, config, plugin, MCP, or permission endpoints through Schema Foundry.
+Read `docs/AI_ASSISTANT.md` before changing the embedded agent. Keep OpenCode pinned, private, Basic-authenticated, and restricted to the packaged read-only workspace, explicit tools, and six allowlisted skills. Never expose raw OpenCode file, shell, PTY, auth, config, plugin, MCP, or permission endpoints through Schemii.
 
 Live chat activity uses the narrowly scoped `GET /api/ai/sessions/{sessionId}/activity` NDJSON route. The backend verifies the local session, subscribes to OpenCode's private event stream, filters the exact session ID, and emits only normalized status, reasoning-state, allowlisted skill/tool-state, compaction, and connection records. Do not widen this into a raw event proxy.
 
-Provider credentials must flow browser -> local Schema Foundry API -> private OpenCode. Never return credentials, put them in browser storage, print them, commit them, or mount host OpenCode credentials automatically. Every write proposal requires browser confirmation; SQL data access follows the user's current disclosure and SQL-policy settings.
+Provider credentials must flow browser -> local Schemii API -> private OpenCode. Never return credentials, put them in browser storage, print them, commit them, or mount host OpenCode credentials automatically. Every write proposal requires browser confirmation; SQL data access follows the user's current disclosure and SQL-policy settings.
 
 ## Data Safety
 
-Schema Foundry stores Docker data in these named volumes:
+Schemii stores Docker data in these named volumes:
 
-- `schema-foundry-config` contains profiles, passwords, and migration history.
-- `schema-foundry-schemas` contains saved designs and user-owned layout.
-- `schema-foundry-postgres` exists only for the included PostgreSQL mode.
+- `schemii-config` contains profiles, passwords, and migration history.
+- `schemii-schemas` contains saved designs and user-owned layout.
+- `schemii-postgres` exists only for the included PostgreSQL mode.
 
 Never run `docker compose down --volumes`, `docker volume rm`, or any equivalent destructive command without explicit user approval. Normal `docker compose down` and mode switches retain named volumes.
 
 Do not print profile passwords, commit `.env`, or copy runtime schema records into the repository. API profile responses must remain redacted.
 
-Before migrating or rewriting saved schema JSON, follow `.opencode/skills/preserve-foundry-layout/SKILL.md`. Stop the server, back up files, snapshot parsed layout, perform the minimal write, compare layout equality, and only then restart.
+Before migrating or rewriting saved schema JSON, follow `.opencode/skills/preserve-schemii-layout/SKILL.md`. Stop the server, back up files, snapshot parsed layout, perform the minimal write, compare layout equality, and only then restart.
 
 ## Connection Verification
 
-Use the UI's **Save & test** action when possible. For API verification, first obtain `/api/session`, then send the token only to the local Schema Foundry PostgreSQL endpoint. A connection test is non-destructive. Do not introspect, preview, or apply against an unverified profile, database, and namespace.
+Use the UI's **Save & test** action when possible. For API verification, first obtain `/api/session`, then send the token only to the local Schemii PostgreSQL endpoint. A connection test is non-destructive. Do not introspect, preview, or apply against an unverified profile, database, and namespace.
 
 For the included database, confirm health first:
 
@@ -130,7 +130,7 @@ For local-db mode, include both Compose files in lifecycle commands. For docker-
 
 1. Confirm Docker is running and Compose parses the selected files.
 2. Confirm port 8080 is free or choose another bridge-mode host port.
-3. Confirm the Schema Foundry container is running and inspect `docker compose logs schema-foundry`.
+3. Confirm the Schemii container is running and inspect `docker compose logs schemii`.
 4. Confirm the profile host matches the selected mode.
 5. Confirm PostgreSQL is listening, healthy, and permits the configured user and source.
 6. Change application code only after environment and routing failures are excluded.

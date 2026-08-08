@@ -1,7 +1,7 @@
 import { tool } from "/opt/opencode/node_modules/@opencode-ai/plugin/dist/index.js"
 
 export default tool({
-  description: "Propose connection-profile fields without a password. The user enters secrets only in Schema Foundry UI.",
+  description: "Propose connection-profile fields without a password. The user enters secrets only in Schemii UI.",
   args: {
     name: tool.schema.string().trim().min(1).max(100),
     host: tool.schema.string().trim().min(1).max(253),
@@ -11,6 +11,6 @@ export default tool({
     sslmode: tool.schema.enum(["disable", "allow", "prefer", "require", "verify-ca", "verify-full"]),
   },
   async execute(args) {
-    return "SCHEMA_FOUNDRY_ACTION:" + JSON.stringify({ type: "connection_setup", ...args, requiresPasswordEntry: true, requiresConfirmation: true })
+    return "SCHEMII_ACTION:" + JSON.stringify({ type: "connection_setup", ...args, requiresPasswordEntry: true, requiresConfirmation: true })
   },
 })

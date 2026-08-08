@@ -19,7 +19,7 @@ MAX_ACTION_SIZE = 32 * 1024
 MAX_TOOL_OUTPUT_SIZE = 256 * 1024
 MAX_ACTIVITY_LINE_SIZE = 256 * 1024
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
-ACTION_PREFIX = "SCHEMA_FOUNDRY_ACTION:"
+ACTION_PREFIX = "SCHEMII_ACTION:"
 CUSTOM_TOOLS = {
     "schema_read_query",
     "schema_add_table",
@@ -33,7 +33,7 @@ CUSTOM_TOOLS = {
     "schema_migration_apply",
 }
 SAFE_SKILLS = {
-    "schema-foundry-help",
+    "schemii-help",
     "connection-setup",
     "migration-safety",
     "schema-design-layout",

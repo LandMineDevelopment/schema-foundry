@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 
-const source = fs.readFileSync("src/schema_foundry/web/app.js", "utf8");
+const source = fs.readFileSync("src/schemii/web/app.js", "utf8");
 const mutationStart = source.indexOf("function isColumnReferencedInText");
 const mutationEnd = source.indexOf("function relationshipColumnPairs", mutationStart);
 const deleteStart = source.indexOf("function deleteTable(tableId)");

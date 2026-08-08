@@ -45,14 +45,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - run: node --check src/schema_foundry/web/app.js
+      - run: node --check src/schemii/web/app.js
       - run: for test_file in tests/test_*.js; do node "$test_file" || exit 1; done
 
   docker:
     name: Docker
     runs-on: ubuntu-latest
     env:
-      SCHEMA_FOUNDRY_OPENCODE_PASSWORD: ci-only-opencode-password
+      SCHEMII_OPENCODE_PASSWORD: ci-only-opencode-password
     steps:
       - uses: actions/checkout@v4
       - run: bash -n start.sh
@@ -66,5 +66,5 @@ jobs:
         run: python -m json.tool ai/workspace/opencode.json > /dev/null
       - run: docker compose -f compose.yaml -f compose.ai.yaml build opencode
       - name: Validate embedded OpenCode config, skills, and tools
-        run: docker run --rm -v "$PWD/ai/workspace:/workspace:ro" -w /workspace schema-foundry-opencode:1.18.15-local debug agent build > /dev/null
+        run: docker run --rm -v "$PWD/ai/workspace:/workspace:ro" -w /workspace schemii-opencode:1.18.15-local debug agent build > /dev/null
       - run: docker compose build

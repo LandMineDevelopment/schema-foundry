@@ -13,7 +13,7 @@ htmlcov
 tests
 examples
 schemas
-.schema-foundry
+.schemii
 *.log
 .env*
 .github
