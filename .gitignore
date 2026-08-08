@@ -12,6 +12,9 @@ venv/
 
 .DS_Store
 *.log
+.env
+.env.*
+!.env.example
 
 # Local Schema Foundry runtime data and credentials.
 .schema-foundry/

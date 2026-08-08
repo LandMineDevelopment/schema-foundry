@@ -14,9 +14,11 @@ Schema Foundry has no Tagg, workflow, backlog, or coordinator behavior. It is a 
 
 ![PostgreSQL profile and migration dialog](docs/screenshots/schema-foundry-postgres.png)
 
-## Quick Start With Docker
+## Quick Start: UI Only
 
-Docker Compose is the recommended portable launch method on Linux, macOS, and Windows. It requires Docker Engine with the Compose plugin or Docker Desktop.
+This is the simplest way to use Schema Foundry. It starts only the UI and its local API. PostgreSQL is not installed, started, or contacted, and no database profile is required. You can design schemas, save and reopen multiple designs, import SQL files, and export JSON or SQL.
+
+Install Docker Desktop on Windows or macOS, or Docker Engine with the Compose plugin on Linux. On Windows, use Docker Desktop's Linux container mode.
 
 ```bash
 git clone https://github.com/LandMineDevelopment/schema-foundry.git
@@ -24,7 +26,9 @@ cd schema-foundry
 docker compose up --build -d
 ```
 
-Open `http://127.0.0.1:8080/`. View startup output with `docker compose logs -f schema-foundry` and stop the application with `docker compose down`.
+Open `http://127.0.0.1:8080/`. The built-in sample design is immediately editable. Use the disk button in the top toolbar to save, the folder button to reopen a saved design, and the plus button to create another design. Saved designs remain in the `schema-foundry-schemas` Docker volume across container restarts and upgrades.
+
+View startup output with `docker compose logs -f schema-foundry` and stop the application with `docker compose down`. Starting it again with `docker compose up -d` restores saved designs. Do not run `docker compose down --volumes` unless you intend to delete them.
 
 The Compose configuration:
 
@@ -32,7 +36,7 @@ The Compose configuration:
 - Runs as an unprivileged user with a read-only container filesystem and dropped capabilities.
 - Persists profiles and migration history in `schema-foundry-config`.
 - Persists schema JSON records in `schema-foundry-schemas`.
-- Does not include or require a PostgreSQL container; connect to the database you choose.
+- Does not start PostgreSQL unless the separate PostgreSQL Compose file is explicitly selected.
 
 To use another host port:
 
@@ -41,6 +45,61 @@ SCHEMA_FOUNDRY_HOST_PORT=8081 docker compose up --build -d
 ```
 
 On PowerShell, set `$env:SCHEMA_FOUNDRY_HOST_PORT = "8081"` before running `docker compose up --build -d`.
+
+## Quick Start: UI And PostgreSQL
+
+Use the optional Compose file to start Schema Foundry with a private PostgreSQL 17 container. The database port is not published to the host or LAN; only Schema Foundry can reach it on the Compose network.
+
+```bash
+docker compose -f compose.yaml -f compose.postgres.yaml up --build -d
+```
+
+Open `http://127.0.0.1:8080/`, select the database icon labeled **PostgreSQL sync**, choose **+ Connection**, and enter:
+
+| Field | Local container value |
+| --- | --- |
+| Name | `Local Docker PostgreSQL` |
+| Host | `postgres` |
+| Port | `5432` |
+| Database | `schema_foundry` |
+| User | `schema_foundry` |
+| Password | `schema-foundry-local` |
+| SSL mode | `disable` |
+| Timeout | `10` |
+
+Choose **Save & test**. After it succeeds, select the `public` namespace and use **Import** to load its live schema or **Preview migration** to compare the current design with PostgreSQL.
+
+The default credentials are only for local evaluation. To choose your own before the first database start, copy `.env.example` to `.env`, edit its values, and use those same values in the connection form:
+
+```bash
+cp .env.example .env
+```
+
+Windows PowerShell:
+
+```powershell
+Copy-Item .env.example .env
+notepad .env
+docker compose -f compose.yaml -f compose.postgres.yaml up --build -d
+```
+
+Windows Command Prompt:
+
+```bat
+copy .env.example .env
+notepad .env
+docker compose -f compose.yaml -f compose.postgres.yaml up --build -d
+```
+
+PostgreSQL data persists in `schema-foundry-postgres`. Stop this stack with `docker compose -f compose.yaml -f compose.postgres.yaml down`. Adding `--volumes` deletes the PostgreSQL database as well as Schema Foundry profiles and saved designs.
+
+Back up the optional database with PostgreSQL's own tools before migration testing or upgrades:
+
+```bash
+docker compose -f compose.yaml -f compose.postgres.yaml exec -T postgres pg_dump -U schema_foundry -d schema_foundry > schema-foundry-postgres.sql
+```
+
+If `.env` changes the database or user, substitute those values in the command.
 
 ## Connect To PostgreSQL
 
@@ -58,9 +117,47 @@ Choose the host according to where PostgreSQL runs:
 
 For a database on the Linux Docker host, PostgreSQL must listen on an address reachable from the Docker bridge and `pg_hba.conf` must permit the relevant bridge subnet. Do not expose PostgreSQL broadly just to make this work. For another container, attach both services to the same user-defined Docker network rather than publishing the database publicly.
 
+To connect an existing PostgreSQL container, either attach it to the default network shown by `docker network ls` for this Compose project and use its container or network-alias name as the profile host, or publish its PostgreSQL port only on host loopback and use `host.docker.internal` as the profile host. The optional `compose.postgres.yaml` file is the ready-made same-network example and avoids manual network setup.
+
 Use `sslmode=verify-full` with trusted certificates for remote production databases when possible. Use a narrowly privileged PostgreSQL role: inspection needs catalog and target-schema access, while migration apply additionally needs only the DDL privileges required by the reviewed plan.
 
-## Native Launch
+### Connection Troubleshooting
+
+- Do not use `127.0.0.1` for a database in another container. Inside Schema Foundry, that address means the Schema Foundry container itself. Use `postgres`, another same-network service name, or `host.docker.internal` as described above.
+- If **Save & test** reports connection refused, confirm the PostgreSQL container is healthy with `docker compose -f compose.yaml -f compose.postgres.yaml ps`.
+- If a host PostgreSQL server is unreachable from Docker on Linux, verify `listen_addresses`, `pg_hba.conf`, the host firewall, and that the database accepts the Docker bridge source address.
+- On Windows, confirm Docker Desktop is running in Linux container mode and that `docker compose version` succeeds in PowerShell or Command Prompt.
+- If port `8080` is already in use, set `SCHEMA_FOUNDRY_HOST_PORT` to another host port as shown in the UI-only quick start.
+
+## Windows Native Launch
+
+Docker Desktop is recommended on Windows because it provides the same environment as Linux and macOS. Native Windows use requires Python 3.10 or newer.
+
+PowerShell:
+
+```powershell
+git clone https://github.com/LandMineDevelopment/schema-foundry.git
+Set-Location schema-foundry
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e .
+schema-foundry
+```
+
+If PowerShell execution policy prevents activation, use Command Prompt:
+
+```bat
+git clone https://github.com/LandMineDevelopment/schema-foundry.git
+cd schema-foundry
+py -3 -m venv .venv
+.venv\Scripts\activate.bat
+python -m pip install -e .
+schema-foundry
+```
+
+Open `http://127.0.0.1:8080/`. Native Windows schema files default to `%USERPROFILE%\.local\share\schema-foundry\schemas`; profiles and migration history default to `%USERPROFILE%\.config\schema-foundry`.
+
+## Linux And macOS Native Launch
 
 Native use requires Python 3.10 or newer. PostgreSQL is optional until a database operation is requested.
 
@@ -71,7 +168,7 @@ python3 -m pip install -e .
 schema-foundry
 ```
 
-On Windows PowerShell, activate the environment with `.venv\Scripts\Activate.ps1`. Open `http://127.0.0.1:8080/` and stop the process with `Ctrl-C`.
+Open `http://127.0.0.1:8080/` and stop the process with `Ctrl-C`.
 
 For source-tree development without installation:
 
@@ -187,4 +284,4 @@ Database integration testing should use a disposable PostgreSQL database or roll
 
 ## License
 
-Schema Foundry is released under the permissive [Zero-Clause BSD license](LICENSE). It may be used, copied, modified, and distributed without an attribution requirement.
+Schema Foundry is released under the permissive [MIT License](LICENSE). It may be used, copied, modified, merged, published, distributed, sublicensed, and sold, provided the copyright and license notice are retained. The software is provided "as is," without warranty, and the license disclaims author and copyright-holder liability to the extent permitted by applicable law.

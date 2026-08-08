@@ -7,7 +7,7 @@ name = "schema-foundry"
 version = "0.1.0"
 description = "A standalone PostgreSQL schema designer, introspection tool, and migration workbench"
 readme = "README.md"
-license = "0BSD"
+license = "MIT"
 authors = [{ name = "LandMineDevelopment" }]
 requires-python = ">=3.10"
 dependencies = ["psycopg[binary]>=3.1,<4"]
