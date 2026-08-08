@@ -52,6 +52,14 @@ OpenCode 1.18.15 offers a temporary anonymous catalog of zero-cost models. Schem
 
 For authenticated Zen access, open **Provider settings**, use the OpenCode Zen key link, create an account and API key, and paste the key into Schemii. After connecting a provider, select any connected model from the chat panel. A model should support reliable tool calling to perform proposal actions.
 
+Schemii remembers the last selected provider/model in browser storage and restores it whenever that model remains available. This preference contains only provider and model identifiers; API keys, OAuth callbacks, and subscription tokens are never written to browser storage.
+
+## Persistent Chat History
+
+OpenCode stores chat sessions in the Docker-managed `schemii-opencode-data` volume. Schemii accepts only sessions associated with the sidecar's fixed `/workspace`; host OpenCode data is neither mounted nor shown, and records imported from another workspace are rejected. **New chat** starts a separate conversation without deleting the previous session. Open **Chat history** to list conversations by bounded title and timestamp, restore one, continue its existing session, or permanently delete it after confirmation.
+
+Restored history is intentionally narrower than OpenCode's raw records. Schemii returns at most 100 messages and a bounded amount of text through same-origin authenticated routes. It strips injected schema context, raw tool inputs and outputs, paths, metadata, provider response details, and action payloads. Historical schema, SQL, connection, and migration proposals are never restored as interactive actions; ask the assistant for a fresh proposal against the current design and database target.
+
 ## Configure Model Access
 
 Every chat selects one disclosure level:
@@ -78,7 +86,7 @@ While a response is running, the chat shows an animated activity timeline modele
 
 The browser never connects to OpenCode directly. Schemii subscribes to the private sidecar's session events, filters every event to the exact chat session, and emits a bounded same-origin NDJSON stream. The stream does not forward prompt or response text, reasoning text, tool inputs or outputs, SQL, action payloads, paths, attachments, metadata, provider response bodies, or events from another session. Final response content still arrives through the existing bounded message route and uses text-only rendering.
 
-Animations respect the operating system's reduced-motion preference. Starting a new chat is disabled while a response is active, and late responses are rejected by a local request-generation guard.
+Animations respect the operating system's reduced-motion preference. Starting, restoring, or browsing chats is disabled while a response is active, and late responses are rejected by a local request-generation guard.
 
 ## Explicit Tools And Skills
 
@@ -122,7 +130,9 @@ AI mode adds these volumes:
 - `schemii-opencode-state`: selected model and state
 - `schemii-opencode-cache`: recreatable provider/plugin cache
 
-Never remove these volumes unless credential and chat deletion is intentional. Disconnecting a provider through the UI removes its stored OpenCode authentication entry.
+Never remove these volumes unless credential and chat deletion is intentional. Use the history dialog to delete an individual chat. Disconnecting a provider through the UI removes its stored OpenCode authentication entry.
+
+Normal launcher restarts, image rebuilds, and container recreation reuse `schemii-opencode-data`, so OpenAI, GitHub Copilot, GitLab Duo, Zen, and API-key connections do not require authentication again. Reauthentication is required only when the provider expires or revokes its credential, the user disconnects it, or the persistent data volume is removed.
 
 ## Limitations
 

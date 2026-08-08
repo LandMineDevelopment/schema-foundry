@@ -40,7 +40,8 @@ assert.match(source, /if \(!confirm\(`Confirm action:/, "write actions must requ
 assert.match(source, /elements\.aiSqlPolicy\.value === "ask" && !confirm\(/, "ask-mode SQL must require confirmation");
 assert.match(source, /elements\.aiSqlPolicy\.value === "allow-session" && aiState\.sqlPolicyDeliberatelySelected/, "session SQL must require a deliberate user setting");
 assert.match(source, /elements\.postgresProfilePassword\.value = ""/, "connection proposals must clear the password field");
-assert.doesNotMatch(source, /localStorage|sessionStorage/, "provider secrets must not use browser storage");
+const authUi = source.slice(source.indexOf("function buildAiAuthForm"), source.indexOf("function loadAiStatus"));
+assert.doesNotMatch(authUi, /localStorage|sessionStorage/, "provider credentials must not use browser storage");
 assert.match(source, /path\.startsWith\("\/api\/ai\/"\)/, "AI requests must be restricted to the local API");
 assert.doesNotMatch(source.slice(source.indexOf("async function aiRequest"), source.indexOf("async function checkPostgresDrift")), /fetch\((?!path|"\/api\/session")/, "AI request code must not fetch external URLs");
 assert.match(source, /postgresState\.selectedProfileId !== context\.profileId/, "actions must recheck the selected profile");
@@ -68,7 +69,32 @@ assert.match(activityRenderer, /AI_SKILL_LABELS\[event\.skill\]/, "live skill ac
 assert.match(activityRenderer, /body\.textContent = part\.text/, "reasoning must render as text rather than HTML");
 assert.doesNotMatch(activityRenderer, /innerHTML|insertAdjacentHTML|eval\(/, "agent visualizations must not interpret model output as code or HTML");
 assert.match(source, /requestGeneration !== aiState\.requestGeneration/, "stale agent responses must not enter a reset conversation");
+const newChat = source.slice(source.indexOf("async function startNewAiChat"), source.indexOf("function formatAiHistoryDate"));
+assert.doesNotMatch(newChat, /DELETE|delete_session/, "starting a new chat must preserve the prior persistent session");
+const historyUi = source.slice(source.indexOf("function renderAiHistory"), source.indexOf("function updateAiAccessDisclosure"));
+assert.match(historyUi, /actions: \[\]/, "restored messages must not recreate historical actionable proposals");
+assert.match(historyUi, /aiState\.sessionId = sessionId/, "opening a saved chat must restore its persistent session ID");
+assert.match(historyUi, /method: "DELETE"/, "chat history must provide explicit session deletion");
+assert.doesNotMatch(historyUi, /innerHTML|insertAdjacentHTML|eval\(/, "chat history must render untrusted content as text");
+assert.match(html, /id="ai-history-dialog"/, "chat history dialog is missing");
 assert.match(styles, /@keyframes ai-dot-wave/, "agent progress animation is missing");
 assert.match(styles, /prefers-reduced-motion[\s\S]*\.ai-progress-grid i[\s\S]*animation: none/, "agent animations must respect reduced motion");
+
+const preferenceStart = source.indexOf("const AI_MODEL_STORAGE_KEY");
+const preferenceEnd = source.indexOf("function setAiPanelOpen", preferenceStart);
+assert.notEqual(preferenceStart, -1, "AI model preference marker is missing");
+const storageValues = new Map();
+const preferenceContext = vm.createContext({
+  localStorage: {
+    getItem: key => storageValues.get(key) ?? null,
+    setItem: (key, value) => storageValues.set(key, value)
+  }
+});
+vm.runInContext(`${source.slice(preferenceStart, preferenceEnd)}\nthis.normalizeStoredAiModel = normalizeStoredAiModel; this.storedAiModel = storedAiModel; this.rememberAiModel = rememberAiModel;`, preferenceContext);
+const selectedModel = JSON.stringify({ providerId: "openai", modelId: "gpt-5.4/mini" });
+preferenceContext.rememberAiModel(selectedModel);
+assert.equal(preferenceContext.storedAiModel(), selectedModel, "last selected model must survive a page reload");
+assert.equal(preferenceContext.normalizeStoredAiModel(JSON.stringify({ providerId: "openai", modelId: "gpt", key: "secret" })), "", "model preference must reject credential-like extra fields");
+assert.equal(preferenceContext.normalizeStoredAiModel(JSON.stringify({ providerId: "openai", modelId: "gpt\nsecret" })), "", "model preference must reject control characters");
 
 console.log("AI chat safety and action validation tests passed");

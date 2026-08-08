@@ -98,6 +98,14 @@ class FakeAIService:
         self.calls.append(("create_session", title, model))
         return {"id": "ses_1", "title": title or ""}
 
+    def list_sessions(self):
+        self.calls.append(("list_sessions",))
+        return {"sessions": [{"id": "ses_1", "title": "Schema chat", "updatedAt": 1234}]}
+
+    def session_messages(self, session_id):
+        self.calls.append(("session_messages", session_id))
+        return {"messages": [{"role": "user", "text": "Add events"}]}
+
     def delete_session(self, session_id):
         self.calls.append(("delete_session", session_id))
         return {"deleted": True}
@@ -282,6 +290,17 @@ class ServerTests(unittest.TestCase):
         self.assertIn(("oauth_callback", "anthropic", 1, "code"), self.ai_service.calls)
         self.assertIn(("delete_api_key", "anthropic"), self.ai_service.calls)
         self.assertIn(("delete_session", "ses_1"), self.ai_service.calls)
+
+    def test_ai_history_routes_require_session_and_return_normalized_history(self):
+        for path in ("/api/ai/sessions", "/api/ai/sessions/ses_1/messages"):
+            with self.subTest(path=path):
+                self.assertEqual(self.request(path)[0], 403)
+                status, body, _ = self.request(path, authorized=True)
+                self.assertEqual(status, 200)
+                self.assertNotIn("secret", body.decode().lower())
+
+        self.assertIn(("list_sessions",), self.ai_service.calls)
+        self.assertIn(("session_messages", "ses_1"), self.ai_service.calls)
 
     def test_ai_activity_stream_requires_session_and_returns_only_normalized_events(self):
         path = "/api/ai/sessions/ses_1/activity"

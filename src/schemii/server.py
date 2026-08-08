@@ -286,6 +286,19 @@ def make_handler(
                 if ai_service is None:
                     return self.send_json(200, {"available": False, "enabled": False, "healthy": False, "providers": [], "authMethods": {}, "skills": []})
                 return self._ai_call(ai_service.status)
+            if path == "/api/ai/sessions":
+                if not self._authorize_ai():
+                    return
+                if ai_service is None:
+                    return self.send_json(503, {"error": {"code": "ai_disabled", "message": "Embedded AI is not configured"}})
+                return self._ai_call(ai_service.list_sessions)
+            ai_session_match = AI_SESSION_PATH.fullmatch(path)
+            if ai_session_match and ai_session_match.group(2) == "messages":
+                if not self._authorize_ai():
+                    return
+                if ai_service is None:
+                    return self.send_json(503, {"error": {"code": "ai_disabled", "message": "Embedded AI is not configured"}})
+                return self._ai_call(lambda: ai_service.session_messages(ai_session_match.group(1)))
             activity_match = AI_ACTIVITY_PATH.fullmatch(path)
             if activity_match:
                 if not self._authorize_ai():

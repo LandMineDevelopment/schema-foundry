@@ -64,6 +64,18 @@ class StandaloneRuntimeTests(unittest.TestCase):
         self.assertTrue(config_dir.is_absolute())
         self.assertTrue(schema_dir.is_absolute())
 
+    def test_ai_provider_credentials_use_a_stable_persistent_volume(self):
+        compose = (ROOT / "compose.ai.yaml").read_text(encoding="utf-8")
+        launcher = (ROOT / "start.sh").read_text(encoding="utf-8")
+
+        self.assertIn("schemii-opencode-data:/opencode/data", compose)
+        self.assertIn("schemii-opencode-data:", compose)
+        self.assertIn("XDG_DATA_HOME: /opencode/data", compose)
+        self.assertNotIn("~/.local/share/opencode", compose)
+        self.assertNotIn("${HOME}", compose)
+        self.assertNotIn("down --volumes", launcher)
+        self.assertNotIn("volume rm", launcher)
+
 
 if __name__ == "__main__":
     unittest.main()

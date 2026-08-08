@@ -50,6 +50,8 @@ Use `ai` for design-only chat, `ai-local-db` for a Linux host PostgreSQL server,
 
 The AI panel discovers providers, subscription/API-key sign-in methods, connected models, and packaged Schemii skills from OpenCode. Working temporary OpenCode free models are available without a key; provider settings also support an optional OpenCode Zen key. A session-scoped activity timeline visualizes model work, retries, safe skill/tool stages, elapsed time, reasoning, and completion while filtering sensitive event fields in the backend. Users control whether the model receives metadata, full schema structure, or explicitly approved query results. Raw SQL is always visible, every write requires separate UI confirmation, and migration apply continues through the existing reviewed plan workflow.
 
+The last selected model is restored on the next visit. Prior chats remain available from the history dialog across normal restarts and rebuilds; opening one restores its bounded message history and continues the same OpenCode session. Starting a new chat preserves the prior conversation, while permanent deletion requires an explicit history action and confirmation. Provider subscription and API-key credentials remain in OpenCode's persistent data volume; Schemii never stores those credentials in browser storage.
+
 See [`docs/AI_ASSISTANT.md`](docs/AI_ASSISTANT.md) for provider sign-in, model selection, data disclosure, tools, skills, confirmations, credential storage, and limitations.
 
 ## Screenshots

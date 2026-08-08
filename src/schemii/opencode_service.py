@@ -18,6 +18,9 @@ MAX_ACTIONS = 20
 MAX_ACTION_SIZE = 32 * 1024
 MAX_TOOL_OUTPUT_SIZE = 256 * 1024
 MAX_ACTIVITY_LINE_SIZE = 256 * 1024
+MAX_HISTORY_MESSAGES = 100
+MAX_HISTORY_TEXT_SIZE = 512 * 1024
+OPENCODE_WORKSPACE = "/workspace"
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 ACTION_PREFIX = "SCHEMII_ACTION:"
 CUSTOM_TOOLS = {
@@ -391,14 +394,127 @@ class OpenCodeService:
         _model(model, optional=True)
         payload = {} if title is None else {"title": title}
         result = self._request("POST", "/session", payload)
-        if not isinstance(result, dict) or not isinstance(result.get("id"), str):
+        if not isinstance(result, dict) or not isinstance(result.get("id"), str) or result.get("directory") != OPENCODE_WORKSPACE:
             raise OpenCodeServiceError(502, "opencode_error", "OpenCode returned an invalid session")
         return {"id": result["id"][:128], "title": str(result.get("title", title or ""))[:256]}
+
+    def list_sessions(self) -> dict[str, list[dict[str, Any]]]:
+        result = self._request("GET", "/session")
+        if not isinstance(result, list):
+            raise OpenCodeServiceError(502, "opencode_error", "OpenCode returned invalid sessions")
+        sessions = []
+        for item in result[:200]:
+            if (
+                not isinstance(item, dict) or not isinstance(item.get("id"), str)
+                or not SAFE_ID.fullmatch(item["id"]) or item.get("directory") != OPENCODE_WORKSPACE
+                or item.get("parentID") is not None
+            ):
+                continue
+            item_time = item.get("time") if isinstance(item.get("time"), dict) else {}
+            session = {
+                "id": item["id"],
+                "title": " ".join(self._history_text(item.get("title"), 256).split()) or "Untitled chat",
+            }
+            if isinstance(item_time.get("created"), (int, float)):
+                session["createdAt"] = max(0, item_time["created"])
+            if isinstance(item_time.get("updated"), (int, float)):
+                session["updatedAt"] = max(0, item_time["updated"])
+            model = self._history_model(item)
+            if model:
+                session["model"] = model
+            sessions.append(session)
+        sessions.sort(key=lambda item: item.get("updatedAt", item.get("createdAt", 0)), reverse=True)
+        return {"sessions": sessions}
+
+    def session_messages(self, session_id: Any) -> dict[str, Any]:
+        session_id = self.verify_session(session_id)
+        result = self._request("GET", f"/session/{quote(session_id, safe='')}/message?limit={MAX_HISTORY_MESSAGES}")
+        if not isinstance(result, list):
+            raise OpenCodeServiceError(502, "opencode_error", "OpenCode returned invalid session messages")
+        messages = []
+        total_text = 0
+        latest_model = None
+        for item in reversed(result[-MAX_HISTORY_MESSAGES:]):
+            if not isinstance(item, dict) or not isinstance(item.get("info"), dict) or not isinstance(item.get("parts"), list):
+                continue
+            info = item["info"]
+            role = info.get("role")
+            if role not in {"user", "assistant"}:
+                continue
+            model = self._history_model(info)
+            if model and latest_model is None:
+                latest_model = model
+            item_time = info.get("time") if isinstance(info.get("time"), dict) else {}
+            message: dict[str, Any] = {"role": role}
+            if isinstance(item_time.get("created"), (int, float)):
+                message["createdAt"] = max(0, item_time["created"])
+            if role == "user":
+                text = "\n".join(
+                    part["text"] for part in item["parts"]
+                    if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
+                )
+                marker = "\n\nUser request:\n"
+                if marker in text:
+                    text = text.split(marker, 1)[1]
+                remaining = MAX_HISTORY_TEXT_SIZE - total_text
+                text = self._history_text(text, min(16 * 1024, remaining))
+                if not text:
+                    continue
+                total_text += len(text.encode("utf-8"))
+                message["text"] = text
+            else:
+                try:
+                    normalized = self._normalize_message(item)
+                except OpenCodeServiceError:
+                    continue
+                safe_parts = []
+                for part in normalized["parts"]:
+                    if part.get("type") in {"text", "reasoning"}:
+                        remaining = MAX_HISTORY_TEXT_SIZE - total_text
+                        if remaining <= 0:
+                            continue
+                        text = part.get("text", "").encode("utf-8")[:remaining].decode("utf-8", "ignore")
+                        total_text += len(text.encode("utf-8"))
+                        safe_parts.append({**part, "text": text})
+                    elif part.get("type") == "tool":
+                        safe_parts.append({key: part[key] for key in ("type", "tool", "status") if key in part})
+                    elif part.get("type") == "skill":
+                        safe_parts.append({key: part[key] for key in ("type", "skill", "status") if key in part})
+                if not safe_parts:
+                    continue
+                message["parts"] = safe_parts
+                message["text"] = "\n".join(part.get("text", "") for part in safe_parts if part.get("type") == "text")
+            messages.append(message)
+            if total_text >= MAX_HISTORY_TEXT_SIZE:
+                break
+        messages.reverse()
+        payload: dict[str, Any] = {"messages": messages}
+        if latest_model:
+            payload["model"] = latest_model
+        return payload
+
+    @staticmethod
+    def _history_text(value: Any, maximum: int) -> str:
+        if not isinstance(value, str) or maximum <= 0:
+            return ""
+        value = "".join(char if ord(char) >= 32 and ord(char) != 127 else " " for char in value).strip()
+        return value.encode("utf-8")[:maximum].decode("utf-8", "ignore")
+
+    @staticmethod
+    def _history_model(info: dict[str, Any]) -> dict[str, str] | None:
+        nested = info.get("model") if isinstance(info.get("model"), dict) else {}
+        provider_id = info.get("providerID", nested.get("providerID"))
+        model_id = info.get("modelID", nested.get("modelID", nested.get("id")))
+        if not isinstance(provider_id, str) or not SAFE_ID.fullmatch(provider_id):
+            return None
+        if not isinstance(model_id, str) or not model_id or len(model_id.encode("utf-8")) > 256 or any(ord(char) < 32 or ord(char) == 127 for char in model_id):
+            return None
+        return {"providerId": provider_id, "modelId": model_id}
 
     def verify_session(self, session_id: Any) -> str:
         session_id = _identifier(session_id, "sessionId")
         result = self._request("GET", f"/session/{quote(session_id, safe='')}")
-        if not isinstance(result, dict) or result.get("id") != session_id:
+        if not isinstance(result, dict) or result.get("id") != session_id or result.get("directory") != OPENCODE_WORKSPACE:
             raise OpenCodeServiceError(404, "not_found", "AI session was not found")
         return session_id
 
@@ -509,13 +625,13 @@ class OpenCodeService:
         return None
 
     def delete_session(self, session_id: Any) -> dict[str, bool]:
-        session_id = _identifier(session_id, "sessionId")
+        session_id = self.verify_session(session_id)
         if self._request("DELETE", f"/session/{quote(session_id, safe='')}") is not True:
             raise OpenCodeServiceError(502, "opencode_error", "OpenCode returned an invalid session response")
         return {"deleted": True}
 
     def prompt(self, session_id: Any, text: Any, model: Any, system: Any, *, allow_data: bool = False) -> dict[str, Any]:
-        session_id = _identifier(session_id, "sessionId")
+        session_id = self.verify_session(session_id)
         text = _bounded_text(text, MAX_PROMPT_SIZE, "text")
         model = _model(model)
         system = _bounded_text(system, MAX_TEXT_SIZE, "system")

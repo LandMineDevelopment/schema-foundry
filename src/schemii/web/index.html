@@ -179,6 +179,9 @@
               <h2>Schema assistant</h2>
             </div>
             <span class="ai-status-pill" id="ai-status-pill">Checking</span>
+            <button class="icon-button" id="ai-history-button" type="button" data-tooltip="Chat history" aria-label="Chat history">
+              <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4.5 5.5h11M4.5 10h11M4.5 14.5h7"/></svg>
+            </button>
             <button class="icon-button" id="ai-new-chat" type="button" data-tooltip="New chat" aria-label="New chat">
               <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v12M4 10h12"/></svg>
             </button>
@@ -444,6 +447,20 @@
         </header>
         <div class="ai-settings-status" id="ai-settings-status"></div>
         <div class="ai-providers" id="ai-providers"></div>
+      </div>
+    </dialog>
+
+    <dialog id="ai-history-dialog" class="schema-dialog">
+      <div class="schema-dialog-panel ai-history-panel">
+        <header class="schema-dialog-head">
+          <div>
+            <span class="eyebrow">Persistent conversations</span>
+            <h2>Chat history</h2>
+            <p>Open a prior conversation to continue it, or permanently delete it.</p>
+          </div>
+          <button class="dialog-close" id="ai-history-close" type="button" aria-label="Close">×</button>
+        </header>
+        <div class="ai-history-list" id="ai-history-list" aria-live="polite"></div>
       </div>
     </dialog>
 

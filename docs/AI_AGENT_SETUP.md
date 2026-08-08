@@ -88,6 +88,8 @@ Read `docs/AI_ASSISTANT.md` before changing the embedded agent. Keep OpenCode pi
 
 Live chat activity uses the narrowly scoped `GET /api/ai/sessions/{sessionId}/activity` NDJSON route. The backend verifies the local session, subscribes to OpenCode's private event stream, filters the exact session ID, and emits only normalized status, reasoning-state, allowlisted skill/tool-state, compaction, and connection records. Do not widen this into a raw event proxy.
 
+Persistent history uses authenticated `GET /api/ai/sessions` and `GET /api/ai/sessions/{sessionId}/messages` routes. Keep listing and message counts bounded. Never expose raw OpenCode session records: strip injected schema context, raw tool inputs and outputs, paths, metadata, provider details, and historical action payloads so restored proposals remain inert.
+
 Provider credentials must flow browser -> local Schemii API -> private OpenCode. Never return credentials, put them in browser storage, print them, commit them, or mount host OpenCode credentials automatically. Every write proposal requires browser confirmation; SQL data access follows the user's current disclosure and SQL-policy settings.
 
 ## Data Safety

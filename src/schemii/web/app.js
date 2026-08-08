@@ -168,6 +168,7 @@ const elements = {
   aiPanel: document.querySelector("#ai-panel"),
   aiEmptyCopy: document.querySelector("#ai-empty-copy"),
   aiStatusPill: document.querySelector("#ai-status-pill"),
+  aiHistoryButton: document.querySelector("#ai-history-button"),
   aiNewChat: document.querySelector("#ai-new-chat"),
   aiModelSelect: document.querySelector("#ai-model-select"),
   aiAccessSelect: document.querySelector("#ai-access-select"),
@@ -181,7 +182,9 @@ const elements = {
   aiSendButton: document.querySelector("#ai-send-button"),
   aiSettingsDialog: document.querySelector("#ai-settings-dialog"),
   aiSettingsStatus: document.querySelector("#ai-settings-status"),
-  aiProviders: document.querySelector("#ai-providers")
+  aiProviders: document.querySelector("#ai-providers"),
+  aiHistoryDialog: document.querySelector("#ai-history-dialog"),
+  aiHistoryList: document.querySelector("#ai-history-list")
 };
 
 let schemaLibrary = { activeId: null, schemas: [] };
@@ -3805,6 +3808,31 @@ async function applyAiSchemaAction(action) {
   }
 }
 
+const AI_MODEL_STORAGE_KEY = "schemii.ai.lastModel";
+
+function normalizeStoredAiModel(value) {
+  if (typeof value !== "string" || !value || value.length > 1024) return "";
+  try {
+    const model = JSON.parse(value);
+    if (!model || typeof model !== "object" || Array.isArray(model) || Object.keys(model).sort().join(",") !== "modelId,providerId") return "";
+    if (typeof model.providerId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(model.providerId)) return "";
+    if (typeof model.modelId !== "string" || !model.modelId || model.modelId !== model.modelId.trim() || model.modelId.length > 256 || /[\x00-\x1f\x7f]/.test(model.modelId)) return "";
+    return JSON.stringify({ providerId: model.providerId, modelId: model.modelId });
+  } catch {
+    return "";
+  }
+}
+
+function storedAiModel() {
+  try { return normalizeStoredAiModel(localStorage.getItem(AI_MODEL_STORAGE_KEY)); } catch { return ""; }
+}
+
+function rememberAiModel(value) {
+  const normalized = normalizeStoredAiModel(value);
+  if (!normalized) return;
+  try { localStorage.setItem(AI_MODEL_STORAGE_KEY, normalized); } catch { /* Model preference persistence is optional. */ }
+}
+
 function setAiPanelOpen(open) {
   elements.mainLayout.classList.toggle("ai-open", open);
   elements.toolRail.inert = open;
@@ -3824,6 +3852,7 @@ function setAiBusy(busy) {
   elements.aiSendButton.disabled = busy || !aiState.available || !elements.aiModelSelect.value;
   elements.aiInput.disabled = busy || !aiState.available || !elements.aiModelSelect.value;
   elements.aiNewChat.disabled = busy;
+  elements.aiHistoryButton.disabled = busy;
   elements.aiModelSelect.disabled = busy || !elements.aiModelSelect.value;
   elements.aiAccessSelect.disabled = busy;
   elements.aiSqlPolicy.disabled = busy;
@@ -3831,7 +3860,7 @@ function setAiBusy(busy) {
 }
 
 function renderAiModels() {
-  const previous = elements.aiModelSelect.value;
+  const previous = normalizeStoredAiModel(elements.aiModelSelect.value) || storedAiModel();
   elements.aiModelSelect.replaceChildren();
   for (const provider of aiState.providers.filter(item => item.connected && item.models?.length)) {
     const group = document.createElement("optgroup");
@@ -4465,9 +4494,6 @@ async function sendAiMessage(text, renderedRole = "user") {
 async function startNewAiChat() {
   if (aiState.busy) return showToast("Wait for the current response to finish");
   aiState.requestGeneration += 1;
-  if (aiState.sessionId) {
-    try { await aiRequest(`/api/ai/sessions/${encodeURIComponent(aiState.sessionId)}`, { method: "DELETE" }); } catch { /* A stale remote session must not block a local reset. */ }
-  }
   aiState.sessionId = null;
   aiState.sqlPolicyDeliberatelySelected = false;
   elements.aiSqlPolicy.value = "disabled";
@@ -4480,6 +4506,103 @@ async function startNewAiChat() {
   copy.textContent = "Proposals will use the currently active design.";
   empty.append(title, copy);
   elements.aiMessages.append(empty);
+}
+
+function formatAiHistoryDate(value) {
+  if (!Number.isFinite(value)) return "Saved conversation";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "Saved conversation" : date.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+}
+
+function renderAiHistory(sessions) {
+  elements.aiHistoryList.replaceChildren();
+  if (!sessions.length) {
+    const empty = document.createElement("p");
+    empty.className = "ai-history-empty";
+    empty.textContent = "No saved conversations yet.";
+    elements.aiHistoryList.append(empty);
+    return;
+  }
+  for (const session of sessions) {
+    const item = document.createElement("article");
+    item.className = `ai-history-item${session.id === aiState.sessionId ? " current" : ""}`;
+    const copy = document.createElement("div");
+    copy.className = "ai-history-copy";
+    const title = document.createElement("strong");
+    title.textContent = session.title || "Untitled chat";
+    const date = document.createElement("span");
+    date.textContent = `${formatAiHistoryDate(session.updatedAt ?? session.createdAt)}${session.id === aiState.sessionId ? " / Current" : ""}`;
+    copy.append(title, date);
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "button button-ghost";
+    open.textContent = session.id === aiState.sessionId ? "Reopen" : "Open";
+    open.addEventListener("click", () => restoreAiSession(session.id));
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "button button-ghost ai-history-delete";
+    remove.textContent = "Delete";
+    remove.addEventListener("click", () => deleteAiHistorySession(session.id, session.title));
+    item.append(copy, open, remove);
+    elements.aiHistoryList.append(item);
+  }
+}
+
+async function openAiHistory() {
+  if (aiState.busy) return showToast("Wait for the current response to finish");
+  elements.aiHistoryList.replaceChildren();
+  const loading = document.createElement("p");
+  loading.className = "ai-history-empty";
+  loading.textContent = "Loading conversations...";
+  elements.aiHistoryList.append(loading);
+  elements.aiHistoryDialog.showModal();
+  try {
+    const history = await aiRequest("/api/ai/sessions", { method: "GET" });
+    renderAiHistory(history.sessions ?? []);
+  } catch (error) {
+    loading.textContent = `Could not load chat history: ${error.message}`;
+  }
+}
+
+async function restoreAiSession(sessionId) {
+  if (aiState.busy) return;
+  try {
+    const history = await aiRequest(`/api/ai/sessions/${encodeURIComponent(sessionId)}/messages`, { method: "GET" });
+    aiState.requestGeneration += 1;
+    aiState.sessionId = sessionId;
+    aiState.sqlPolicyDeliberatelySelected = false;
+    elements.aiSqlPolicy.value = "disabled";
+    elements.aiMessages.replaceChildren();
+    for (const message of history.messages ?? []) {
+      if (message.role === "user") appendAiMessage("user", message.text);
+      if (message.role === "assistant") renderAiResponse({ parts: message.parts ?? [], text: message.text ?? "", actions: [] }, null);
+    }
+    if (!elements.aiMessages.children.length) appendAiMessage("assistant", "This saved conversation has no displayable messages.");
+    const modelValue = normalizeStoredAiModel(JSON.stringify(history.model ?? {}));
+    if (modelValue && [...elements.aiModelSelect.options].some(option => option.value === modelValue)) {
+      elements.aiModelSelect.value = modelValue;
+      rememberAiModel(modelValue);
+    }
+    setAiBusy(false);
+    elements.aiHistoryDialog.close();
+    setAiPanelOpen(true);
+    elements.aiMessages.scrollTop = elements.aiMessages.scrollHeight;
+    elements.aiInput.focus();
+  } catch (error) {
+    showToast(`Could not open chat: ${error.message}`);
+  }
+}
+
+async function deleteAiHistorySession(sessionId, title) {
+  if (!confirm(`Permanently delete chat “${title || "Untitled chat"}”?`)) return;
+  try {
+    await aiRequest(`/api/ai/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+    if (aiState.sessionId === sessionId) await startNewAiChat();
+    const history = await aiRequest("/api/ai/sessions", { method: "GET" });
+    renderAiHistory(history.sessions ?? []);
+  } catch (error) {
+    showToast(`Could not delete chat: ${error.message}`);
+  }
 }
 
 function updateAiAccessDisclosure() {
@@ -5259,12 +5382,18 @@ elements.postgresButton.addEventListener("click", async () => {
 elements.aiButton.addEventListener("click", () => setAiPanelOpen(!elements.aiPanel.classList.contains("open")));
 document.querySelector("#ai-close-button").addEventListener("click", () => setAiPanelOpen(false));
 elements.aiNewChat.addEventListener("click", startNewAiChat);
+elements.aiHistoryButton.addEventListener("click", openAiHistory);
+document.querySelector("#ai-history-close").addEventListener("click", () => elements.aiHistoryDialog.close());
 document.querySelector("#ai-settings-button").addEventListener("click", async () => {
   elements.aiSettingsDialog.showModal();
   await loadAiStatus(true);
 });
 document.querySelector("#ai-settings-close").addEventListener("click", () => elements.aiSettingsDialog.close());
 elements.aiAccessSelect.addEventListener("change", updateAiAccessDisclosure);
+elements.aiModelSelect.addEventListener("change", () => {
+  rememberAiModel(elements.aiModelSelect.value);
+  setAiBusy(aiState.busy);
+});
 elements.aiSqlPolicy.addEventListener("change", () => {
   aiState.sqlPolicyDeliberatelySelected = true;
 });

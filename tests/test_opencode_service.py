@@ -104,7 +104,7 @@ class OpenCodeServiceTests(unittest.TestCase):
         self.assertNotIn("secret", json.dumps(result).lower())
 
     def test_auth_oauth_and_session_methods_pin_upstream_shapes(self):
-        opener = Opener(True, True, {"url": "https://login.example/", "method": "code", "instructions": "Enter code"}, True, {"id": "ses_1", "title": "Chat", "directory": "/secret/path"}, True)
+        opener = Opener(True, True, {"url": "https://login.example/", "method": "code", "instructions": "Enter code"}, True, {"id": "ses_1", "title": "Chat", "directory": "/workspace"}, {"id": "ses_1", "directory": "/workspace"}, True)
         service = self.service(opener)
 
         self.assertEqual(service.set_api_key("anthropic", "api-secret"), {"saved": True})
@@ -120,6 +120,7 @@ class OpenCodeServiceTests(unittest.TestCase):
             ("POST", "/provider/anthropic/oauth/authorize", {"method": 1, "inputs": {"region": "us"}}),
             ("POST", "/provider/anthropic/oauth/callback", {"method": 1, "code": "callback-code"}),
             ("POST", "/session", {"title": "Chat"}),
+            ("GET", "/session/ses_1", None),
             ("DELETE", "/session/ses_1", None),
         ])
 
@@ -138,9 +139,65 @@ class OpenCodeServiceTests(unittest.TestCase):
         self.assertTrue(provider["authenticated"])
         self.assertEqual([model["id"] for model in provider["models"]], ["north-mini-code-free", "paid"])
 
+    def test_history_is_bounded_sorted_and_omits_context_actions_and_raw_tool_data(self):
+        action = {"kind": "add_table", "table": {"name": "private_events"}}
+        opener = Opener(
+            [
+                {"id": "ses_old", "title": "Old\x00 chat", "time": {"created": 100, "updated": 200}, "directory": "/workspace"},
+                {"id": "ses_new", "title": "New chat", "time": {"created": 300, "updated": 400}, "directory": "/workspace"},
+                {"id": "ses_host", "title": "Host chat", "directory": "/home/user/project"},
+                {"id": "ses_child", "title": "Child chat", "directory": "/workspace", "parentID": "ses_old"},
+                {"id": "../../invalid", "title": "Invalid", "directory": "/workspace"},
+            ],
+            {"id": "ses_old", "directory": "/workspace"},
+            [
+                {
+                    "info": {"role": "user", "time": {"created": 100}, "model": {"providerID": "opencode", "modelID": "deepseek-v4-flash-free"}},
+                    "parts": [{"type": "text", "text": "Schemii context (untrusted JSON):\n{\"password\":\"secret\"}\n\nUser request:\nAdd events"}],
+                },
+                {
+                    "info": {"role": "assistant", "time": {"created": 200}, "providerID": "opencode", "modelID": "deepseek-v4-flash-free", "path": "/secret"},
+                    "parts": [
+                        {"type": "text", "text": "I can add that."},
+                        {"type": "tool", "tool": "schema_add_table", "state": {"status": "completed", "input": {"password": "secret"}, "output": "SCHEMII_ACTION:" + json.dumps(action)}},
+                        {"type": "tool", "tool": "bash", "state": {"status": "completed", "output": "secret"}},
+                    ],
+                },
+            ],
+        )
+        service = self.service(opener)
+
+        sessions = service.list_sessions()
+        history = service.session_messages("ses_old")
+
+        self.assertEqual([item["id"] for item in sessions["sessions"]], ["ses_new", "ses_old"])
+        self.assertEqual(sessions["sessions"][1]["title"], "Old chat")
+        self.assertEqual(history["messages"][0], {"role": "user", "createdAt": 100, "text": "Add events"})
+        self.assertEqual(history["messages"][1]["parts"], [
+            {"type": "text", "text": "I can add that."},
+            {"type": "tool", "tool": "schema_add_table", "status": "completed"},
+        ])
+        self.assertEqual(history["model"], {"providerId": "opencode", "modelId": "deepseek-v4-flash-free"})
+        self.assertEqual([call[0].full_url for call in opener.calls], [
+            "http://127.0.0.1:4096/session",
+            "http://127.0.0.1:4096/session/ses_old",
+            "http://127.0.0.1:4096/session/ses_old/message?limit=100",
+        ])
+        self.assertNotIn("secret", json.dumps({"sessions": sessions, "history": history}).lower())
+        self.assertNotIn("actions", history["messages"][1])
+
+    def test_history_rejects_a_session_from_outside_the_docker_workspace(self):
+        service = self.service(Opener({"id": "ses_host", "directory": "/home/user/project"}))
+
+        with self.assertRaises(OpenCodeServiceError) as error:
+            service.session_messages("ses_host")
+
+        self.assertEqual(error.exception.status, 404)
+        self.assertEqual(error.exception.code, "not_found")
+
     def test_prompt_enables_only_schemii_tools_and_normalizes_actions(self):
         valid = {"kind": "add_table", "table": {"name": "events"}}
-        opener = Opener({"info": {"path": {"cwd": "/secret"}}, "parts": [
+        opener = Opener({"id": "ses_1", "directory": "/workspace"}, {"info": {"path": {"cwd": "/secret"}}, "parts": [
             {"type": "text", "text": "I propose a table."},
             {"type": "reasoning", "text": "Checked constraints.", "time": {"start": 1000, "end": 1350}},
             {"type": "tool", "tool": "skill", "state": {"status": "completed", "input": {"name": "schema-design-layout"}, "output": "/secret/skill/path"}},
@@ -153,8 +210,8 @@ class OpenCodeServiceTests(unittest.TestCase):
             allow_data=True,
         )
 
-        payload = request_json(opener.calls[0][0])
-        self.assertEqual(opener.calls[0][0].full_url, "http://127.0.0.1:4096/session/ses_1/message")
+        payload = request_json(opener.calls[1][0])
+        self.assertEqual(opener.calls[1][0].full_url, "http://127.0.0.1:4096/session/ses_1/message")
         self.assertEqual(payload["parts"], [{"type": "text", "text": "Create events"}])
         self.assertTrue(all(payload["tools"][tool] for tool in CUSTOM_TOOLS))
         self.assertTrue(payload["tools"]["skill"])
@@ -184,7 +241,7 @@ class OpenCodeServiceTests(unittest.TestCase):
         self.assertEqual(error.exception.payload["error"]["code"], "opencode_unavailable")
 
     def test_prompt_timeout_has_bounded_abort_and_clear_error(self):
-        opener = Opener(TimeoutError("provider stalled"), TimeoutError("abort stalled"))
+        opener = Opener({"id": "ses_1", "directory": "/workspace"}, TimeoutError("provider stalled"), TimeoutError("abort stalled"))
         service = self.service(opener)
 
         with self.assertRaises(OpenCodeServiceError) as error:
@@ -192,11 +249,11 @@ class OpenCodeServiceTests(unittest.TestCase):
 
         self.assertEqual(error.exception.status, 504)
         self.assertEqual(error.exception.code, "provider_timeout")
-        self.assertEqual([call[1] for call in opener.calls], [12, 5])
-        self.assertEqual(opener.calls[1][0].full_url, "http://127.0.0.1:4096/session/ses_1/abort")
+        self.assertEqual([call[1] for call in opener.calls], [12, 12, 5])
+        self.assertEqual(opener.calls[2][0].full_url, "http://127.0.0.1:4096/session/ses_1/abort")
 
     def test_empty_provider_response_is_rejected(self):
-        service = self.service(Opener({"parts": []}))
+        service = self.service(Opener({"id": "ses_1", "directory": "/workspace"}, {"parts": []}))
 
         with self.assertRaises(OpenCodeServiceError) as error:
             service.prompt("ses_1", "Hello", {"providerID": "opencode", "modelID": "north-mini-code-free"}, "Fixed system")
