@@ -194,6 +194,23 @@ const elements = {
   onboardingBack: document.querySelector("#onboarding-back"),
   onboardingNext: document.querySelector("#onboarding-next"),
   onboardingSkip: document.querySelector("#onboarding-skip"),
+  relationshipDemo: document.querySelector(".tour-relationship-demo"),
+  relationshipDemoCursor: document.querySelector(".tour-relationship-cursor"),
+  relationshipDemoStatus: document.querySelector("#relationship-demo-status"),
+  relationshipDemoToggle: document.querySelector("#relationship-demo-toggle"),
+  inspectorDemo: document.querySelector(".tour-inspector-demo"),
+  inspectorDemoCursor: document.querySelector(".tour-inspector-demo .tour-demo-cursor"),
+  inspectorDemoStatus: document.querySelector("#tour-demo-status"),
+  inspectorDemoToggle: document.querySelector("#tour-demo-toggle"),
+  assistantDemo: document.querySelector(".tour-assistant-demo"),
+  assistantDemoCursor: document.querySelector(".tour-assistant-cursor"),
+  assistantDemoStatus: document.querySelector("#assistant-demo-status"),
+  assistantDemoToggle: document.querySelector("#assistant-demo-toggle"),
+  assistantDemoPrompt: document.querySelector(".tour-assistant-composer > span"),
+  postgresDemo: document.querySelector(".tour-postgres-demo"),
+  postgresDemoCursor: document.querySelector(".tour-postgres-cursor"),
+  postgresDemoStatus: document.querySelector("#postgres-demo-status"),
+  postgresDemoToggle: document.querySelector("#postgres-demo-toggle"),
   shutdownDialog: document.querySelector("#shutdown-dialog"),
   shutdownConfirmPanel: document.querySelector("#shutdown-confirm-panel"),
   shutdownComplete: document.querySelector("#shutdown-complete"),
@@ -230,6 +247,20 @@ let toastTimer = null;
 let onboardingPage = 0;
 let onboardingSeenServerId = null;
 let serverStopped = false;
+let relationshipDemoTimer = null;
+let relationshipDemoStep = 0;
+let relationshipDemoPaused = false;
+let relationshipDemoState = "idle";
+let inspectorDemoTimer = null;
+let inspectorDemoStep = 0;
+let inspectorDemoPaused = false;
+let inspectorDemoState = { inspectorOpen: false, inspectorCollapsed: false, dataOpen: false, dataMaximized: false, pane: "data" };
+let assistantDemoTimer = null;
+let assistantDemoStep = 0;
+let assistantDemoPaused = false;
+let postgresDemoTimer = null;
+let postgresDemoStep = 0;
+let postgresDemoPaused = false;
 let activeTooltipTarget = null;
 let tooltipHideTimer = null;
 let undoStack = [];
@@ -327,6 +358,426 @@ function rememberOnboardingPreference() {
   } catch { /* Onboarding remains usable when browser storage is unavailable. */ }
 }
 
+const RELATIONSHIP_DEMO_STEPS = [
+  { target: "tool", caption: "Select the Add relationship tool.", state: "tool" },
+  { target: "source", caption: "Select projects.owner_id as the foreign-key column.", state: "source" },
+  { target: "target", caption: "Select users.id as the referenced primary key.", state: "editor" },
+  { target: "save", caption: "Review the column pair and save the relationship.", state: "complete" }
+];
+
+function renderRelationshipDemoState(state) {
+  relationshipDemoState = state;
+  elements.relationshipDemo.classList.toggle("demo-tool-active", state === "tool" || state === "source");
+  elements.relationshipDemo.classList.toggle("demo-source-selected", state === "source");
+  elements.relationshipDemo.classList.toggle("demo-editor-open", state === "editor");
+  elements.relationshipDemo.classList.toggle("demo-relationship-complete", state === "complete");
+}
+
+function resetRelationshipDemo(showStatic = false) {
+  clearTimeout(relationshipDemoTimer);
+  relationshipDemoTimer = null;
+  relationshipDemoStep = 0;
+  renderRelationshipDemoState(showStatic ? "complete" : "idle");
+  elements.relationshipDemoCursor.classList.remove("visible", "clicking", "tooltip-left", "tooltip-above");
+  elements.relationshipDemoStatus.textContent = showStatic ? "Relationship created from projects.owner_id to users.id." : "Watch how a foreign-key connection is created.";
+}
+
+function queueRelationshipDemo(callback, delay) {
+  clearTimeout(relationshipDemoTimer);
+  relationshipDemoTimer = setTimeout(callback, delay);
+}
+
+function runRelationshipDemoStep() {
+  if (relationshipDemoPaused || onboardingPage !== 0 || !elements.onboardingDialog.open) return;
+  if (relationshipDemoStep >= RELATIONSHIP_DEMO_STEPS.length) {
+    elements.relationshipDemoStatus.textContent = "Relationship created. Replaying...";
+    return queueRelationshipDemo(() => {
+      resetRelationshipDemo();
+      runRelationshipDemoStep();
+    }, 1500);
+  }
+  const step = RELATIONSHIP_DEMO_STEPS[relationshipDemoStep];
+  const target = elements.relationshipDemo.querySelector(`[data-relationship-demo-target="${step.target}"]`);
+  if (!target) {
+    relationshipDemoStep += 1;
+    return runRelationshipDemoStep();
+  }
+  const demoBounds = elements.relationshipDemo.getBoundingClientRect();
+  const targetBounds = target.getBoundingClientRect();
+  const left = targetBounds.left - demoBounds.left + targetBounds.width / 2 - 3;
+  const top = targetBounds.top - demoBounds.top + targetBounds.height / 2 - 2;
+  const cursor = elements.relationshipDemoCursor;
+  cursor.classList.remove("clicking", "tooltip-left", "tooltip-above");
+  cursor.classList.toggle("tooltip-left", left > demoBounds.width * .7);
+  cursor.classList.toggle("tooltip-above", top > demoBounds.height * .7);
+  cursor.style.left = `${left}px`;
+  cursor.style.top = `${top}px`;
+  cursor.classList.add("visible");
+  elements.relationshipDemoStatus.textContent = `Next: ${step.caption}`;
+  queueRelationshipDemo(() => {
+    cursor.classList.add("clicking");
+    queueRelationshipDemo(() => {
+      renderRelationshipDemoState(step.state);
+      elements.relationshipDemoStatus.textContent = step.caption;
+      cursor.classList.remove("clicking");
+      relationshipDemoStep += 1;
+      queueRelationshipDemo(runRelationshipDemoStep, 900);
+    }, 700);
+  }, 650);
+}
+
+function startRelationshipDemo(forceMotion = false) {
+  const reducedMotion = !forceMotion && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+  relationshipDemoPaused = reducedMotion;
+  resetRelationshipDemo(reducedMotion);
+  elements.relationshipDemoToggle.textContent = reducedMotion ? "Play demo" : "Pause demo";
+  if (!reducedMotion) queueRelationshipDemo(runRelationshipDemoStep, 500);
+}
+
+function stopRelationshipDemo() {
+  clearTimeout(relationshipDemoTimer);
+  relationshipDemoTimer = null;
+  elements.relationshipDemoCursor.classList.remove("visible", "clicking");
+}
+
+function toggleRelationshipDemo() {
+  relationshipDemoPaused = !relationshipDemoPaused;
+  elements.relationshipDemoToggle.textContent = relationshipDemoPaused ? "Play demo" : "Pause demo";
+  if (relationshipDemoPaused) {
+    stopRelationshipDemo();
+    elements.relationshipDemoStatus.textContent = "Demo paused.";
+  } else {
+    runRelationshipDemoStep();
+  }
+}
+
+const ASSISTANT_DEMO_PROMPT = "Create a small library schema.";
+const ASSISTANT_DEMO_STEPS = [
+  { target: "tool", caption: "Open the schema assistant from the left tool rail.", state: "panel" },
+  { target: "composer", caption: "Type a request for the assistant.", state: "typing", typePrompt: true },
+  { target: "send", caption: "Send the request.", state: "sent" },
+  { caption: "The assistant reviews the active design.", state: "working", delay: 1500 },
+  { caption: "The assistant responds with a proposal that waits for review.", state: "complete", delay: 2200 }
+];
+
+function renderAssistantDemoState(state) {
+  elements.assistantDemo.classList.toggle("demo-assistant-open", state !== "idle");
+  elements.assistantDemo.classList.toggle("demo-assistant-sent", ["sent", "working", "complete"].includes(state));
+  elements.assistantDemo.classList.toggle("demo-assistant-working", state === "working");
+  elements.assistantDemo.classList.toggle("demo-assistant-complete", state === "complete");
+  if (state !== "typing") elements.assistantDemoPrompt.textContent = "";
+}
+
+function resetAssistantDemo(showStatic = false) {
+  clearTimeout(assistantDemoTimer);
+  assistantDemoTimer = null;
+  assistantDemoStep = 0;
+  renderAssistantDemoState(showStatic ? "complete" : "idle");
+  elements.assistantDemoCursor.classList.remove("visible", "clicking", "tooltip-left", "tooltip-above");
+  elements.assistantDemoStatus.textContent = showStatic ? "The assistant response and reviewable proposal are shown." : "Watch a quick conversation with the schema assistant.";
+}
+
+function queueAssistantDemo(callback, delay) {
+  clearTimeout(assistantDemoTimer);
+  assistantDemoTimer = setTimeout(callback, delay);
+}
+
+function typeAssistantDemoPrompt(index = 0) {
+  if (assistantDemoPaused || onboardingPage !== 3 || !elements.onboardingDialog.open) return;
+  elements.assistantDemoPrompt.textContent = ASSISTANT_DEMO_PROMPT.slice(0, index);
+  if (index <= ASSISTANT_DEMO_PROMPT.length) return queueAssistantDemo(() => typeAssistantDemoPrompt(index + 1), 42);
+  elements.assistantDemoStatus.textContent = "Message ready to send.";
+  assistantDemoStep += 1;
+  queueAssistantDemo(runAssistantDemoStep, 650);
+}
+
+function runAssistantDemoStep() {
+  if (assistantDemoPaused || onboardingPage !== 3 || !elements.onboardingDialog.open) return;
+  if (assistantDemoStep >= ASSISTANT_DEMO_STEPS.length) {
+    elements.assistantDemoStatus.textContent = "Conversation complete. Replaying...";
+    return queueAssistantDemo(() => {
+      resetAssistantDemo();
+      runAssistantDemoStep();
+    }, 1600);
+  }
+  const step = ASSISTANT_DEMO_STEPS[assistantDemoStep];
+  if (!step.target) {
+    renderAssistantDemoState(step.state);
+    elements.assistantDemoStatus.textContent = step.caption;
+    assistantDemoStep += 1;
+    return queueAssistantDemo(runAssistantDemoStep, step.delay);
+  }
+  const target = elements.assistantDemo.querySelector(`[data-assistant-demo-target="${step.target}"]`);
+  if (!target) {
+    assistantDemoStep += 1;
+    return runAssistantDemoStep();
+  }
+  const demoBounds = elements.assistantDemo.getBoundingClientRect();
+  const targetBounds = target.getBoundingClientRect();
+  const left = targetBounds.left - demoBounds.left + targetBounds.width / 2 - 3;
+  const top = targetBounds.top - demoBounds.top + targetBounds.height / 2 - 2;
+  const cursor = elements.assistantDemoCursor;
+  cursor.classList.remove("clicking", "tooltip-left", "tooltip-above");
+  cursor.classList.toggle("tooltip-left", left > demoBounds.width * .7);
+  cursor.classList.toggle("tooltip-above", top > demoBounds.height * .7);
+  cursor.style.left = `${left}px`;
+  cursor.style.top = `${top}px`;
+  cursor.classList.add("visible");
+  elements.assistantDemoStatus.textContent = `Next: ${step.caption}`;
+  queueAssistantDemo(() => {
+    cursor.classList.add("clicking");
+    queueAssistantDemo(() => {
+      renderAssistantDemoState(step.state);
+      elements.assistantDemoStatus.textContent = step.caption;
+      cursor.classList.remove("clicking");
+      if (step.typePrompt) return typeAssistantDemoPrompt();
+      assistantDemoStep += 1;
+      queueAssistantDemo(runAssistantDemoStep, 850);
+    }, 700);
+  }, 650);
+}
+
+function startAssistantDemo(forceMotion = false) {
+  const reducedMotion = !forceMotion && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+  assistantDemoPaused = reducedMotion;
+  resetAssistantDemo(reducedMotion);
+  elements.assistantDemoToggle.textContent = reducedMotion ? "Play demo" : "Pause demo";
+  if (!reducedMotion) queueAssistantDemo(runAssistantDemoStep, 500);
+}
+
+function stopAssistantDemo() {
+  clearTimeout(assistantDemoTimer);
+  assistantDemoTimer = null;
+  elements.assistantDemoCursor.classList.remove("visible", "clicking");
+}
+
+function toggleAssistantDemo() {
+  assistantDemoPaused = !assistantDemoPaused;
+  elements.assistantDemoToggle.textContent = assistantDemoPaused ? "Play demo" : "Pause demo";
+  if (assistantDemoPaused) {
+    stopAssistantDemo();
+    elements.assistantDemoStatus.textContent = "Demo paused.";
+  } else {
+    runAssistantDemoStep();
+  }
+}
+
+const POSTGRES_DEMO_STEPS = [
+  { target: "tool", caption: "Open PostgreSQL sync from the left tool rail.", state: "dialog" },
+  { target: "profile", caption: "Select the exact Development database profile.", state: "connected" },
+  { target: "import", caption: "Import the live public namespace into the design.", state: "imported" },
+  { target: "preview", caption: "Preview the migration SQL before applying anything.", state: "preview" }
+];
+
+function renderPostgresDemoState(state) {
+  elements.postgresDemo.classList.toggle("demo-postgres-open", state !== "idle");
+  elements.postgresDemo.classList.toggle("demo-postgres-connected", ["connected", "imported", "preview"].includes(state));
+  elements.postgresDemo.classList.toggle("demo-postgres-imported", ["imported", "preview"].includes(state));
+  elements.postgresDemo.classList.toggle("demo-postgres-preview", state === "preview");
+}
+
+function resetPostgresDemo(showStatic = false) {
+  clearTimeout(postgresDemoTimer);
+  postgresDemoTimer = null;
+  postgresDemoStep = 0;
+  renderPostgresDemoState(showStatic ? "preview" : "idle");
+  elements.postgresDemoCursor.classList.remove("visible", "clicking", "tooltip-left", "tooltip-above");
+  elements.postgresDemoStatus.textContent = showStatic ? "Migration SQL is ready for review; nothing has been applied." : "Watch the safe PostgreSQL import and preview workflow.";
+}
+
+function queuePostgresDemo(callback, delay) {
+  clearTimeout(postgresDemoTimer);
+  postgresDemoTimer = setTimeout(callback, delay);
+}
+
+function runPostgresDemoStep() {
+  if (postgresDemoPaused || onboardingPage !== 2 || !elements.onboardingDialog.open) return;
+  if (postgresDemoStep >= POSTGRES_DEMO_STEPS.length) {
+    elements.postgresDemoStatus.textContent = "Preview complete. Replaying without applying changes...";
+    return queuePostgresDemo(() => {
+      resetPostgresDemo();
+      runPostgresDemoStep();
+    }, 1800);
+  }
+  const step = POSTGRES_DEMO_STEPS[postgresDemoStep];
+  const target = elements.postgresDemo.querySelector(`[data-postgres-demo-target="${step.target}"]`);
+  if (!target) {
+    postgresDemoStep += 1;
+    return runPostgresDemoStep();
+  }
+  const demoBounds = elements.postgresDemo.getBoundingClientRect();
+  const targetBounds = target.getBoundingClientRect();
+  const left = targetBounds.left - demoBounds.left + targetBounds.width / 2 - 3;
+  const top = targetBounds.top - demoBounds.top + targetBounds.height / 2 - 2;
+  const cursor = elements.postgresDemoCursor;
+  cursor.classList.remove("clicking", "tooltip-left", "tooltip-above");
+  cursor.classList.toggle("tooltip-left", left > demoBounds.width * .7);
+  cursor.classList.toggle("tooltip-above", top > demoBounds.height * .7);
+  cursor.style.left = `${left}px`;
+  cursor.style.top = `${top}px`;
+  cursor.classList.add("visible");
+  elements.postgresDemoStatus.textContent = `Next: ${step.caption}`;
+  queuePostgresDemo(() => {
+    cursor.classList.add("clicking");
+    queuePostgresDemo(() => {
+      renderPostgresDemoState(step.state);
+      elements.postgresDemoStatus.textContent = step.caption;
+      cursor.classList.remove("clicking");
+      postgresDemoStep += 1;
+      queuePostgresDemo(runPostgresDemoStep, 950);
+    }, 700);
+  }, 650);
+}
+
+function startPostgresDemo(forceMotion = false) {
+  const reducedMotion = !forceMotion && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+  postgresDemoPaused = reducedMotion;
+  resetPostgresDemo(reducedMotion);
+  elements.postgresDemoToggle.textContent = reducedMotion ? "Play demo" : "Pause demo";
+  if (!reducedMotion) queuePostgresDemo(runPostgresDemoStep, 500);
+}
+
+function stopPostgresDemo() {
+  clearTimeout(postgresDemoTimer);
+  postgresDemoTimer = null;
+  elements.postgresDemoCursor.classList.remove("visible", "clicking");
+}
+
+function togglePostgresDemo() {
+  postgresDemoPaused = !postgresDemoPaused;
+  elements.postgresDemoToggle.textContent = postgresDemoPaused ? "Play demo" : "Pause demo";
+  if (postgresDemoPaused) {
+    stopPostgresDemo();
+    elements.postgresDemoStatus.textContent = "Demo paused.";
+  } else {
+    runPostgresDemoStep();
+  }
+}
+
+const INSPECTOR_DEMO_STEPS = [
+  { target: "table", click: "Left click", caption: "Left click a table to open its inspector.", state: { inspectorOpen: true } },
+  { target: "inspector-header", click: "Left click", caption: "Left click the inspector header to collapse its properties.", state: { inspectorCollapsed: true } },
+  { target: "inspector-header", click: "Right click", caption: "Right click the collapsed header to expand it with live data tools.", state: { inspectorCollapsed: false, dataOpen: true } },
+  { target: "inspector-header", click: "Left click", caption: "With data tools open, left click the inspector header to close them.", state: { dataOpen: false } },
+  { target: "inspector-header", click: "Left click", caption: "Left click the inspector header to collapse its properties again.", state: { inspectorCollapsed: true } },
+  { target: "inspector-header", click: "Left click", caption: "Left click the collapsed header to expand the inspector.", state: { inspectorCollapsed: false } },
+  { target: "inspector-header", click: "Right click", caption: "Right click the inspector header to open live data tools beside it.", state: { dataOpen: true } },
+  { target: "inspector-header", click: "Right click", caption: "Right click while data tools are open to maximize them over the inspector.", state: { dataMaximized: true } },
+  { target: "minimize", click: "Left click", caption: "Use the restore/minimize button to return to the inspector split view.", state: { dataMaximized: false } },
+  { target: "sql-header", click: "Left click", caption: "Left click SQL console to expand the read-only query workspace.", state: { pane: "console" } },
+  { target: "sql-header", click: "Right click", caption: "Right click the SQL console header to maximize data tools.", state: { dataMaximized: true } },
+  { target: "sql-header", click: "Right click", caption: "Right click the SQL console header again to restore the split view.", state: { dataMaximized: false } },
+  { target: "data-header", click: "Left click", caption: "Left click Table data to return to live PostgreSQL rows.", state: { pane: "data" } },
+  { target: "data-header", click: "Right click", caption: "Right click the Table data header to maximize it.", state: { dataMaximized: true } },
+  { target: "data-header", click: "Right click", caption: "Right click the Table data header again to restore the split view.", state: { dataMaximized: false } },
+  { target: "maximize", click: "Left click", caption: "The maximize button also expands data tools over the inspector.", state: { dataMaximized: true } },
+  { target: "minimize", click: "Left click", caption: "While maximized, the restore button returns to the inspector split view.", state: { dataMaximized: false } },
+  { target: "minimize", click: "Left click", caption: "When not maximized, minimize closes the data tools.", state: { dataOpen: false } },
+  { target: "data-toggle", click: "Left click", caption: "The inspector data-tools button opens Table data and SQL console.", state: { dataOpen: true } },
+  { target: "data-toggle", click: "Left click", caption: "Click the data-tools button again to close both data views.", state: { dataOpen: false } },
+  { target: "inspector-close", click: "Left click", caption: "Close the inspector to close the inspector and all data views.", state: { inspectorOpen: false } }
+];
+
+function renderInspectorDemoState(patch = {}) {
+  inspectorDemoState = { ...inspectorDemoState, ...patch };
+  if (!inspectorDemoState.inspectorOpen) {
+    inspectorDemoState.inspectorCollapsed = false;
+    inspectorDemoState.dataOpen = false;
+    inspectorDemoState.dataMaximized = false;
+  }
+  if (!inspectorDemoState.dataOpen) inspectorDemoState.dataMaximized = false;
+  elements.inspectorDemo.classList.toggle("demo-inspector-open", inspectorDemoState.inspectorOpen);
+  elements.inspectorDemo.classList.toggle("demo-inspector-collapsed", inspectorDemoState.inspectorCollapsed);
+  elements.inspectorDemo.classList.toggle("demo-data-open", inspectorDemoState.dataOpen);
+  elements.inspectorDemo.classList.toggle("demo-data-maximized", inspectorDemoState.dataMaximized);
+  elements.inspectorDemo.classList.toggle("demo-pane-console", inspectorDemoState.pane === "console");
+}
+
+function resetInspectorDemo(showStatic = false) {
+  clearTimeout(inspectorDemoTimer);
+  inspectorDemoTimer = null;
+  inspectorDemoStep = 0;
+  inspectorDemoState = { inspectorOpen: showStatic, inspectorCollapsed: false, dataOpen: showStatic, dataMaximized: false, pane: "data" };
+  renderInspectorDemoState();
+  elements.inspectorDemo.querySelectorAll(".demo-hover").forEach((target) => target.classList.remove("demo-hover"));
+  elements.inspectorDemoCursor.classList.remove("visible", "clicking", "right-click", "tooltip-left");
+  elements.inspectorDemoStatus.textContent = showStatic ? "Reduced motion: inspector and data tools shown side by side." : "Watch the table, headers, and pane controls.";
+}
+
+function queueInspectorDemo(callback, delay) {
+  clearTimeout(inspectorDemoTimer);
+  inspectorDemoTimer = setTimeout(callback, delay);
+}
+
+function runInspectorDemoStep() {
+  if (inspectorDemoPaused || onboardingPage !== 1 || !elements.onboardingDialog.open) return;
+  if (inspectorDemoStep >= INSPECTOR_DEMO_STEPS.length) {
+    elements.inspectorDemoStatus.textContent = "Demo complete. Replaying from table selection...";
+    return queueInspectorDemo(() => {
+      resetInspectorDemo();
+      runInspectorDemoStep();
+    }, 1400);
+  }
+  const step = INSPECTOR_DEMO_STEPS[inspectorDemoStep];
+  const target = elements.inspectorDemo.querySelector(`[data-demo-target="${step.target}"]`);
+  if (!target) {
+    inspectorDemoStep += 1;
+    return runInspectorDemoStep();
+  }
+  const demoBounds = elements.inspectorDemo.getBoundingClientRect();
+  const targetBounds = target.getBoundingClientRect();
+  const left = targetBounds.left - demoBounds.left + targetBounds.width / 2 - 3;
+  const top = targetBounds.top - demoBounds.top + targetBounds.height / 2 - 2;
+  const cursor = elements.inspectorDemoCursor;
+  elements.inspectorDemo.querySelectorAll(".demo-hover").forEach((hovered) => hovered.classList.remove("demo-hover"));
+  if (target.matches(".tour-inspector-head, .tour-data-tools header, .tour-sql-console")) target.classList.add("demo-hover");
+  cursor.classList.remove("clicking", "right-click", "tooltip-left", "tooltip-above");
+  cursor.classList.toggle("tooltip-left", left > demoBounds.width * .7);
+  cursor.classList.toggle("tooltip-above", top > demoBounds.height * .7);
+  cursor.querySelector("span").textContent = step.click;
+  cursor.style.left = `${left}px`;
+  cursor.style.top = `${top}px`;
+  cursor.classList.add("visible");
+  elements.inspectorDemoStatus.textContent = `Next: ${step.caption}`;
+  queueInspectorDemo(() => {
+    cursor.classList.toggle("right-click", step.click === "Right click");
+    cursor.classList.add("clicking");
+    queueInspectorDemo(() => {
+      renderInspectorDemoState(step.state);
+      elements.inspectorDemoStatus.textContent = step.caption;
+      cursor.classList.remove("clicking");
+      inspectorDemoStep += 1;
+      queueInspectorDemo(runInspectorDemoStep, 850);
+    }, 750);
+  }, 650);
+}
+
+function startInspectorDemo(forceMotion = false) {
+  const reducedMotion = !forceMotion && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+  inspectorDemoPaused = reducedMotion;
+  resetInspectorDemo(reducedMotion);
+  elements.inspectorDemoToggle.textContent = reducedMotion ? "Play demo" : "Pause demo";
+  if (!reducedMotion) queueInspectorDemo(runInspectorDemoStep, 500);
+}
+
+function stopInspectorDemo() {
+  clearTimeout(inspectorDemoTimer);
+  inspectorDemoTimer = null;
+  elements.inspectorDemo.querySelectorAll(".demo-hover").forEach((target) => target.classList.remove("demo-hover"));
+  elements.inspectorDemoCursor.classList.remove("visible", "clicking");
+}
+
+function toggleInspectorDemo() {
+  inspectorDemoPaused = !inspectorDemoPaused;
+  elements.inspectorDemoToggle.textContent = inspectorDemoPaused ? "Play demo" : "Pause demo";
+  if (inspectorDemoPaused) {
+    stopInspectorDemo();
+    elements.inspectorDemoStatus.textContent = "Demo paused.";
+  } else {
+    runInspectorDemoStep();
+  }
+}
+
 function renderOnboardingPage() {
   const pages = [...elements.onboardingDialog.querySelectorAll("[data-onboarding-page]")];
   onboardingPage = Math.max(0, Math.min(pages.length - 1, onboardingPage));
@@ -335,6 +786,10 @@ function renderOnboardingPage() {
   elements.onboardingProgress.innerHTML = pages.map((_, index) => `<i class="${index === onboardingPage ? "active" : ""}"></i>`).join("");
   elements.onboardingBack.disabled = onboardingPage === 0;
   elements.onboardingNext.querySelector("span").textContent = onboardingPage === pages.length - 1 ? "Finish" : "Next";
+  if (onboardingPage === 0) startRelationshipDemo(); else stopRelationshipDemo();
+  if (onboardingPage === 1) startInspectorDemo(); else stopInspectorDemo();
+  if (onboardingPage === 2) startPostgresDemo(); else stopPostgresDemo();
+  if (onboardingPage === 3) startAssistantDemo(); else stopAssistantDemo();
 }
 
 function openOnboarding() {
@@ -4650,14 +5105,17 @@ function renderAiAction(action, context) {
   button.type = "button";
   button.className = AI_SCHEMA_ACTIONS.has(type) || AI_NAVIGATION_ACTIONS.has(type) || ["connection_setup", "migration_preview", "migration_apply"].includes(type) ? "button button-primary" : "button button-ghost";
   button.textContent = type === "schema_read_query" ? "Run query" : "Review & confirm";
-  if (type === "schema_read_query" && elements.aiSqlPolicy.value === "disabled") {
+  const dataAccessActive = context.accessLevel === "data" && elements.aiAccessSelect.value === "data";
+  if (type === "schema_read_query" && (!dataAccessActive || elements.aiSqlPolicy.value === "disabled")) {
     button.disabled = true;
-    detail.textContent = "Rejected: SQL policy is disabled. The generated SQL is shown for review.";
+    detail.textContent = dataAccessActive
+      ? "Rejected: SQL policy is disabled. The generated SQL is shown for review."
+      : "Rejected: Data access is no longer active. Ask for a fresh query after selecting Data access.";
   }
   button.addEventListener("click", () => confirmAiAction(action, context, card, button));
   card.append(button);
   elements.aiMessages.append(card);
-  if (type === "schema_read_query" && elements.aiSqlPolicy.value === "allow-session" && aiState.sqlPolicyDeliberatelySelected) {
+  if (type === "schema_read_query" && dataAccessActive && elements.aiSqlPolicy.value === "allow-session" && aiState.sqlPolicyDeliberatelySelected) {
     button.disabled = true;
     executeAiReadQuery(action, context, card, button);
   }
@@ -4772,6 +5230,7 @@ function boundedAiQueryResult(result) {
 async function executeAiReadQuery(action, context, card, button) {
   const sql = String(aiActionPayload(action).sql ?? "").trim();
   if (!sql) return detailAiActionError(card, "No SQL was supplied");
+  if (context.accessLevel !== "data" || elements.aiAccessSelect.value !== "data") return detailAiActionError(card, "Data access is no longer active");
   if (elements.aiSqlPolicy.value === "disabled") return detailAiActionError(card, "SQL policy is disabled");
   if (!context.profileId || !context.namespace || postgresState.selectedProfileId !== context.profileId || postgresState.namespace !== context.namespace) return detailAiActionError(card, "The selected PostgreSQL profile or namespace changed");
   button.disabled = true;
@@ -4811,9 +5270,11 @@ async function sendAiMessage(text, renderedRole = "user") {
   const linkedNamespace = schema.postgres?.namespace;
   const selectedProfileId = postgresState.selectedProfileId || linkedProfileId;
   const selectedNamespace = postgresState.selectedProfileId ? postgresState.namespace : linkedNamespace;
+  const accessLevel = elements.aiAccessSelect.value;
   const context = {
     schemaId: activeSchemaId,
     schemaSnapshot: JSON.stringify(schema),
+    accessLevel,
     profileId: selectedProfileId || undefined,
     namespace: selectedNamespace || undefined
   };
@@ -4831,7 +5292,7 @@ async function sendAiMessage(text, renderedRole = "user") {
     const response = await aiRequest(`/api/ai/sessions/${encodeURIComponent(sessionId)}/messages`, {
       method: "POST",
       body: JSON.stringify({
-        text, model, schemaId: activeSchemaId, accessLevel: elements.aiAccessSelect.value,
+        text, model, schemaId: activeSchemaId, accessLevel,
         ...(context.profileId ? { profileId: context.profileId } : {}),
         ...(context.profileId && context.namespace ? { namespace: context.namespace } : {})
       })
@@ -4972,6 +5433,10 @@ async function deleteAiHistorySession(sessionId, title) {
 
 function updateAiAccessDisclosure() {
   const access = elements.aiAccessSelect.value;
+  if (access !== "data") {
+    elements.aiSqlPolicy.value = "disabled";
+    aiState.sqlPolicyDeliberatelySelected = false;
+  }
   elements.aiSqlPolicyWrap.hidden = access !== "data";
   elements.aiFunctionCaveat.hidden = access !== "data";
   elements.aiAccessDisclosure.textContent = access === "metadata"
@@ -5742,7 +6207,17 @@ elements.onboardingNext.addEventListener("click", () => {
   renderOnboardingPage();
 });
 elements.onboardingSkip.addEventListener("click", closeOnboarding);
-elements.onboardingDialog.addEventListener("close", rememberOnboardingPreference);
+elements.relationshipDemoToggle.addEventListener("click", toggleRelationshipDemo);
+elements.inspectorDemoToggle.addEventListener("click", toggleInspectorDemo);
+elements.postgresDemoToggle.addEventListener("click", togglePostgresDemo);
+elements.assistantDemoToggle.addEventListener("click", toggleAssistantDemo);
+elements.onboardingDialog.addEventListener("close", () => {
+  stopRelationshipDemo();
+  stopInspectorDemo();
+  stopPostgresDemo();
+  stopAssistantDemo();
+  rememberOnboardingPreference();
+});
 document.querySelector("#cancel-shutdown").addEventListener("click", () => elements.shutdownDialog.close());
 elements.confirmShutdown.addEventListener("click", shutdownSchemii);
 elements.shutdownDialog.addEventListener("cancel", event => { if (serverStopped) event.preventDefault(); });

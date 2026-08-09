@@ -232,32 +232,99 @@
         </header>
         <div class="onboarding-pages">
           <section class="onboarding-page" data-onboarding-page="0">
-            <div class="onboarding-screenshot canvas-tour-shot" role="img" aria-label="Schemii canvas with connected PostgreSQL tables">
+            <div class="tour-demo-playback"><span class="tour-demo-status" id="relationship-demo-status">Watch how a foreign-key connection is created.</span><button class="tour-demo-toggle" id="relationship-demo-toggle" type="button">Pause demo</button></div>
+            <div class="onboarding-screenshot canvas-tour-shot tour-relationship-demo" role="group" aria-label="Animated demonstration of creating a PostgreSQL foreign-key relationship">
               <div class="tour-shot-bar"><i></i><span>product_workspace</span><b>Saved</b></div>
-              <div class="tour-shot-rail"><i></i><i></i><i></i><i></i></div>
-              <div class="tour-table tour-users"><strong>users</strong><span><b>PK</b> id <em>uuid</em></span><span>email <em>varchar</em></span></div>
-              <div class="tour-table tour-projects"><strong>projects</strong><span><b>PK</b> id <em>uuid</em></span><span><b>FK</b> owner_id <em>uuid</em></span></div>
-              <svg class="tour-relationship" viewBox="0 0 100 40" aria-hidden="true"><path d="M2 30 C35 30 60 10 98 10"/></svg>
+              <div class="tour-shot-rail"><i></i><i></i><span class="tour-relationship-tool" data-relationship-demo-target="tool" aria-label="Add relationship tool"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="7" r="2.5"/><circle cx="18" cy="17" r="2.5"/><path d="M8.5 7h3a3 3 0 0 1 3 3v4a3 3 0 0 0 3 3"/></svg></span><i></i></div>
+              <div class="tour-table tour-users"><strong>users</strong><span class="tour-referenced-column" data-relationship-demo-target="target"><i class="tour-key-badge primary"><svg viewBox="0 0 16 16" aria-label="Primary key"><circle cx="5" cy="7" r="3"/><path d="m7.5 8.5 5 4M10 10.5l1.5-1.5"/></svg></i>id <em>uuid</em></span><span><i class="tour-key-badge">·</i>email <em>varchar</em></span></div>
+              <div class="tour-table tour-projects"><strong>projects</strong><span><i class="tour-key-badge primary"><svg viewBox="0 0 16 16" aria-label="Primary key"><circle cx="5" cy="7" r="3"/><path d="m7.5 8.5 5 4M10 10.5l1.5-1.5"/></svg></i>id <em>uuid</em></span><span class="tour-foreign-column" data-relationship-demo-target="source"><i class="tour-key-badge foreign"><svg viewBox="0 0 16 16" aria-label="Foreign key"><circle cx="5" cy="7" r="3"/><path d="m7.5 8.5 5 4M10 10.5l1.5-1.5"/></svg></i>owner_id <em>uuid</em></span></div>
+              <svg class="tour-relationship" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+                <path class="tour-relationship-desktop" d="M59 64 C52 64 48 42 41 42"/>
+                <ellipse class="tour-relationship-desktop" cx="59" cy="64" rx="0.56" ry="1.43"/><ellipse class="tour-relationship-desktop" cx="41" cy="42" rx="0.56" ry="1.43"/>
+                <path class="tour-relationship-mobile" d="M57 85 C52 85 52 56 47 56"/>
+                <ellipse class="tour-relationship-mobile" cx="57" cy="85" rx="1.2" ry="1.9"/><ellipse class="tour-relationship-mobile" cx="47" cy="56" rx="1.2" ry="1.9"/>
+              </svg>
+              <div class="tour-relationship-editor-backdrop">
+                <section class="tour-relationship-editor" aria-label="Create relationship">
+                  <header><small>FOREIGN KEY</small><strong>Create relationship</strong><code>projects → users</code></header>
+                  <label>Constraint name <span>projects_owner_id_fkey</span></label>
+                  <div class="tour-relationship-pair-heading"><span>Ordered column pairs</span><i>Foreign key → referenced key</i></div>
+                  <div class="tour-relationship-pair"><b>⠿</b><label>Foreign key column <span>owner_id · uuid</span></label><i>→</i><label>Referenced column <span>id · uuid</span></label></div>
+                  <p>References a valid single-column key.</p>
+                  <footer><button type="button" tabindex="-1">Cancel</button><button data-relationship-demo-target="save" type="button" tabindex="-1">Save relationship</button></footer>
+                </section>
+              </div>
+              <div class="tour-demo-cursor tour-relationship-cursor" aria-hidden="true"><svg viewBox="0 0 24 28"><path d="M3 2v20l5-5 4 9 4-2-4-8h7Z"/></svg><span>Left click</span></div>
             </div>
             <div class="onboarding-copy">
               <span class="onboarding-number">01</span>
-              <div><h3>Design on the canvas</h3><p>Tables are cards, columns are rows, and connecting lines are foreign keys. Drag tables to arrange them, use the mouse wheel to zoom, and select a card to edit it.</p></div>
+              <div><h3>Design on the canvas</h3><p>Tables are cards, columns are rows, and connecting lines are foreign keys. To create one, choose the highlighted linked-circle <strong>Add relationship</strong> tool, click the foreign-key column first, then click the referenced primary or unique key. Drag tables to arrange them, use the mouse wheel to zoom, and select a card to edit it.</p></div>
             </div>
           </section>
           <section class="onboarding-page" data-onboarding-page="1" hidden>
-            <div class="onboarding-screenshot inspector-tour-shot" role="img" aria-label="Table inspector editing columns and constraints">
-              <div class="tour-table tour-focused"><strong>orders</strong><span><b>PK</b> id <em>uuid</em></span><span>status <em>text</em></span><span>created_at <em>timestamp</em></span></div>
-              <div class="tour-inspector"><small>TABLE INSPECTOR</small><strong>orders</strong><label>Name <i>orders</i></label><label>Columns <i>+ Add column</i></label><span>id <em>PRIMARY KEY</em></span><span>status <em>NOT NULL</em></span></div>
+            <div class="tour-demo-playback"><span class="tour-demo-status" id="tour-demo-status">Watch the table, headers, and pane controls.</span><button class="tour-demo-toggle" id="tour-demo-toggle" type="button">Pause demo</button></div>
+            <div class="onboarding-screenshot inspector-tour-shot tour-inspector-demo" role="group" aria-label="Animated demonstration of table, inspector, Table data, and SQL console controls">
+              <div class="tour-table tour-focused" data-demo-target="table"><strong>orders</strong><span><i class="tour-key-badge primary"><svg viewBox="0 0 16 16" aria-label="Primary key"><circle cx="5" cy="7" r="3"/><path d="m7.5 8.5 5 4M10 10.5l1.5-1.5"/></svg></i>id <em>uuid</em></span><span><i class="tour-key-badge">·</i>status <em>text</em></span><span><i class="tour-key-badge">·</i>created_at <em>timestamp</em></span></div>
+              <div class="tour-data-tools">
+                <section class="tour-data-pane">
+                  <header data-demo-target="data-header"><div><small>LIVE POSTGRESQL ROWS</small><strong>Table data</strong></div><span class="tour-data-controls"><i data-demo-target="maximize" aria-label="Maximize data tools">□</i><i data-demo-target="minimize" aria-label="Minimize or restore data tools"></i></span></header>
+                  <div class="tour-data-row">
+                    <table aria-label="Example PostgreSQL order rows">
+                      <thead><tr><th>id</th><th>customer</th><th>status</th><th>total</th><th>created</th></tr></thead>
+                      <tbody>
+                        <tr><td>8f31</td><td>Acme Co</td><td>paid</td><td>$128.40</td><td>Aug 08</td></tr>
+                        <tr><td>2ba7</td><td>Northstar</td><td>pending</td><td>$76.00</td><td>Aug 08</td></tr>
+                        <tr><td>c104</td><td>Cedar Labs</td><td>shipped</td><td>$245.90</td><td>Aug 07</td></tr>
+                        <tr><td>5de9</td><td>Atlas</td><td>paid</td><td>$54.25</td><td>Aug 07</td></tr>
+                        <tr><td>a823</td><td>Orbit</td><td>refunded</td><td>$19.80</td><td>Aug 06</td></tr>
+                        <tr><td>e71c</td><td>Pine &amp; Co</td><td>shipped</td><td>$312.00</td><td>Aug 06</td></tr>
+                        <tr><td>9b42</td><td>Juniper</td><td>paid</td><td>$88.60</td><td>Aug 05</td></tr>
+                        <tr><td>41fd</td><td>Harbor</td><td>pending</td><td>$167.35</td><td>Aug 05</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+                <section class="tour-sql-pane">
+                  <div class="tour-sql-console" data-demo-target="sql-header"><span>READ-ONLY WORKSPACE</span><strong>SQL console</strong><i>›</i></div>
+                  <div class="tour-sql-editor"><code>SELECT *<br>FROM "public"."orders"<br>LIMIT 100;</code><div class="tour-sql-actions"><span>Ctrl + Enter</span><b>Run query</b></div></div>
+                </section>
+              </div>
+              <div class="tour-inspector">
+                <div class="tour-inspector-head" data-demo-target="inspector-header">
+                  <small>TABLE PROPERTIES</small>
+                  <div class="tour-inspector-heading"><strong>orders</strong><span class="tour-inspector-actions"><span class="tour-data-toggle" data-demo-target="data-toggle" aria-label="Show data tools"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4" width="14" height="12" rx="1.5"/><path d="M3 8h14M3 12h14"/></svg></span><span class="tour-inspector-close" data-demo-target="inspector-close" aria-label="Close inspector">×</span></span></div>
+                </div>
+                <div class="tour-inspector-body"><label>Table name <i>orders</i></label><label>Columns <i>+ Add column</i></label><span>id <em>PRIMARY KEY</em></span><span>status <em>NOT NULL</em></span></div>
+              </div>
+              <div class="tour-demo-cursor" aria-hidden="true"><svg viewBox="0 0 24 28"><path d="M3 2v20l5-5 4 9 4-2-4-8h7Z"/></svg><span>Left click</span></div>
             </div>
             <div class="onboarding-copy">
               <span class="onboarding-number">02</span>
-              <div><h3>Build with database rules</h3><p>Use the inspector to add columns, primary and unique keys, checks, indexes, and triggers. The folder opens saved designs; the disk saves immediately. Normal edits also save automatically.</p></div>
+              <div><h3>Inspect tables and live data</h3><p><strong>Click any table to open its inspector on the right.</strong> Edit columns, keys, checks, indexes, and triggers there. For a table imported from PostgreSQL, click the data-tools icon in the inspector header to open <strong>Table data</strong> and the read-only <strong>SQL console</strong> beside it. Click either pane header to switch views, use maximize to temporarily cover the inspector, use minimize to close data tools, or close the inspector to close all three panes.</p></div>
             </div>
           </section>
           <section class="onboarding-page" data-onboarding-page="2" hidden>
-            <div class="onboarding-screenshot postgres-tour-shot" role="img" aria-label="PostgreSQL connection and reviewed migration preview">
-              <div class="tour-db-card"><small>LIVE DATABASE</small><strong>PostgreSQL</strong><span class="tour-connection"><i></i> Development <b>CONNECTED</b></span><label>Namespace <em>public</em></label><div><button type="button" tabindex="-1">Import</button><button type="button" tabindex="-1">Preview migration</button></div></div>
-              <div class="tour-safety"><i>✓</i><span><strong>Review before apply</strong>Inspect SQL, warnings, locks, and destructive steps.</span></div>
+            <div class="tour-demo-playback"><span class="tour-demo-status" id="postgres-demo-status">Watch the safe PostgreSQL import and preview workflow.</span><button class="tour-demo-toggle" id="postgres-demo-toggle" type="button">Pause demo</button></div>
+            <div class="onboarding-screenshot postgres-tour-shot tour-postgres-demo" role="group" aria-label="Animated PostgreSQL import and migration preview workflow">
+              <div class="tour-postgres-rail"><i></i><i></i><span class="tour-postgres-tool" data-postgres-demo-target="tool"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg></span></div>
+              <div class="tour-db-card">
+                <header><span><small>LIVE DATABASE</small><strong>PostgreSQL</strong></span><b>×</b></header>
+                <button class="tour-postgres-profile" data-postgres-demo-target="profile" type="button" tabindex="-1"><span><strong>Development</strong><small>schemii@db:5432 / app</small></span><i>SELECTED</i></button>
+                <label>PostgreSQL namespace <em>public</em></label>
+                <p>app.public · 3 tables · 2 relationships · 4 indexes</p>
+                <footer><button data-postgres-demo-target="import" type="button" tabindex="-1">Import</button><button data-postgres-demo-target="preview" type="button" tabindex="-1">Preview migration</button></footer>
+              </div>
+              <section class="tour-migration-preview">
+                <header><span><small>REVIEWED DATABASE CHANGE</small><strong>Migration preview</strong><i>Development · app.public</i></span><b>×</b></header>
+                <div><span>3 steps</span><span>0 destructive</span><span>Transaction ready</span></div>
+                <pre>CREATE TABLE "public"."authors" ( ... );
+CREATE TABLE "public"."books" ( ... );
+ALTER TABLE "public"."books"
+  ADD CONSTRAINT "books_author_id_fkey" ...;</pre>
+                <p><b>Review before apply</b> Inspect SQL, warnings, locks, and destructive steps.</p>
+                <footer><label>□ Include destructive changes</label><button type="button" tabindex="-1">Apply migration</button></footer>
+              </section>
+              <div class="tour-demo-cursor tour-postgres-cursor" aria-hidden="true"><svg viewBox="0 0 24 28"><path d="M3 2v20l5-5 4 9 4-2-4-8h7Z"/></svg><span>Left click</span></div>
             </div>
             <div class="onboarding-copy">
               <span class="onboarding-number">03</span>
@@ -265,9 +332,22 @@
             </div>
           </section>
           <section class="onboarding-page" data-onboarding-page="3" hidden>
-            <div class="onboarding-screenshot assistant-tour-shot" role="img" aria-label="AI schema assistant proposing a reviewed change">
-              <div class="tour-chat"><small>SCHEMII COPILOT</small><strong>Schema assistant</strong><p>“Create a small library schema.”</p><div><i>PROPOSAL</i><span>Populate the active schema</span><button type="button" tabindex="-1">Review</button></div></div>
-              <div class="tour-help-card"><span>?</span><strong>Help &amp; controls</strong><small>Reopen this guide or shut down Schemii safely.</small></div>
+            <div class="tour-demo-playback"><span class="tour-demo-status" id="assistant-demo-status">Watch a quick conversation with the schema assistant.</span><button class="tour-demo-toggle" id="assistant-demo-toggle" type="button">Pause demo</button></div>
+            <div class="onboarding-screenshot assistant-tour-shot tour-assistant-demo" role="group" aria-label="Animated conversation with the AI schema assistant">
+              <div class="tour-assistant-rail"><i></i><i></i><i></i><span class="tour-assistant-tool" data-assistant-demo-target="tool"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5.5h12v10H9l-3 3v-13Z"/><path d="M9 9h6M9 12h4"/></svg><b></b></span></div>
+              <div class="tour-assistant-canvas"><span>authors</span><span>books</span><span>loans</span></div>
+              <section class="tour-assistant-panel">
+                <header><div><small>SCHEMII COPILOT</small><strong>Schema assistant</strong></div><i>Ready</i><b>×</b></header>
+                <div class="tour-assistant-context"><span>Model <b>Connected</b></span><span>Access <b>Schema</b></span></div>
+                <div class="tour-assistant-messages">
+                  <div class="tour-assistant-user"><small>YOU</small><p>Create a small library schema.</p></div>
+                  <div class="tour-assistant-working"><i></i><span>Reviewing the active design</span><b>•••</b></div>
+                  <div class="tour-assistant-response"><small>ASSISTANT</small><p>I can add authors, books, and loans with keys and relationships.</p></div>
+                  <div class="tour-assistant-proposal"><i>PROPOSAL</i><span><b>Populate the active schema</b>3 tables · 2 relationships</span><button type="button" tabindex="-1">Review &amp; confirm</button></div>
+                </div>
+                <div class="tour-assistant-composer"><span data-assistant-demo-target="composer"></span><button data-assistant-demo-target="send" type="button" tabindex="-1">Send</button></div>
+              </section>
+              <div class="tour-demo-cursor tour-assistant-cursor" aria-hidden="true"><svg viewBox="0 0 24 28"><path d="M3 2v20l5-5 4 9 4-2-4-8h7Z"/></svg><span>Left click</span></div>
             </div>
             <div class="onboarding-copy">
               <span class="onboarding-number">04</span>
