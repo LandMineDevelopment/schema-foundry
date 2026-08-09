@@ -4981,6 +4981,7 @@ function beginAiActivity(modelName) {
     details,
     update(event) {
       if (finished || !event || typeof event !== "object") return;
+      if (event.type === "part") setStage("model", "Model started", "completed");
       if (event.type === "connection") {
         if (event.state === "connected") {
           title.textContent = "Waiting for model";
@@ -5266,12 +5267,19 @@ function boundedAiQueryResult(result) {
   return serialized.length > 24000 ? `${serialized.slice(0, 24000)}…` : serialized;
 }
 
+function currentAiPostgresTarget() {
+  const profileId = postgresState.selectedProfileId || schema.postgres?.sourceProfileId;
+  const namespace = postgresState.selectedProfileId ? postgresState.namespace : schema.postgres?.namespace;
+  return { profileId, namespace };
+}
+
 async function executeAiReadQuery(action, context, card, button) {
   const sql = String(aiActionPayload(action).sql ?? "").trim();
   if (!sql) return detailAiActionError(card, "No SQL was supplied");
   if (context.accessLevel !== "data" || elements.aiAccessSelect.value !== "data") return detailAiActionError(card, "Data access is no longer active");
   if (elements.aiSqlPolicy.value === "disabled") return detailAiActionError(card, "SQL policy is disabled");
-  if (!context.profileId || !context.namespace || postgresState.selectedProfileId !== context.profileId || postgresState.namespace !== context.namespace) return detailAiActionError(card, "The selected PostgreSQL profile or namespace changed");
+  const currentTarget = currentAiPostgresTarget();
+  if (!context.profileId || !context.namespace || currentTarget.profileId !== context.profileId || currentTarget.namespace !== context.namespace) return detailAiActionError(card, "The selected PostgreSQL profile or namespace changed");
   button.disabled = true;
   button.textContent = "Running...";
   try {
@@ -5284,6 +5292,9 @@ async function executeAiReadQuery(action, context, card, button) {
     button.disabled = false;
     button.textContent = "Run query";
     detailAiActionError(card, error.message);
+    const text = `Tool error for SQL:\n${sql}\n${error.message}`;
+    appendAiMessage("tool", text);
+    await sendAiMessage(text, "tool");
   }
 }
 
@@ -5305,17 +5316,14 @@ async function sendAiMessage(text, renderedRole = "user") {
   const modelName = elements.aiModelSelect.selectedOptions[0]?.textContent || model.modelId || "selected model";
   const requestGeneration = ++aiState.requestGeneration;
   if (renderedRole === "user") appendAiMessage("user", text);
-  const linkedProfileId = schema.postgres?.sourceProfileId;
-  const linkedNamespace = schema.postgres?.namespace;
-  const selectedProfileId = postgresState.selectedProfileId || linkedProfileId;
-  const selectedNamespace = postgresState.selectedProfileId ? postgresState.namespace : linkedNamespace;
+  const postgresTarget = currentAiPostgresTarget();
   const accessLevel = elements.aiAccessSelect.value;
   const context = {
     schemaId: activeSchemaId,
     schemaSnapshot: JSON.stringify(schema),
     accessLevel,
-    profileId: selectedProfileId || undefined,
-    namespace: selectedNamespace || undefined
+    profileId: postgresTarget.profileId || undefined,
+    namespace: postgresTarget.namespace || undefined
   };
   const activity = beginAiActivity(modelName);
   let activityStream = null;

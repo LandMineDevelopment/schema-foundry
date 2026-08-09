@@ -6,6 +6,7 @@ description: Use for PostgreSQL SQL, data inspection, catalog queries, or schema
 # Read-only Query Safety
 
 - Propose one bounded, read-only statement. Do not propose DDL, DML, transaction control, `COPY ... PROGRAM`, locking clauses, or multi-statement SQL.
+- Validate PostgreSQL-specific syntax before proposing the query. `DISTINCT ON` expressions must match the leading `ORDER BY` expressions; use aggregation or a subquery when distinct rows need a different final ordering.
 - Prefer PostgreSQL catalog and `information_schema` queries with explicit columns and useful limits.
 - Explain what data the query reads and why it is needed.
 - Raw SQL requires approval in Schemii even when marked read-only.

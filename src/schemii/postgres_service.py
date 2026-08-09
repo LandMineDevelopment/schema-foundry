@@ -48,6 +48,15 @@ class PostgresServiceError(Exception):
         return {"error": {"code": self.code, "message": self.message}}
 
 
+def _safe_sql_query_failure(exc: Exception) -> str:
+    sqlstate = getattr(exc, "sqlstate", None)
+    primary = getattr(getattr(exc, "diag", None), "message_primary", None)
+    if not isinstance(sqlstate, str) or not re.fullmatch(r"[0-9A-Z]{5}", sqlstate) or not isinstance(primary, str):
+        return "Read-only SQL query failed"
+    primary = " ".join(primary.split())[:500]
+    return f"Read-only SQL query failed: {primary}" if primary else "Read-only SQL query failed"
+
+
 class ValidationError(PostgresServiceError):
     def __init__(self, message: str):
         super().__init__(400, "validation_error", message)
@@ -750,7 +759,7 @@ class PostgresService:
         except PostgresServiceError:
             raise
         except Exception as exc:
-            raise PostgresServiceError(422, "sql_query_failed", "Read-only SQL query failed") from exc
+            raise PostgresServiceError(422, "sql_query_failed", _safe_sql_query_failure(exc)) from exc
         finally:
             if cursor is not None:
                 close = getattr(cursor, "close", None)

@@ -135,7 +135,24 @@ const authUi = source.slice(source.indexOf("function buildAiAuthForm"), source.i
 assert.doesNotMatch(authUi, /localStorage|sessionStorage/, "provider credentials must not use browser storage");
 assert.match(source, /path\.startsWith\("\/api\/ai\/"\)/, "AI requests must be restricted to the local API");
 assert.doesNotMatch(source.slice(source.indexOf("async function aiRequest"), source.indexOf("async function checkPostgresDrift")), /fetch\((?!path|"\/api\/session")/, "AI request code must not fetch external URLs");
-assert.match(source, /postgresState\.selectedProfileId !== context\.profileId/, "actions must recheck the selected profile");
+const targetResolverStart = source.indexOf("function currentAiPostgresTarget");
+const targetResolverEnd = source.indexOf("async function executeAiReadQuery", targetResolverStart);
+const targetContext = vm.createContext({
+  postgresState: { selectedProfileId: null, namespace: "" },
+  schema: { postgres: { sourceProfileId: "tutorial", namespace: "bookstore" } }
+});
+vm.runInContext(`${source.slice(targetResolverStart, targetResolverEnd)}\nthis.currentAiPostgresTarget = currentAiPostgresTarget;`, targetContext);
+assert.equal(targetContext.currentAiPostgresTarget().profileId, "tutorial", "AI queries must use the design's linked profile when the connection dialog has not been opened");
+assert.equal(targetContext.currentAiPostgresTarget().namespace, "bookstore", "AI queries must use the design's linked namespace when the connection dialog has not been opened");
+targetContext.postgresState.selectedProfileId = "reporting";
+targetContext.postgresState.namespace = "analytics";
+assert.equal(targetContext.currentAiPostgresTarget().profileId, "reporting", "an explicitly selected profile must override the linked design profile");
+assert.equal(targetContext.currentAiPostgresTarget().namespace, "analytics", "an explicitly selected namespace must override the linked design namespace");
+const queryExecutor = source.slice(source.indexOf("async function executeAiReadQuery"), source.indexOf("async function ensureAiSession"));
+assert.match(queryExecutor, /currentTarget\.profileId !== context\.profileId/, "actions must recheck the effective PostgreSQL profile");
+assert.match(queryExecutor, /currentTarget\.namespace !== context\.namespace/, "actions must recheck the effective PostgreSQL namespace");
+assert.match(queryExecutor, /Tool error for SQL:/, "failed SQL must be returned to the assistant for correction");
+assert.match(queryExecutor, /await sendAiMessage\(text, "tool"\)/, "failed SQL feedback must continue through the bounded assistant context");
 assert.match(source, /JSON\.stringify\(schema\) !== context\.schemaSnapshot/, "schema proposals must recheck their base schema");
 const schemaApply = source.slice(source.indexOf("async function applyAiSchemaAction"), source.indexOf("const AI_MODEL_STORAGE_KEY"));
 assert.match(schemaApply, /validated\.type === "populate_schema"/, "complete schema proposals must apply through one atomic action");
@@ -163,6 +180,7 @@ assert.match(source, /new TextDecoder\(\)/, "agent activity must parse bounded s
 const activityRenderer = source.slice(source.indexOf("function beginAiActivity"), source.indexOf("function aiActionSummary"));
 assert.match(activityRenderer, /AI_TOOL_LABELS\[event\.tool\]/, "live tool activity must use fixed local labels");
 assert.match(activityRenderer, /AI_SKILL_LABELS\[event\.skill\]/, "live skill activity must use fixed local labels");
+assert.match(activityRenderer, /event\.type === "part"\) setStage\("model", "Model started", "completed"\)/, "the first model output must complete the model-started stage");
 assert.match(activityRenderer, /body\.textContent = part\.text/, "reasoning must render as text rather than HTML");
 assert.doesNotMatch(activityRenderer, /innerHTML|insertAdjacentHTML|eval\(/, "agent visualizations must not interpret model output as code or HTML");
 assert.match(source, /requestGeneration !== aiState\.requestGeneration/, "stale agent responses must not enter a reset conversation");

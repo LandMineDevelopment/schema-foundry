@@ -42,7 +42,7 @@ class Cursor:
     def execute(self, sql, params=()):
         self.connection.executed.append((sql, params))
         if self.connection.fail_on and self.connection.fail_on in sql:
-            raise RuntimeError("database detail that must not escape")
+            raise self.connection.failure or RuntimeError("database detail that must not escape")
         for marker, response in self.connection.responses.items():
             if marker in sql:
                 if isinstance(response, dict) and "rows" in response:
@@ -68,9 +68,10 @@ class Cursor:
 
 
 class Connection:
-    def __init__(self, responses=None, fail_on=None):
+    def __init__(self, responses=None, fail_on=None, failure=None):
         self.responses = responses or {}
         self.fail_on = fail_on
+        self.failure = failure
         self.executed = []
         self.commits = 0
         self.rollbacks = 0
@@ -205,6 +206,22 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertEqual(error.exception.code, "sql_query_failed")
         self.assertNotIn("database detail", error.exception.message)
         self.assertEqual(connection.rollbacks, 1)
+
+        class Diagnostic:
+            message_primary = "SELECT DISTINCT ON expressions must match initial ORDER BY expressions"
+
+        class QueryError(Exception):
+            sqlstate = "42P10"
+            diag = Diagnostic()
+
+        connection = Connection(fail_on="SELECT DISTINCT", failure=QueryError())
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connection)
+        with self.assertRaises(PostgresServiceError) as error:
+            service.execute_read_only_sql("local", "public", "SELECT DISTINCT ON (id) id FROM payments ORDER BY created_at")
+        self.assertEqual(
+            error.exception.message,
+            "Read-only SQL query failed: SELECT DISTINCT ON expressions must match initial ORDER BY expressions",
+        )
 
     def test_canonical_fingerprint_ignores_layout_and_transients(self):
         first = {"tables": [{"id": "t", "name": "x", "x": 1, "color": "red"}], "postgres": {"profileId": "one", "importedAt": "then"}}
