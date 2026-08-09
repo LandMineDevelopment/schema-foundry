@@ -12,7 +12,7 @@ services:
   opencode:
     build:
       context: ./ai
-    image: schemii-opencode:1.18.15-local
+    image: ${SCHEMII_OPENCODE_IMAGE:-schemii-opencode:1.18.15-local}
     working_dir: /workspace
     command: serve --hostname 0.0.0.0 --port 4096
     environment:

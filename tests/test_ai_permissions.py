@@ -54,7 +54,8 @@ class AiPermissionContractTests(unittest.TestCase):
         local_override = (ROOT / "compose.ai.local-db.yaml").read_text()
         self.assertIn("./ai/workspace:/workspace:ro", ai_compose)
         self.assertNotRegex(ai_compose, r'ports:\s*\n\s*-\s*["\']?[^\n]*4096')
-        self.assertIn('"127.0.0.1:4096:4096"', local_override)
+        self.assertIn('"127.0.0.1:${SCHEMII_OPENCODE_HOST_PORT:-4096}:4096"', local_override)
+        self.assertNotIn('"0.0.0.0:', local_override)
         self.assertIn("OPENCODE_DISABLE_EXTERNAL_SKILLS: 1", ai_compose)
         self.assertIn("OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: 1", ai_compose)
 

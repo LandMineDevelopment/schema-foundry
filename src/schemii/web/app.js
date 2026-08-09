@@ -947,6 +947,45 @@ async function postgresRequest(path, options = {}, retry = true) {
   return payload;
 }
 
+async function restoreExamples(retry = true) {
+  appMenu.removeAttribute("open");
+  try {
+    await flushPendingSave();
+    if (!postgresState.token) {
+      const sessionResponse = await fetch("/api/session");
+      const session = await sessionResponse.json().catch(() => ({}));
+      if (!sessionResponse.ok || !session.token) throw new Error(session.error?.message || "Could not start a local examples session");
+      postgresState.token = session.token;
+    }
+    const response = await fetch("/api/examples/restore", {
+      method: "POST",
+      headers: { "X-Schemii-Token": postgresState.token }
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      if (result.error?.code === "invalid_session" && retry) {
+        postgresState.token = null;
+        return restoreExamples(false);
+      }
+      throw new Error(result.error?.message || "Examples could not be restored");
+    }
+    const schemasResponse = await fetch("/api/schemas");
+    const schemasPayload = await schemasResponse.json().catch(() => ({}));
+    if (!schemasResponse.ok || !Array.isArray(schemasPayload.schemas)) throw new Error("Restored examples could not be loaded");
+    const library = readSchemaLibrary();
+    library.schemas = schemasPayload.schemas;
+    library.activeId = activeSchemaId;
+    writeSchemaLibrary(library);
+    renderSchemaLibrary();
+    const installed = result.installed?.length ?? 0;
+    const errors = result.errors?.length ?? 0;
+    if (errors) return showToast(installed ? `Restored ${installed} example item${installed === 1 ? "" : "s"}; some examples are unavailable` : result.errors[0]?.message || "Examples are unavailable");
+    showToast(installed ? `Restored ${installed} example item${installed === 1 ? "" : "s"}` : "Examples are already installed");
+  } catch (error) {
+    showToast(error.message || "Examples could not be restored");
+  }
+}
+
 async function aiRequest(path, options = {}, retry = true) {
   if (typeof path !== "string" || !path.startsWith("/api/ai/")) {
     throw new Error("AI requests must use the local Schemii API");
@@ -6192,6 +6231,7 @@ document.querySelector("#show-onboarding-button").addEventListener("click", () =
   appMenu.removeAttribute("open");
   openOnboarding();
 });
+document.querySelector("#restore-examples-button").addEventListener("click", () => restoreExamples());
 document.querySelector("#shutdown-button").addEventListener("click", () => {
   appMenu.removeAttribute("open");
   openShutdownDialog();

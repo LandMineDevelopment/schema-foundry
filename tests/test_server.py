@@ -126,6 +126,15 @@ class FakeAIService:
         yield {"type": "session", "state": "idle"}
 
 
+class FakeExampleInstaller:
+    def __init__(self):
+        self.calls = []
+
+    def restore(self):
+        self.calls.append(("restore",))
+        return {"installed": ["schemii_example_local"], "preserved": [], "completed": ["local"], "errors": []}
+
+
 class QuietHandlerMixin:
     def log_message(self, format, *args):
         pass
@@ -136,11 +145,13 @@ class ServerTests(unittest.TestCase):
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.service = FakePostgresService()
         self.ai_service = FakeAIService()
+        self.example_installer = FakeExampleInstaller()
         self.store = SchemaStore(Path(self.temporary_directory.name) / "schemas")
         handler = make_handler(
             ROOT / "src" / "schemii" / "web", self.service, self.store, "session-token",
             server_id="server-start-id",
             ai_service=self.ai_service,
+            example_installer=self.example_installer,
         )
         quiet_handler = type("QuietSchemiiHandler", (QuietHandlerMixin, handler), {})
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), quiet_handler)
@@ -183,6 +194,13 @@ class ServerTests(unittest.TestCase):
         status, body, _ = self.request("/api/session")
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body), {"token": "session-token", "serverId": "server-start-id"})
+
+    def test_example_restore_requires_session_and_returns_inert_install_summary(self):
+        self.assertEqual(self.request("/api/examples/restore", "POST")[0], 403)
+        status, body, _ = self.request("/api/examples/restore", "POST", authorized=True)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["installed"], ["schemii_example_local"])
+        self.assertEqual(self.example_installer.calls, [("restore",)])
 
     def test_shutdown_requires_local_session_and_stops_server_after_response(self):
         status, body, _ = self.request("/api/shutdown", "POST")

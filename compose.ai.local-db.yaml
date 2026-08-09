@@ -2,8 +2,8 @@
 services:
   schemii:
     environment:
-      SCHEMII_OPENCODE_URL: http://127.0.0.1:4096
+      SCHEMII_OPENCODE_URL: http://127.0.0.1:${SCHEMII_OPENCODE_HOST_PORT:-4096}
 
   opencode:
     ports:
-      - "127.0.0.1:4096:4096"
+      - "127.0.0.1:${SCHEMII_OPENCODE_HOST_PORT:-4096}:4096"

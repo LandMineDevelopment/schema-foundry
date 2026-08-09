@@ -6,7 +6,7 @@ Schemii has no Tagg, workflow, backlog, or coordinator behavior. It is a generic
 
 ## Try It In One Command
 
-The default trial starts only Schemii. It does not install, start, or contact PostgreSQL. Docker Desktop, or Docker Engine with the Compose plugin, is the only runtime prerequisite on every supported operating system. Python, Node.js, PostgreSQL tools, and Git are not required to run Schemii. Download and extract the [source archive](https://github.com/LandMineDevelopment/schemii/archive/refs/heads/main.zip), or optionally use Git, then run the platform launcher.
+The default trial starts Schemii and a private PostgreSQL 17 tutorial database. Docker Desktop, or Docker Engine with the Compose plugin, is the only runtime prerequisite on every supported operating system. Python, Node.js, PostgreSQL tools, and Git are not required to run Schemii. Download and extract the [source archive](https://github.com/LandMineDevelopment/schemii/archive/refs/heads/main.zip), or optionally use Git, then run the platform launcher.
 
 Linux or macOS:
 
@@ -24,7 +24,11 @@ Set-Location schemii
 powershell -ExecutionPolicy Bypass -File .\start.ps1
 ```
 
-The launcher builds the image, waits for its container health check, starts the UI, and opens `http://127.0.0.1:8080/` when Schemii was not already running there. Rebuilds of a running instance do not open duplicate tabs. Set `SCHEMII_NO_OPEN=1` on Linux or macOS, or pass `-NoOpen` in PowerShell, to always suppress automatic browser opening. Edit the built-in sample, use the disk button to save it, and use the folder button to reopen saved designs. No account, database profile, `.env`, Node.js, or local Python installation is needed.
+The launcher builds the images, waits for PostgreSQL and Schemii health checks, prints the installation-specific URL, and opens it when that instance was not already running. First startup installs a populated **Mercury Books** PostgreSQL project and a separate **Event Studio** local-only design. Rebuilds do not open duplicate tabs. Set `SCHEMII_NO_OPEN=1` on Linux or macOS, or pass `-NoOpen` in PowerShell, to suppress automatic browser opening. No account, `.env`, Node.js, or local Python installation is needed.
+
+Each installation directory receives a path-derived Compose project and host port. Separate extracted or cloned copies therefore use independent application containers, PostgreSQL containers, profiles, saved designs, and named volumes. Set `SCHEMII_INSTANCE` to a stable lowercase name to choose the instance identity, or `SCHEMII_HOST_PORT` to choose the browser port. A launcher detects a matching legacy `schemii` container and keeps its existing project, port, and volumes.
+
+Path-derived isolation is a launcher feature. If operating Compose directly, set a unique `SCHEMII_INSTANCE` in every installation and use that same value for all later `logs`, `exec`, `stop`, `start`, `down`, backup, and upgrade commands. Unqualified direct Compose commands intentionally retain the legacy `schemii` project name and must not be mixed across installations.
 
 Git is only a download and update convenience. The extracted source archive contains the complete Docker build context and Compose configuration.
 
@@ -32,7 +36,8 @@ AI-assisted setup instructions are in [`docs/AI_AGENT_SETUP.md`](docs/AI_AGENT_S
 
 | Goal | Linux or macOS | Windows PowerShell |
 | --- | --- | --- |
-| Try the UI without PostgreSQL | `./start.sh` | `powershell -ExecutionPolicy Bypass -File .\start.ps1` |
+| Start the tutorial UI and PostgreSQL | `./start.sh` | `powershell -ExecutionPolicy Bypass -File .\start.ps1` |
+| Use only local schema design | `./start.sh ui` | `powershell -ExecutionPolicy Bypass -File .\start.ps1 -Mode ui` |
 | Connect to Linux host PostgreSQL | `./start.sh local-db` | Not applicable; use UI mode and `host.docker.internal` |
 | Start UI with included PostgreSQL | `./start.sh docker-db` | `powershell -ExecutionPolicy Bypass -File .\start.ps1 -Mode docker-db` |
 
@@ -53,6 +58,14 @@ The AI panel discovers providers, subscription/API-key sign-in methods, connecte
 The last selected model is restored on the next visit. Prior chats remain available from the history dialog across normal restarts and rebuilds; opening one restores its bounded message history and continues the same OpenCode session. Starting a new chat preserves the prior conversation, while permanent deletion requires an explicit history action and confirmation. Provider subscription and API-key credentials remain in OpenCode's persistent data volume; Schemii never stores those credentials in browser storage.
 
 See [`docs/AI_ASSISTANT.md`](docs/AI_ASSISTANT.md) for provider sign-in, model selection, data disclosure, tools, skills, confirmations, credential storage, and limitations.
+
+## Included Examples
+
+An idempotent one-shot seed service creates a `bookstore` namespace with nine related tables and representative rows when that namespace is absent. It demonstrates identity and generated columns, one-to-many and many-to-many relationships, composite keys, unique and check constraints, B-tree and GIN indexes, JSONB, a view, SQL and PL/pgSQL functions, and an update trigger. The saved **Mercury Books: PostgreSQL tutorial** project is generated from live catalog introspection and then given a deliberate domain-based canvas layout, so PostgreSQL and the linked saved design initially have no unexpected migration differences. Later launches leave an existing namespace and its edits unchanged.
+
+The **Event Studio: Local design example** is not connected to PostgreSQL. Its seven-table event, session, speaker, attendee, and registration model demonstrates local design, composite keys, checks, indexes, functions, relationship editing, SQL/JSON export, and a clean two-row layout.
+
+Deleting an example project or the included connection is permanent across normal restarts. To reinstall only missing example items, use **? > Restore examples**. Existing records and their layouts are preserved byte-for-byte. PostgreSQL restoration requires the included database mode and a healthy `bookstore` namespace.
 
 ## Screenshots
 
@@ -75,10 +88,10 @@ Use the launcher shown above, or run Compose directly:
 ```bash
 git clone https://github.com/LandMineDevelopment/schemii.git
 cd schemii
-docker compose up --build -d
+SCHEMII_INSTANCE=my-schemii-copy docker compose up --build -d
 ```
 
-Open `http://127.0.0.1:8080/`. A four-step introduction appears once for each new Schemii server run, not again on browser refresh; select **Do not show on future server starts** to disable it. The **?** menu can reopen the guide at any time. The built-in sample design is immediately editable. Use the disk button in the top toolbar to save, the folder button to reopen a saved design, and the plus button to create another design. Saved designs remain in the `schemii-schemas` Docker volume across container restarts and upgrades.
+Open the URL printed by the launcher. A four-step introduction appears once for each new Schemii server run, not again on browser refresh; select **Do not show on future server starts** to disable it. The **?** menu can reopen the guide or restore deleted examples. Use the disk button in the top toolbar to save, the folder button to reopen saved designs, and the plus button to create another design. Saved designs remain in the installation-specific schema volume across container restarts and upgrades.
 
 View startup output with `docker compose logs -f schemii`. Use **? > Shut down Schemii** to save pending design edits and stop the Schemii application container, or use `docker compose down` to stop the complete stack, including optional PostgreSQL and AI sidecars. Starting it again with `docker compose up -d` restores saved designs. Do not run `docker compose down --volumes` unless you intend to delete them.
 
@@ -88,7 +101,7 @@ The Compose configuration:
 - Runs as an unprivileged user with a read-only container filesystem and dropped capabilities.
 - Persists profiles and migration history in `schemii-config`.
 - Persists schema JSON records in `schemii-schemas`.
-- Does not start PostgreSQL unless the separate PostgreSQL Compose file is explicitly selected.
+- Installs only the local design example; PostgreSQL remains absent in explicit `ui` mode.
 
 To use another host port:
 
@@ -100,7 +113,7 @@ On PowerShell, set `$env:SCHEMII_HOST_PORT = "8081"` before running `docker comp
 
 ## Quick Start: UI And PostgreSQL
 
-Use the optional Compose file to start Schemii with a private PostgreSQL 17 container. The database port is not published to the host or LAN; only Schemii can reach it on the Compose network.
+The default launcher uses the PostgreSQL Compose file to start Schemii with a private PostgreSQL 17 container. The database port is not published to the host or LAN; only its matching Schemii instance can reach it on the isolated Compose network.
 
 ```bash
 ./start.sh docker-db
@@ -108,7 +121,7 @@ Use the optional Compose file to start Schemii with a private PostgreSQL 17 cont
 
 On Windows, run `powershell -ExecutionPolicy Bypass -File .\start.ps1 -Mode docker-db`. The equivalent direct Compose command is `docker compose -f compose.yaml -f compose.postgres.yaml up --build -d`.
 
-Open `http://127.0.0.1:8080/`, select the database icon labeled **PostgreSQL sync**, choose **+ Connection**, and enter:
+The included connection is created automatically from the same environment values used by the PostgreSQL container. To create another connection manually, use:
 
 | Field | Local container value |
 | --- | --- |
@@ -121,7 +134,7 @@ Open `http://127.0.0.1:8080/`, select the database icon labeled **PostgreSQL syn
 | SSL mode | `disable` |
 | Timeout | `10` |
 
-Choose **Save & test**. After it succeeds, select the `public` namespace and use **Import** to load its live schema or **Preview migration** to compare the current design with PostgreSQL.
+Choose **Save & test**. The included example instead selects the seeded `bookstore` namespace; use **Import** to refresh its live semantics without changing the saved layout or **Preview migration** to confirm the linked design matches PostgreSQL.
 
 The default credentials are only for local evaluation. To choose your own before the first database start, copy `.env.example` to `.env`, edit its values, and use those same values in the connection form:
 
@@ -145,7 +158,9 @@ notepad .env
 docker compose -f compose.yaml -f compose.postgres.yaml up --build -d
 ```
 
-PostgreSQL data persists in `schemii-postgres`. Stop this stack with `docker compose -f compose.yaml -f compose.postgres.yaml down`. Adding `--volumes` deletes the PostgreSQL database as well as Schemii profiles and saved designs.
+PostgreSQL data persists in the current instance's `schemii-postgres` volume. The launcher prints the instance name; use it with `docker compose --project-name <instance> -f compose.yaml -f compose.postgres.yaml down` to stop that stack. Adding `--volumes` deletes PostgreSQL, profiles, and saved designs for that instance and must not be used for routine shutdown.
+
+To remove only the included database while retaining Schemii profiles and designs, stop that instance, remove only its `<instance>_schemii-postgres` volume, and subsequently launch with explicit `ui` mode. Running the default launcher again recreates and reseeds the PostgreSQL volume. The connection and linked design can be deleted independently in Schemii.
 
 Back up the optional database with PostgreSQL's own tools before migration testing or upgrades:
 
@@ -329,6 +344,7 @@ The supplied Compose configuration fixes the default project and volume prefix t
 - `POST /api/postgres/profiles/{profileId}/preview`: create an expiring migration plan from a saved design and the current catalog.
 - `POST /api/postgres/profiles/{profileId}/plans/{planId}/apply`: apply a still-current plan transactionally.
 - `GET /api/postgres/history`: list local migration history.
+- `POST /api/examples/restore`: reinstall missing examples for the current launch mode without replacing existing records.
 
 PostgreSQL and shutdown endpoints require the token returned by `/api/session` in the `X-Schemii-Token` header. Schema saves use revision checks and the layout protocol headers managed by the browser application. Do not request shutdown while database, SQL, migration, or AI work is active; the browser control prevents this and flushes pending design saves first.
 

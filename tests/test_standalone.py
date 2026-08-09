@@ -86,6 +86,21 @@ class StandaloneRuntimeTests(unittest.TestCase):
         self.assertIn("Invoke-WebRequest -Uri $url -TimeoutSec 1", powershell)
         self.assertIn("-not $NoOpen -and -not $wasReady", powershell)
 
+    def test_launchers_default_to_isolated_tutorial_instances(self):
+        shell = (ROOT / "start.sh").read_text(encoding="utf-8")
+        powershell = (ROOT / "start.ps1").read_text(encoding="utf-8")
+        postgres_compose = (ROOT / "compose.postgres.yaml").read_text(encoding="utf-8")
+
+        self.assertIn('mode="${1:-docker-db}"', shell)
+        self.assertIn('[string]$Mode = "docker-db"', powershell)
+        for source in (shell, powershell):
+            self.assertIn("SCHEMII_INSTANCE", source)
+            self.assertIn("--project-name", source)
+            self.assertIn("SCHEMII_HOST_PORT", source)
+        self.assertIn("service_completed_successfully", postgres_compose)
+        self.assertIn("/seed/001_bookstore.sql:ro", postgres_compose)
+        self.assertIn("SCHEMII_EXAMPLES: all", postgres_compose)
+
     def test_compose_allows_a_clean_browser_shutdown_to_remain_stopped(self):
         compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
 

@@ -9,6 +9,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+from .examples import ExampleInstaller, installer_from_environment
 from .opencode_service import OpenCodeService, OpenCodeServiceError
 from .postgres_service import PostgresService, PostgresServiceError
 from .schema_store import SchemaStore, SchemaStoreError
@@ -278,6 +279,7 @@ def make_handler(
     *,
     server_id: str,
     ai_service: OpenCodeService | None = None,
+    example_installer: ExampleInstaller | None = None,
     behind_loopback_proxy: bool = False,
 ):
     class SchemiiHandler(SimpleHTTPRequestHandler):
@@ -498,6 +500,12 @@ def make_handler(
                 self.wfile.flush()
                 shutdown_thread.start()
                 return
+            if path == "/api/examples/restore":
+                if not self._authorize_postgres():
+                    return
+                if example_installer is None:
+                    return self.send_json(503, {"error": {"code": "examples_disabled", "message": "Examples are not enabled for this server"}})
+                return self.send_json(200, example_installer.restore())
             if path.startswith("/api/ai/"):
                 if not self._authorize_ai():
                     return
@@ -657,6 +665,13 @@ def main() -> None:
         raise SystemExit(f"Static web directory does not exist: {web_dir}")
     service = PostgresService(config_dir)
     store = SchemaStore(schema_dir)
+    try:
+        example_installer = installer_from_environment(service, store, config_dir)
+        example_result = example_installer.initialize_once()
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
+    for error in example_result["errors"]:
+        print(f"Schemii example setup warning ({error['component']}): {error['message']}")
     ai_service = OpenCodeService(
         os.environ.get("SCHEMII_OPENCODE_URL", ""),
         os.environ.get("SCHEMII_OPENCODE_USERNAME", "opencode"),
@@ -670,6 +685,7 @@ def main() -> None:
         secrets.token_urlsafe(32),
         server_id=secrets.token_urlsafe(18),
         ai_service=ai_service,
+        example_installer=example_installer,
         behind_loopback_proxy=proxy_setting == "1",
     )
     server = ThreadingHTTPServer((host, port), handler)

@@ -4,21 +4,21 @@ This guide is for an AI coding or terminal agent helping a user install, start, 
 
 ## Default Goal
 
-Unless the user explicitly requests PostgreSQL, start UI-only mode. It requires no database, account, profile, or environment file and must not contact PostgreSQL.
+Unless the user explicitly requests another mode, start the default tutorial stack. It includes a private seeded PostgreSQL container, a saved linked bookstore project, and a separate local-only example design.
 
 Linux or macOS:
 
 ```bash
-./start.sh ui
+./start.sh
 ```
 
 Windows PowerShell:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\start.ps1 -Mode ui
+powershell -ExecutionPolicy Bypass -File .\start.ps1
 ```
 
-The expected URL is `http://127.0.0.1:8080/`. Verify `GET /` and `GET /api/session` return HTTP 200. The session response includes a secret token and a non-secret per-process `serverId`; never print or persist the token. Verify `docker compose ps` shows only `schemii` in UI-only mode.
+Use the installation-specific URL and Compose project printed by the launcher. Verify `GET /` and `GET /api/session` return HTTP 200. The session response includes a secret token and a non-secret per-process `serverId`; never print or persist the token. Verify the printed Compose project shows healthy `schemii` and `postgres` services.
 
 ## Prerequisite Checks
 
@@ -30,7 +30,7 @@ docker compose version
 docker compose config
 ```
 
-On Windows, Docker Desktop must be running in Linux container mode. If port 8080 is occupied, set `SCHEMII_HOST_PORT` before starting bridge-mode stacks. Do not change the container port.
+On Windows, Docker Desktop must be running in Linux container mode. Launchers derive an installation-specific host port and print the URL; set `SCHEMII_HOST_PORT` only when a fixed port is required. Do not change the bridge-mode container port.
 
 ## Select One Mode
 
@@ -44,6 +44,8 @@ Use this for evaluation, offline design, SQL import, and JSON or SQL export:
 
 No PostgreSQL service should exist in this mode.
 
+The first explicit UI-only startup installs the local Event Studio example. It must not create a PostgreSQL profile or contact PostgreSQL.
+
 ### Linux Host PostgreSQL
 
 Use this when PostgreSQL runs on Linux host loopback:
@@ -52,17 +54,19 @@ Use this when PostgreSQL runs on Linux host loopback:
 ./start.sh local-db
 ```
 
-Use profile host `127.0.0.1` or `localhost`. This mode uses `compose.local-db.yaml`, host networking, and an application bind of `127.0.0.1:8080`.
+Use profile host `127.0.0.1` or `localhost`. This mode uses `compose.local-db.yaml`, host networking, and the installation-specific loopback port printed by the launcher.
 
 ### Included Docker PostgreSQL
 
-Use this for a disposable local PostgreSQL instance:
+This is the default evaluation mode and includes the seeded Mercury Books tutorial:
 
 ```bash
 ./start.sh docker-db
 ```
 
 Use profile host `postgres`, port `5432`, database `schemii`, user `schemii`, password `schemii-local`, and SSL mode `disable`. The defaults are for local evaluation only. Copy `.env.example` to `.env` before first startup to customize them.
+
+The one-shot seed service creates `bookstore` only when the namespace is absent, including on older included-database volumes, and otherwise leaves it unchanged. The application then verifies the exact configured database, introspects only `bookstore`, and saves the linked example with a custom layout. It does not apply a migration.
 
 ### Docker Desktop Host PostgreSQL
 
@@ -74,7 +78,7 @@ Prefer a shared user-defined network and use the PostgreSQL service name or netw
 
 ## Optional Embedded AI Modes
 
-AI is opt-in and must never be added to a user's default UI-only launch without their request.
+AI is opt-in and must never be added to the default tutorial or UI-only launch without the user's request.
 
 ```bash
 ./start.sh ai
@@ -100,7 +104,13 @@ Schemii stores Docker data in these named volumes:
 - `schemii-schemas` contains saved designs and user-owned layout.
 - `schemii-postgres` exists only for the included PostgreSQL mode.
 
+Launchers scope these volume keys under a path-derived Compose project, so multiple installation directories do not share containers, database data, profiles, designs, or browser ports. Use the instance printed by the launcher in lifecycle commands. `SCHEMII_INSTANCE` and `SCHEMII_HOST_PORT` are explicit overrides; do not point two active installations at the same values.
+
+Direct Compose does not derive an instance from the directory. Set a unique `SCHEMII_INSTANCE` before every direct Compose command and keep it stable for that installation; otherwise direct commands use the legacy `schemii` project and can operate on another copy's volumes.
+
 Never run `docker compose down --volumes`, `docker volume rm`, or any equivalent destructive command without explicit user approval. Normal `docker compose down` and mode switches retain named volumes.
+
+Deleting either example does not trigger automatic recreation after its first-run marker is written. The authenticated **? > Restore examples** action creates only missing fixed example IDs and never overwrites existing layout. In database mode, restoration verifies the configured profile/database/namespace before introspection. Compare parsed layouts before and after any restoration test and require equality for all records that existed before the request.
 
 The browser's **Shut down Schemii** control sends an authenticated local `POST /api/shutdown` after flushing pending design saves. It stops only the Schemii process; use the exact Compose file set with `docker compose down` when PostgreSQL or OpenCode sidecars must also stop. Do not call the shutdown endpoint while introspection, SQL, AI, preview, or migration apply work is active.
 

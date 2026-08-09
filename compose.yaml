@@ -1,10 +1,10 @@
-name: schemii
+name: ${SCHEMII_INSTANCE:-schemii}
 
 services:
   schemii:
     build:
       context: .
-    image: schemii:local
+    image: ${SCHEMII_IMAGE:-schemii:local}
     ports:
       - "127.0.0.1:${SCHEMII_HOST_PORT:-8080}:8080"
     environment:
@@ -13,6 +13,7 @@ services:
       SCHEMII_CONFIG_DIR: /data/config
       SCHEMII_SCHEMA_DIR: /data/schemas
       SCHEMII_BEHIND_LOOPBACK_PROXY: 1
+      SCHEMII_EXAMPLES: local
     volumes:
       - schemii-config:/data/config
       - schemii-schemas:/data/schemas
