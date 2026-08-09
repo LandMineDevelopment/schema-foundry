@@ -4910,6 +4910,69 @@ function appendAiMessage(role, text) {
   return message;
 }
 
+function appendAiQueryResult(result) {
+  elements.aiMessages.querySelector(".ai-empty-state")?.remove();
+  const columns = (result.columns ?? []).map(column => column.name ?? String(column));
+  const rows = result.rows ?? [];
+  const message = document.createElement("article");
+  message.className = "ai-message tool ai-query-result";
+  const label = document.createElement("span");
+  label.textContent = "Query result";
+  const card = document.createElement("div");
+  card.className = "ai-query-result-card";
+  const meta = document.createElement("div");
+  meta.className = "ai-query-result-meta";
+  const count = document.createElement("strong");
+  count.textContent = `${rows.length} row${rows.length === 1 ? "" : "s"}`;
+  const status = document.createElement("span");
+  status.textContent = result.truncated ? "Limited to 500 rows" : "Complete result";
+  meta.append(count, status);
+  card.append(meta);
+  if (columns.length) {
+    const scroll = document.createElement("div");
+    scroll.className = "ai-query-result-scroll";
+    scroll.tabIndex = 0;
+    scroll.setAttribute("aria-label", `Query result with ${rows.length} row${rows.length === 1 ? "" : "s"}`);
+    const table = document.createElement("table");
+    table.className = "ai-query-result-table";
+    const head = document.createElement("thead");
+    const headingRow = document.createElement("tr");
+    for (const column of columns) {
+      const heading = document.createElement("th");
+      heading.scope = "col";
+      heading.textContent = column;
+      headingRow.append(heading);
+    }
+    head.append(headingRow);
+    const body = document.createElement("tbody");
+    for (const row of rows) {
+      const tableRow = document.createElement("tr");
+      columns.forEach((column, index) => {
+        const cell = document.createElement("td");
+        const value = tableDataValue(Array.isArray(row) ? row[index] : row[column]);
+        cell.textContent = value.text;
+        if (value.className) cell.className = value.className;
+        cell.title = value.text;
+        tableRow.append(cell);
+      });
+      body.append(tableRow);
+    }
+    table.append(head, body);
+    scroll.append(table);
+    card.append(scroll);
+  }
+  if (!rows.length) {
+    const empty = document.createElement("p");
+    empty.className = "ai-query-result-empty";
+    empty.textContent = "Query returned no rows.";
+    card.append(empty);
+  }
+  message.append(label, card);
+  elements.aiMessages.append(message);
+  elements.aiMessages.scrollTop = elements.aiMessages.scrollHeight;
+  return message;
+}
+
 function formatAiDuration(milliseconds) {
   const seconds = Math.max(0, milliseconds) / 1000;
   return seconds < 10 ? `${seconds.toFixed(1)}s` : `${Math.round(seconds)}s`;
@@ -5285,7 +5348,7 @@ async function executeAiReadQuery(action, context, card, button) {
   try {
     const result = await postgresRequest(`/api/postgres/profiles/${encodeURIComponent(context.profileId)}/sql`, { method: "POST", body: JSON.stringify({ namespace: context.namespace, sql }) });
     const text = `Tool result for SQL:\n${sql}\n${boundedAiQueryResult(result)}`;
-    appendAiMessage("tool", text);
+    appendAiQueryResult(result);
     button.textContent = "Ran query";
     await sendAiMessage(text, "tool");
   } catch (error) {

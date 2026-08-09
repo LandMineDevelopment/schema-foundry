@@ -278,6 +278,20 @@ button { color: inherit; }
 .ai-message.user p { border-color: #514979; border-radius: 11px 4px 11px 11px; color: #e2dcfa; background: #211d32; }
 .ai-message.tool { max-width: 100%; }
 .ai-message.tool p { color: #aeb9c7; background: #0c1117; font: 9px/1.55 ui-monospace, monospace; }
+.ai-query-result-card { overflow: hidden; border: 1px solid #2d3743; border-radius: 5px 10px 10px 10px; background: #0c1117; box-shadow: 0 10px 24px rgba(0, 0, 0, .16); }
+.ai-query-result-meta { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 31px; padding: 6px 9px; border-bottom: 1px solid #28313c; background: #141a22; }
+.ai-query-result-meta strong { color: #c8d0da; font-size: 9px; }
+.ai-query-result-meta span { color: #697585; font-size: 7px; text-transform: uppercase; letter-spacing: .06em; }
+.ai-query-result-scroll { max-height: 230px; overflow: auto; scrollbar-width: thin; scrollbar-color: #46515f #0d1218; }
+.ai-query-result-scroll:focus-visible { outline: 1px solid #80682e; outline-offset: -1px; }
+.ai-query-result-table { min-width: 100%; border-collapse: separate; border-spacing: 0; font: 8px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.ai-query-result-table th, .ai-query-result-table td { max-width: 220px; padding: 7px 9px; overflow: hidden; border-right: 1px solid #222a34; border-bottom: 1px solid #202731; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.ai-query-result-table th { position: sticky; z-index: 1; top: 0; color: #98a5b4; background: #171e27; font-size: 7px; text-transform: uppercase; letter-spacing: .05em; }
+.ai-query-result-table td { color: #b2bdc9; }
+.ai-query-result-table tbody tr:nth-child(even) td { background: #10161d; }
+.ai-query-result-table tbody tr:hover td { background: #191c1b; }
+.ai-query-result-table td.null, .ai-query-result-table td.empty { color: #626e7d; font-style: italic; }
+.ai-query-result-empty { border: 0 !important; border-radius: 0 !important; color: #697585 !important; background: transparent !important; text-align: center; }
 .ai-action-card { display: grid; gap: 8px; margin: 8px 0 16px 22px; padding: 11px; border: 1px solid #4a426e; border-radius: 7px; background: linear-gradient(135deg, rgba(71, 58, 116, .18), rgba(19, 22, 30, .95)); }
 .ai-action-card > strong { color: #d9d1f7; font: 700 10px ui-monospace, monospace; text-transform: capitalize; }
 .ai-action-card > p { margin: 0; color: #7e8897; font-size: 9px; line-height: 1.45; }

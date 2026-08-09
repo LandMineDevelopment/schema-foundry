@@ -151,6 +151,7 @@ assert.equal(targetContext.currentAiPostgresTarget().namespace, "analytics", "an
 const queryExecutor = source.slice(source.indexOf("async function executeAiReadQuery"), source.indexOf("async function ensureAiSession"));
 assert.match(queryExecutor, /currentTarget\.profileId !== context\.profileId/, "actions must recheck the effective PostgreSQL profile");
 assert.match(queryExecutor, /currentTarget\.namespace !== context\.namespace/, "actions must recheck the effective PostgreSQL namespace");
+assert.match(queryExecutor, /appendAiQueryResult\(result\)/, "successful SQL must display its structured result instead of model-facing JSON");
 assert.match(queryExecutor, /Tool error for SQL:/, "failed SQL must be returned to the assistant for correction");
 assert.match(queryExecutor, /await sendAiMessage\(text, "tool"\)/, "failed SQL feedback must continue through the bounded assistant context");
 assert.match(source, /JSON\.stringify\(schema\) !== context\.schemaSnapshot/, "schema proposals must recheck their base schema");
@@ -161,6 +162,9 @@ assert.equal((schemaApply.match(/await persistCurrentSchema\(\)/g) ?? []).length
 assert.match(source, /card\.querySelectorAll\("\.ai-action-error"\).*remove/, "repeated review attempts must replace prior validation errors");
 const messageRenderer = source.slice(source.indexOf("function appendAiMessage"), source.indexOf("function aiActionSummary"));
 assert.match(messageRenderer, /body\.textContent =/, "chat text must render with textContent");
+assert.match(messageRenderer, /function appendAiQueryResult/, "structured SQL results must have a dedicated chat renderer");
+assert.match(messageRenderer, /document\.createElement\("table"\)/, "structured SQL results must render as a table");
+assert.match(messageRenderer, /cell\.textContent = value\.text/, "query result cells must render as text");
 assert.doesNotMatch(messageRenderer, /innerHTML/, "chat text must not render as HTML");
 assert.match(html, /id="ai-provider[^" ]*"|id="ai-providers"/, "provider settings UI is missing");
 assert.doesNotMatch(html, /id="ai[^\n]+value="[^\n]*(?:key|token|secret)/i, "provider secrets must not be embedded in HTML");
@@ -171,6 +175,8 @@ assert.doesNotMatch(panelState, /inspector|mobile-open|inspector-dismissed/, "AI
 assert.match(styles, /\.ai-panel \{[^}]*left: 0;[^}]*translate3d\(-100%/, "AI chat must dock from the left");
 assert.match(styles, /\.schema-library-connection/, "saved schema cards must display connection ownership");
 assert.match(styles, /\.main-layout\.ai-open \.tool-rail/, "AI chat must visually replace the left tool rail");
+assert.match(styles, /\.ai-query-result-scroll \{[^}]*overflow: auto/, "wide or long query results must scroll inside the chat panel");
+assert.match(styles, /\.ai-query-result-table th \{[^}]*position: sticky/, "query result column headings must remain visible while scrolling");
 assert.match(source, /aiInput\.disabled = busy \|\| !aiState\.available \|\| !elements\.aiModelSelect\.value/, "chat input must remain disabled until a provider model is connected");
 assert.match(source, /Connect a provider in settings to start chatting/, "chat must explain how to enable a provider");
 assert.match(source, /anonymousFreeAccess \? "Free access"/, "anonymous free providers must be identified accurately");
