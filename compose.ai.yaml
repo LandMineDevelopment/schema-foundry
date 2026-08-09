@@ -7,7 +7,7 @@ services:
       SCHEMII_OPENCODE_TIMEOUT: ${SCHEMII_OPENCODE_TIMEOUT:-45}
     depends_on:
       opencode:
-        condition: service_started
+        condition: service_healthy
 
   opencode:
     build:
@@ -30,6 +30,12 @@ services:
       - schemii-opencode-config:/opencode/config
       - schemii-opencode-state:/opencode/state
       - schemii-opencode-cache:/opencode/cache
+    healthcheck:
+      test: ["CMD-SHELL", "credentials=$$(printf '%s:%s' \"$$OPENCODE_SERVER_USERNAME\" \"$$OPENCODE_SERVER_PASSWORD\" | base64 | tr -d '\\n'); wget -q --spider --header \"Authorization: Basic $$credentials\" http://127.0.0.1:4096/global/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s
     restart: unless-stopped
 
 volumes:

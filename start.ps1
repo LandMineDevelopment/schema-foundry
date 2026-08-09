@@ -1,6 +1,6 @@
 param(
     [ValidateSet("ui", "docker-db", "ai", "ai-local-db", "ai-docker-db")]
-    [string]$Mode = "docker-db",
+    [string]$Mode = "ai-docker-db",
     [switch]$NoOpen
 )
 

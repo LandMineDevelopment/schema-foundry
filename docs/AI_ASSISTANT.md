@@ -1,8 +1,14 @@
 # Embedded AI Assistant
 
-Schemii can run a private, pinned OpenCode sidecar that provides model discovery, provider authentication, chat sessions, skills, and explicit proposal tools. AI is optional. The default `ui`, `local-db`, and `docker-db` modes do not start OpenCode or contact a model provider.
+Schemii's default launcher runs a private, pinned OpenCode sidecar that provides model discovery, provider authentication, chat sessions, skills, and explicit proposal tools. The sidecar starts with the default `ai-docker-db` stack, but no model request is made until the user sends a chat message. Explicit `ui`, `local-db`, and `docker-db` modes omit OpenCode.
 
 ## Start An AI Mode
+
+The default complete stack is:
+
+```bash
+./start.sh
+```
 
 UI and AI, without PostgreSQL:
 

@@ -4,7 +4,7 @@ This guide is for an AI coding or terminal agent helping a user install, start, 
 
 ## Default Goal
 
-Unless the user explicitly requests another mode, start the default tutorial stack. It includes a private seeded PostgreSQL container, a saved linked bookstore project, and a separate local-only example design.
+Unless the user explicitly requests another mode, start the default complete stack. It includes a private seeded PostgreSQL container, a private OpenCode sidecar, a saved linked bookstore project, and a separate local-only example design.
 
 Linux or macOS:
 
@@ -18,7 +18,7 @@ Windows PowerShell:
 powershell -ExecutionPolicy Bypass -File .\start.ps1
 ```
 
-Use the installation-specific URL and Compose project printed by the launcher. Verify `GET /` and `GET /api/session` return HTTP 200. The session response includes a secret token and a non-secret per-process `serverId`; never print or persist the token. Verify the printed Compose project shows healthy `schemii` and `postgres` services.
+Use the installation-specific URL and Compose project printed by the launcher. Verify `GET /` and `GET /api/session` return HTTP 200. The session response includes a secret token and a non-secret per-process `serverId`; never print or persist the token. Verify the printed Compose project shows healthy `schemii`, `postgres`, and `opencode` services. The one-shot example seed service should exit successfully.
 
 ## Prerequisite Checks
 
@@ -58,7 +58,7 @@ Use profile host `127.0.0.1` or `localhost`. This mode uses `compose.local-db.ya
 
 ### Included Docker PostgreSQL
 
-This is the default evaluation mode and includes the seeded Mercury Books tutorial:
+This mode includes the seeded Mercury Books tutorial without the agent:
 
 ```bash
 ./start.sh docker-db
@@ -78,7 +78,7 @@ Prefer a shared user-defined network and use the PostgreSQL service name or netw
 
 ## Optional Embedded AI Modes
 
-AI is opt-in and must never be added to the default tutorial or UI-only launch without the user's request.
+The default no-argument launcher includes AI. Model interaction remains user-initiated: do not send prompts, connect a paid provider, or widen model data access without the user's request. Explicit `ui`, `local-db`, and `docker-db` modes omit OpenCode.
 
 ```bash
 ./start.sh ai

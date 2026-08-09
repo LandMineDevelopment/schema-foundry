@@ -5,7 +5,7 @@ Schemii is a standalone, local browser application for designing PostgreSQL sche
 
 ## Try It In One Command
 
-The default trial starts Schemii and a private PostgreSQL 17 tutorial database. Docker Desktop, or Docker Engine with the Compose plugin, is the only runtime prerequisite on every supported operating system. Python, Node.js, PostgreSQL tools, and Git are not required to run Schemii. Download and extract the [source archive](https://github.com/LandMineDevelopment/schemii/archive/refs/heads/main.zip), or optionally use Git, then run the platform launcher.
+The default trial starts Schemii, a private PostgreSQL 17 tutorial database, and the private OpenCode agent sidecar as one Compose stack. Docker Desktop, or Docker Engine with the Compose plugin, is the only runtime prerequisite on every supported operating system. Python, Node.js, PostgreSQL tools, and Git are not required to run Schemii. Download and extract the [source archive](https://github.com/LandMineDevelopment/schemii/archive/refs/heads/main.zip), or optionally use Git, then run the platform launcher.
 
 Linux or macOS:
 
@@ -23,7 +23,7 @@ Set-Location schemii
 powershell -ExecutionPolicy Bypass -File .\start.ps1
 ```
 
-The launcher builds the images, waits for PostgreSQL and Schemii health checks, prints the installation-specific URL, and opens it when that instance was not already running. First startup installs a populated **Mercury Books** PostgreSQL project and a separate **Event Studio** local-only design. Rebuilds do not open duplicate tabs. Set `SCHEMII_NO_OPEN=1` on Linux or macOS, or pass `-NoOpen` in PowerShell, to suppress automatic browser opening. No account, `.env`, Node.js, or local Python installation is needed.
+The launcher builds the images, waits for PostgreSQL, OpenCode, and Schemii health checks, prints the installation-specific URL, and opens it when that instance was not already running. First startup installs a populated **Mercury Books** PostgreSQL project and a separate **Event Studio** local-only design. The agent runtime is ready with the UI, but no model request is made until the user sends a chat message. Rebuilds do not open duplicate tabs. Set `SCHEMII_NO_OPEN=1` on Linux or macOS, or pass `-NoOpen` in PowerShell, to suppress automatic browser opening. No account, `.env`, Node.js, or local Python installation is needed.
 
 Each installation directory receives a path-derived Compose project and host port. Separate extracted or cloned copies therefore use independent application containers, PostgreSQL containers, profiles, saved designs, and named volumes. Set `SCHEMII_INSTANCE` to a stable lowercase name to choose the instance identity, or `SCHEMII_HOST_PORT` to choose the browser port. A launcher detects a matching legacy `schemii` container and keeps its existing project, port, and volumes.
 
@@ -35,14 +35,14 @@ AI-assisted setup instructions are in [`docs/AI_AGENT_SETUP.md`](docs/AI_AGENT_S
 
 | Goal | Linux or macOS | Windows PowerShell |
 | --- | --- | --- |
-| Start the tutorial UI and PostgreSQL | `./start.sh` | `powershell -ExecutionPolicy Bypass -File .\start.ps1` |
+| Start UI, tutorial PostgreSQL, and agent | `./start.sh` | `powershell -ExecutionPolicy Bypass -File .\start.ps1` |
 | Use only local schema design | `./start.sh ui` | `powershell -ExecutionPolicy Bypass -File .\start.ps1 -Mode ui` |
+| Start tutorial PostgreSQL without agent | `./start.sh docker-db` | `powershell -ExecutionPolicy Bypass -File .\start.ps1 -Mode docker-db` |
 | Connect to Linux host PostgreSQL | `./start.sh local-db` | Not applicable; use UI mode and `host.docker.internal` |
-| Start UI with included PostgreSQL | `./start.sh docker-db` | `powershell -ExecutionPolicy Bypass -File .\start.ps1 -Mode docker-db` |
 
-## Optional AI Assistant
+## Embedded AI Assistant
 
-The embedded assistant runs in a pinned, containerized OpenCode sidecar. It is not started by default.
+The default launcher starts the embedded assistant in a pinned, containerized OpenCode sidecar. OpenCode is a separate service in the same instance-scoped Compose stack, preserving its security and storage boundary while ensuring the runtime is available whenever the default UI starts. Schemii waits for an authenticated OpenCode health check, and Compose restarts the sidecar if it crashes.
 
 ```bash
 ./start.sh ai
@@ -50,7 +50,7 @@ The embedded assistant runs in a pinned, containerized OpenCode sidecar. It is n
 ./start.sh ai-docker-db
 ```
 
-Use `ai` for design-only chat, `ai-local-db` for a Linux host PostgreSQL server, or `ai-docker-db` for the included PostgreSQL container. Windows PowerShell supports `-Mode ai` and `-Mode ai-docker-db`; use `ai` with profile host `host.docker.internal` for a Windows host database.
+The no-argument launcher is equivalent to `ai-docker-db`. Use `ai` for design-only chat, `ai-local-db` for a Linux host PostgreSQL server, or `docker-db` for the included PostgreSQL container without the agent. Windows PowerShell supports `-Mode ai` and `-Mode ai-docker-db`; use `ai` with profile host `host.docker.internal` for a Windows host database.
 
 The AI panel discovers providers, subscription/API-key sign-in methods, connected models, and packaged Schemii skills from OpenCode. Working temporary OpenCode free models are available without a key; provider settings also support an optional OpenCode Zen key. A session-scoped activity timeline visualizes model work, retries, safe skill/tool stages, elapsed time, reasoning, and completion while filtering sensitive event fields in the backend. Agents can propose creating or opening local projects, atomically populating an active design with complete tables/columns/keys/relationships, and opening an exact saved PostgreSQL connection. Schemii validates every structured proposal and requires confirmation before saving, switching projects, or contacting PostgreSQL. Users control whether the model receives metadata, full schema structure, or explicitly approved query results. Raw SQL is always visible, every write requires separate UI confirmation, and migration apply continues through the existing reviewed plan workflow.
 
@@ -112,13 +112,13 @@ On PowerShell, set `$env:SCHEMII_HOST_PORT = "8081"` before running `docker comp
 
 ## Quick Start: UI And PostgreSQL
 
-The default launcher uses the PostgreSQL Compose file to start Schemii with a private PostgreSQL 17 container. The database port is not published to the host or LAN; only its matching Schemii instance can reach it on the isolated Compose network.
+The default launcher uses the PostgreSQL and AI Compose files to start Schemii with a private PostgreSQL 17 container and OpenCode sidecar. Neither service is published to the LAN; only the matching Schemii instance can reach them on the isolated Compose network.
 
 ```bash
-./start.sh docker-db
+./start.sh
 ```
 
-On Windows, run `powershell -ExecutionPolicy Bypass -File .\start.ps1 -Mode docker-db`. The equivalent direct Compose command is `docker compose -f compose.yaml -f compose.postgres.yaml up --build -d`.
+On Windows, run `powershell -ExecutionPolicy Bypass -File .\start.ps1`. To omit the agent, use explicit `docker-db` mode. The equivalent complete direct Compose command includes `compose.yaml`, `compose.postgres.yaml`, and `compose.ai.yaml` and requires `SCHEMII_OPENCODE_PASSWORD`.
 
 The included connection is created automatically from the same environment values used by the PostgreSQL container. To create another connection manually, use:
 

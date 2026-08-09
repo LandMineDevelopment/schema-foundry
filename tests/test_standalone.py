@@ -91,8 +91,8 @@ class StandaloneRuntimeTests(unittest.TestCase):
         powershell = (ROOT / "start.ps1").read_text(encoding="utf-8")
         postgres_compose = (ROOT / "compose.postgres.yaml").read_text(encoding="utf-8")
 
-        self.assertIn('mode="${1:-docker-db}"', shell)
-        self.assertIn('[string]$Mode = "docker-db"', powershell)
+        self.assertIn('mode="${1:-ai-docker-db}"', shell)
+        self.assertIn('[string]$Mode = "ai-docker-db"', powershell)
         for source in (shell, powershell):
             self.assertIn("SCHEMII_INSTANCE", source)
             self.assertIn("--project-name", source)

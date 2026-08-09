@@ -58,6 +58,9 @@ class AiPermissionContractTests(unittest.TestCase):
         self.assertNotIn('"0.0.0.0:', local_override)
         self.assertIn("OPENCODE_DISABLE_EXTERNAL_SKILLS: 1", ai_compose)
         self.assertIn("OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: 1", ai_compose)
+        self.assertIn("condition: service_healthy", ai_compose)
+        self.assertIn("http://127.0.0.1:4096/global/health", ai_compose)
+        self.assertIn("Authorization: Basic $$credentials", ai_compose)
 
 
 if __name__ == "__main__":
