@@ -96,7 +96,7 @@ Set `SCHEMII_NO_OPEN=1` on Linux/macOS or use `-NoOpen` on PowerShell to suppres
 
 The first default start creates two saved examples:
 
-- **Mercury Books: PostgreSQL tutorial** is linked to the live `bookstore` namespace. Its nine tables demonstrate sample rows, generated and identity columns, composite keys, checks, JSONB, B-tree and GIN indexes, functions, a trigger, and a view.
+- **Mercury Books: PostgreSQL tutorial** is linked to the live `bookstore` namespace. Its nine tables include 80 books, 150 customers, 500 orders, and more than 1,200 linked order items for realistic exploration, alongside generated and identity columns, composite keys, checks, JSONB, B-tree and GIN indexes, functions, a trigger, and a view.
 - **Event Studio: Local design example** is a seven-table design that demonstrates local modeling, relationships, checks, indexes, composite keys, and SQL/JSON export without a database connection.
 
 Use the folder button to switch designs, the disk button to save, and the PostgreSQL tool to inspect data or preview migration SQL. The four-page introduction can be reopened from the **?** menu.

@@ -166,6 +166,11 @@ class ExampleInstallerTests(unittest.TestCase):
             "CREATE INDEX", "USING gin", "CREATE FUNCTION", "CREATE TRIGGER", "CREATE VIEW", "INSERT INTO bookstore.",
         ):
             self.assertIn(feature, sql)
+        self.assertIn("Schemii tutorial dataset v2", sql)
+        self.assertIn("generate_series(5, 500)", sql)
+        self.assertIn("generate_series(7, 80)", sql)
+        self.assertIn("generate_series(5, 150)", sql)
+        self.assertIn("ON CONFLICT (order_id, book_id) DO NOTHING", sql)
 
 
 if __name__ == "__main__":
