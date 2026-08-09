@@ -121,6 +121,8 @@ assert.doesNotMatch(libraryLoader, /namespaces|password/, "opening the schema li
 assert.match(source, /if \(!confirm\(`Confirm action:/, "write actions must require explicit confirmation");
 assert.match(source, /elements\.aiSqlPolicy\.value === "ask" && !confirm\(/, "ask-mode SQL must require confirmation");
 assert.match(source, /elements\.aiSqlPolicy\.value === "allow-session" && aiState\.sqlPolicyDeliberatelySelected/, "session SQL must require a deliberate user setting");
+assert.match(source, /context\.accessLevel === "data" && elements\.aiAccessSelect\.value === "data"/, "SQL actions must require both captured and current data access");
+assert.match(source, /context\.accessLevel !== "data" \|\| elements\.aiAccessSelect\.value !== "data"/, "query execution must reject stale data access");
 assert.match(source, /elements\.postgresProfilePassword\.value = ""/, "connection proposals must clear the password field");
 const navigationHandler = source.slice(source.indexOf("async function confirmAiNavigationAction"), source.indexOf("function detailAiActionError"));
 assert.match(navigationHandler, /if \(!confirm\(`Create and open local project/, "project creation must require confirmation");
@@ -191,5 +193,20 @@ preferenceContext.rememberAiModel(selectedModel);
 assert.equal(preferenceContext.storedAiModel(), selectedModel, "last selected model must survive a page reload");
 assert.equal(preferenceContext.normalizeStoredAiModel(JSON.stringify({ providerId: "openai", modelId: "gpt", key: "secret" })), "", "model preference must reject credential-like extra fields");
 assert.equal(preferenceContext.normalizeStoredAiModel(JSON.stringify({ providerId: "openai", modelId: "gpt\nsecret" })), "", "model preference must reject control characters");
+
+const disclosureStart = source.indexOf("function updateAiAccessDisclosure");
+const disclosureEnd = source.indexOf("elements.tablesLayer.addEventListener", disclosureStart);
+const disclosureElements = {
+  aiAccessSelect: { value: "data" }, aiSqlPolicy: { value: "allow-session" },
+  aiSqlPolicyWrap: { hidden: false }, aiFunctionCaveat: { hidden: false }, aiAccessDisclosure: { textContent: "" }
+};
+const disclosureContext = vm.createContext({ elements: disclosureElements, aiState: { sqlPolicyDeliberatelySelected: true } });
+vm.runInContext(`${source.slice(disclosureStart, disclosureEnd)}\nthis.updateAiAccessDisclosure = updateAiAccessDisclosure;`, disclosureContext);
+disclosureContext.updateAiAccessDisclosure();
+assert.equal(disclosureElements.aiSqlPolicy.value, "allow-session", "remaining in data access must preserve deliberate SQL policy");
+disclosureElements.aiAccessSelect.value = "schema";
+disclosureContext.updateAiAccessDisclosure();
+assert.equal(disclosureElements.aiSqlPolicy.value, "disabled", "leaving data access must disable SQL execution");
+assert.equal(disclosureContext.aiState.sqlPolicyDeliberatelySelected, false, "leaving data access must revoke session SQL approval");
 
 console.log("AI chat safety and action validation tests passed");

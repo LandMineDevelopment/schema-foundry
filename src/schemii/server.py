@@ -64,7 +64,7 @@ def _connection_context_type(profile: dict | None) -> str:
     return "remote-db"
 
 
-def _proposal_manifest_fallback(response: dict) -> dict:
+def _proposal_manifest_fallback(response: dict, *, allow_data: bool = False) -> dict:
     if not isinstance(response, dict) or response.get("actions") or not isinstance(response.get("text"), str):
         return response
     marker = "SCHEMII_PROPOSALS:"
@@ -82,7 +82,10 @@ def _proposal_manifest_fallback(response: dict) -> dict:
         return response
     if not isinstance(actions, list) or not 1 <= len(actions) <= 5:
         return response
-    if any(not isinstance(action, dict) or action.get("type") not in AI_MANIFEST_ACTION_TYPES for action in actions):
+    allowed_types = set(AI_MANIFEST_ACTION_TYPES)
+    if not allow_data:
+        allowed_types.discard("schema_read_query")
+    if any(not isinstance(action, dict) or action.get("type") not in allowed_types for action in actions):
         return response
     cleaned_text = response["text"][:marker_index].rstrip()
     repaired = dict(response)
@@ -581,7 +584,7 @@ def make_handler(
                     session_id, prompt, body.get("model"), AI_SYSTEM_INSTRUCTIONS,
                     allow_data=access_level == "data",
                 )
-                return _proposal_manifest_fallback(response)
+                return _proposal_manifest_fallback(response, allow_data=access_level == "data")
 
             return self._ai_call(send_prompt)
 

@@ -39,6 +39,22 @@ CUSTOM_TOOLS = {
     "schema_migration_preview",
     "schema_migration_apply",
 }
+TOOL_ACTION_TYPES = {
+    "schema_read_query": "schema_read_query",
+    "schema_add_table": "add_table",
+    "schema_rename_table": "rename_table",
+    "schema_add_column": "add_column",
+    "schema_update_column": "update_column",
+    "schema_delete_element": "delete_element",
+    "schema_add_relationship": "add_relationship",
+    "schema_populate": "populate_schema",
+    "schema_connection_setup": "connection_setup",
+    "schema_project_create": "create_project",
+    "schema_project_open": "open_project",
+    "schema_connection_open": "open_connection",
+    "schema_migration_preview": "migration_preview",
+    "schema_migration_apply": "migration_apply",
+}
 SAFE_SKILLS = {
     "schemii-help",
     "connection-setup",
@@ -663,12 +679,15 @@ class OpenCodeService:
                     "The AI provider did not respond. Connect another provider or try a different model.",
                 ) from error
             raise
-        normalized = self._normalize_message(result)
+        allowed_tools = set(CUSTOM_TOOLS)
+        if not allow_data:
+            allowed_tools.remove("schema_read_query")
+        normalized = self._normalize_message(result, allowed_tools)
         if not normalized["actions"]:
-            normalized["actions"] = self._recover_prompt_actions(session_id, text)
+            normalized["actions"] = self._recover_prompt_actions(session_id, text, allowed_tools)
         return normalized
 
-    def _recover_prompt_actions(self, session_id: str, prompt_text: str) -> list[dict[str, Any]]:
+    def _recover_prompt_actions(self, session_id: str, prompt_text: str, allowed_tools: set[str]) -> list[dict[str, Any]]:
         try:
             messages = self._request("GET", f"/session/{quote(session_id, safe='')}/message?limit=20")
         except OpenCodeServiceError:
@@ -691,7 +710,7 @@ class OpenCodeService:
             if not isinstance(item, dict) or not isinstance(item.get("info"), dict) or item["info"].get("role") != "assistant":
                 continue
             try:
-                item_actions = self._normalize_message(item)["actions"]
+                item_actions = self._normalize_message(item, allowed_tools)["actions"]
             except OpenCodeServiceError:
                 continue
             actions.extend(item_actions[:MAX_ACTIONS - len(actions)])
@@ -700,9 +719,10 @@ class OpenCodeService:
         return actions
 
     @staticmethod
-    def _normalize_message(result: Any) -> dict[str, Any]:
+    def _normalize_message(result: Any, allowed_tools: set[str] | None = None) -> dict[str, Any]:
         if not isinstance(result, dict) or not isinstance(result.get("parts"), list):
             raise OpenCodeServiceError(502, "opencode_error", "OpenCode returned an invalid message")
+        allowed_tools = set(CUSTOM_TOOLS) if allowed_tools is None else allowed_tools & CUSTOM_TOOLS
         parts = []
         actions = []
         text_items = []
@@ -729,7 +749,7 @@ class OpenCodeService:
                 if tool_input.get("name") in SAFE_SKILLS:
                     parts.append({"type": "skill", "skill": tool_input["name"], "status": str(state.get("status", "unknown"))[:32]})
                 continue
-            if part.get("type") != "tool" or part.get("tool") not in CUSTOM_TOOLS:
+            if part.get("type") != "tool" or part.get("tool") not in allowed_tools:
                 continue
             state = part.get("state") if isinstance(part.get("state"), dict) else {}
             output = state.get("output")
@@ -747,7 +767,8 @@ class OpenCodeService:
                         )
                     except (json.JSONDecodeError, RecursionError, ValueError):
                         action = None
-                    if isinstance(action, dict):
+                    action_type = action.get("type", action.get("action")) if isinstance(action, dict) else None
+                    if isinstance(action, dict) and action_type == TOOL_ACTION_TYPES[part["tool"]]:
                         actions.append(action)
             parts.append(safe_part)
         text = "\n".join(text_items).encode("utf-8")[:MAX_TEXT_SIZE].decode("utf-8", "ignore")

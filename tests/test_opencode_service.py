@@ -196,7 +196,7 @@ class OpenCodeServiceTests(unittest.TestCase):
         self.assertEqual(error.exception.code, "not_found")
 
     def test_prompt_enables_only_schemii_tools_and_normalizes_actions(self):
-        valid = {"kind": "add_table", "table": {"name": "events"}}
+        valid = {"type": "add_table", "table": {"name": "events"}}
         project = {"type": "open_project", "schemaId": "schema_orders", "projectName": "Orders", "requiresConfirmation": True}
         opener = Opener({"id": "ses_1", "directory": "/workspace"}, {"info": {"path": {"cwd": "/secret"}}, "parts": [
             {"type": "text", "text": "I propose a table."},
@@ -225,6 +225,27 @@ class OpenCodeServiceTests(unittest.TestCase):
         self.assertEqual(result["parts"][2], {"type": "skill", "skill": "schema-design-layout", "status": "completed"})
         self.assertNotIn("cwd", json.dumps(result))
         self.assertNotIn("/secret", json.dumps(result))
+
+    def test_prompt_rejects_disabled_and_mismatched_tool_actions(self):
+        read_action = {"action": "schema_read_query", "profileId": "local", "namespace": "public", "sql": "SELECT 1"}
+        wrong_action = {"type": "delete_element", "tableId": "events", "elementType": "table"}
+        valid_action = {"type": "add_table", "name": "events", "requiresConfirmation": True}
+        opener = Opener({"id": "ses_1", "directory": "/workspace"}, {"parts": [
+            {"type": "tool", "tool": "schema_read_query", "state": {"status": "completed", "output": "SCHEMII_ACTION:" + json.dumps(read_action)}},
+            {"type": "tool", "tool": "schema_add_table", "state": {"status": "completed", "output": "SCHEMII_ACTION:" + json.dumps(wrong_action)}},
+            {"type": "tool", "tool": "schema_add_table", "state": {"status": "completed", "output": "SCHEMII_ACTION:" + json.dumps(valid_action)}},
+        ]})
+
+        result = self.service(opener).prompt(
+            "ses_1", "Create events without data access", {"providerID": "opencode", "modelID": "free"}, "Fixed system",
+            allow_data=False,
+        )
+
+        payload = request_json(opener.calls[1][0])
+        self.assertFalse(payload["tools"]["schema_read_query"])
+        self.assertEqual(result["actions"], [valid_action])
+        self.assertNotIn("schema_read_query", [part.get("tool") for part in result["parts"]])
+        self.assertEqual([part.get("tool") for part in result["parts"]], ["schema_add_table", "schema_add_table"])
 
     def test_disabled_invalid_ids_and_upstream_failures_are_sanitized(self):
         self.assertEqual(OpenCodeService("", "opencode", "").status()["enabled"], False)

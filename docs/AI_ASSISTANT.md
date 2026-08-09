@@ -114,6 +114,18 @@ The explicit tools can propose:
 
 Tool output is inert structured data. It does not prove that an action ran.
 
+## Live Free-Model Contract Tests
+
+The normal test suite never contacts a model provider. With an AI mode already running, maintainers can explicitly test up to three active anonymous free OpenCode models:
+
+```bash
+SCHEMII_RUN_LIVE_AI_TESTS=1 python3 tests/live_ai_smoke.py --schema-id <saved-schema-id>
+```
+
+The runner discovers the current anonymous zero-cost catalog instead of assuming fixed model IDs. It sends metadata-only context through disposable chat sessions and checks project creation, password-free connection setup, migration refusal without an exact target, packaged-skill use before proposal tools on models that advertise tool calling, validated fallback manifests on models that do not, inert confirmation-gated actions, and unchanged saved-schema records. It never confirms an action or calls a PostgreSQL endpoint. It retries only transient transport or provider failures. Provider availability and output remain nondeterministic, so this opt-in check is not part of the default unit suite.
+
+Free-model providers may retain these prompts and the bounded Schemii metadata context. Run this only with non-confidential saved design and project metadata. Use `--model <model-id>` to select a particular discovered free model, `--max-models 1` to reduce provider calls, or `--attempts 1` to disable the single retry.
+
 ## Confirmation And Migration Safety
 
 Every schema mutation requires a separate browser confirmation. The proposal is bound to the active design and an in-memory schema snapshot; changing the design invalidates it. Schema saves must succeed before the UI marks a proposal applied, and existing table layout is preserved.

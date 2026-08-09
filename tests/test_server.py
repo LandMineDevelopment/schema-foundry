@@ -336,6 +336,9 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(_proposal_manifest_fallback(project)["actions"][0]["type"], "create_project")
         mixed = {**response, "text": 'SCHEMII_PROPOSALS:[{"type":"unknown_action"}]'}
         self.assertIs(_proposal_manifest_fallback(mixed), mixed)
+        query = {**response, "text": 'SCHEMII_PROPOSALS:[{"type":"schema_read_query","sql":"SELECT 1"}]'}
+        self.assertIs(_proposal_manifest_fallback(query), query)
+        self.assertEqual(_proposal_manifest_fallback(query, allow_data=True)["actions"][0]["type"], "schema_read_query")
         existing = {**response, "actions": [{"type": "add_table"}]}
         self.assertIs(_proposal_manifest_fallback(existing), existing)
 
