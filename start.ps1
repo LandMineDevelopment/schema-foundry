@@ -1,23 +1,39 @@
 param(
     [ValidateSet("ui", "docker-db", "ai", "ai-local-db", "ai-docker-db")]
     [string]$Mode = "ai-docker-db",
-    [switch]$NoOpen
+    [switch]$NoOpen,
+    [switch]$Help
 )
 
 $ErrorActionPreference = "Stop"
 
+if ($Help) {
+    Write-Host "Usage: powershell -ExecutionPolicy Bypass -File .\start.ps1 [-Mode <mode>] [-NoOpen]"
+    Write-Host ""
+    Write-Host "Modes:"
+    Write-Host "  ai-docker-db  Complete UI, tutorial PostgreSQL, and AI stack (default)"
+    Write-Host "  ui            Local schema design only"
+    Write-Host "  docker-db     UI and tutorial PostgreSQL without AI"
+    Write-Host "  ai            UI and AI without included PostgreSQL"
+    Write-Host "  ai-local-db   Linux host PostgreSQL with AI"
+    Write-Host ""
+    Write-Host "Uninstall: powershell -ExecutionPolicy Bypass -File .\uninstall.ps1"
+    Write-Host "Setup help: https://github.com/LandMineDevelopment/schemii#install-docker"
+    exit 0
+}
+
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
-    throw "Docker Desktop is required. Install and start Docker Desktop, then try again."
+    throw "Docker was not found. Install and start Docker Desktop, reopen PowerShell, and see https://github.com/LandMineDevelopment/schemii#install-docker"
 }
 
 docker info *> $null
 if ($LASTEXITCODE -ne 0) {
-    throw "Docker Desktop is installed but not running. Start it and try again."
+    throw "Docker is installed, but the daemon is unavailable or access was denied. Start Docker Desktop, run 'docker info', and see https://github.com/LandMineDevelopment/schemii#docker-is-installed-but-unavailable"
 }
 
 docker compose version *> $null
 if ($LASTEXITCODE -ne 0) {
-    throw "Docker Compose is unavailable. Update Docker Desktop and try again."
+    throw "Docker Compose was not found. Update Docker Desktop or install Compose from https://docs.docker.com/compose/install/"
 }
 
 $scriptDirectory = (Resolve-Path $PSScriptRoot).Path
@@ -27,6 +43,25 @@ if (-not $project) {
     $legacyWorkingDirectory = if ($legacyContainer) { (& docker inspect --format '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' $legacyContainer 2>$null) } else { "" }
     if ($legacyWorkingDirectory -eq $scriptDirectory) {
         $project = "schemii"
+    }
+    elseif (-not $legacyContainer) {
+        docker volume inspect schemii_schemii-config *> $null
+        $legacyConfig = $LASTEXITCODE -eq 0
+        docker volume inspect schemii_schemii-schemas *> $null
+        $legacySchemas = $LASTEXITCODE -eq 0
+        if ($legacyConfig -and $legacySchemas) {
+            throw "Legacy Schemii data volumes were found without a container that identifies their installation directory. Reuse them with `$env:SCHEMII_INSTANCE='schemii'; .\start.ps1 -Mode $Mode, or choose another unique instance name for a separate installation."
+        }
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($scriptDirectory)
+            $hash = $sha.ComputeHash($bytes)
+            $instanceNumber = [BitConverter]::ToUInt32($hash, 0)
+        }
+        finally {
+            $sha.Dispose()
+        }
+        $project = "schemii-$instanceNumber"
     }
     else {
         $sha = [System.Security.Cryptography.SHA256]::Create()
@@ -154,6 +189,8 @@ if (-not $NoOpen) {
     }
 }
 
+Write-Host "Starting Schemii instance $project in $Mode mode."
+Write-Host "The first start downloads images and dependencies and may take several minutes."
 & docker @upArgs
 if ($LASTEXITCODE -ne 0) {
     throw "Schemii could not be started. Review the Docker output above."
@@ -162,6 +199,7 @@ $containerId = (& docker @composeFiles ps -q schemii | Select-Object -First 1)
 if (-not $containerId) {
     throw "Schemii did not start. Review the Docker Compose output above."
 }
+$containerName = (& docker inspect --format "{{.Name}}" $containerId 2>$null).TrimStart("/")
 $health = ""
 for ($attempt = 0; $attempt -lt 60; $attempt++) {
     $health = (& docker inspect --format "{{.State.Health.Status}}" $containerId 2>$null)
@@ -169,12 +207,12 @@ for ($attempt = 0; $attempt -lt 60; $attempt++) {
         break
     }
     if ($health -eq "unhealthy") {
-        throw "Schemii failed its container health check. Run docker compose logs schemii for details."
+        throw "Schemii failed its container health check. Run 'docker logs $containerName' for details."
     }
     Start-Sleep -Seconds 1
 }
 if ($health -ne "healthy") {
-    throw "Schemii did not become ready within 60 seconds. Run docker compose logs schemii for details."
+    throw "Schemii did not become ready within 60 seconds after the build. Run 'docker logs $containerName' for details."
 }
 
 Write-Host ""

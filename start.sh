@@ -2,20 +2,49 @@
 set -euo pipefail
 
 mode="${1:-ai-docker-db}"
-script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+
+if [[ "$mode" == "help" || "$mode" == "--help" || "$mode" == "-h" ]]; then
+  printf '%s\n' \
+    'Usage: bash ./start.sh [mode]' \
+    '' \
+    'Modes:' \
+    '  ai-docker-db  Complete UI, tutorial PostgreSQL, and AI stack (default)' \
+    '  ui            Local schema design only' \
+    '  docker-db     UI and tutorial PostgreSQL without AI' \
+    '  ai            UI and AI without included PostgreSQL' \
+    '  local-db      Linux host PostgreSQL without AI' \
+    '  ai-local-db   Linux host PostgreSQL with AI' \
+    '' \
+    'Uninstall: bash ./uninstall.sh' \
+    'Setup help: https://github.com/LandMineDevelopment/schemii#install-docker'
+  exit 0
+fi
+case "$mode" in
+  ui|local-db|docker-db|ai|ai-local-db|ai-docker-db) ;;
+  *)
+    printf 'Unknown mode: %s\nRun bash ./start.sh --help for available modes.\n' "$mode" >&2
+    exit 2
+    ;;
+esac
 
 if ! command -v docker >/dev/null 2>&1; then
-  printf 'Docker is required. Install Docker Desktop or Docker Engine with Compose.\n' >&2
+  printf 'Docker was not found. Install and start Docker, then reopen this terminal.\n' >&2
+  printf 'Instructions: https://github.com/LandMineDevelopment/schemii#install-docker\n' >&2
   exit 1
 fi
 if ! docker info >/dev/null 2>&1; then
-  printf 'Docker is installed but not running. Start Docker and try again.\n' >&2
+  printf 'Docker is installed, but the daemon is unavailable or your user lacks permission.\n' >&2
+  printf 'Start Docker Desktop or the Linux Docker service, then run: docker info\n' >&2
+  printf 'Instructions: https://github.com/LandMineDevelopment/schemii#docker-is-installed-but-unavailable\n' >&2
   exit 1
 fi
 if ! docker compose version >/dev/null 2>&1; then
-  printf 'Docker Compose is required. Install the Docker Compose plugin and try again.\n' >&2
+  printf 'Docker Compose was not found. Update Docker Desktop or install the Compose plugin.\n' >&2
+  printf 'Instructions: https://docs.docker.com/compose/install/\n' >&2
   exit 1
 fi
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 
 project="${SCHEMII_INSTANCE:-}"
 if [[ -z "$project" ]]; then
@@ -26,6 +55,13 @@ if [[ -z "$project" ]]; then
   fi
   if [[ "$legacy_working_dir" == "$script_dir" ]]; then
     project="schemii"
+  elif [[ ${#legacy_containers[@]} -eq 0 ]] \
+    && docker volume inspect schemii_schemii-config >/dev/null 2>&1 \
+    && docker volume inspect schemii_schemii-schemas >/dev/null 2>&1; then
+    printf 'Legacy Schemii data volumes were found without a container that identifies their installation directory.\n' >&2
+    printf 'To reuse that data, run: SCHEMII_INSTANCE=schemii bash ./start.sh %s\n' "$mode" >&2
+    printf 'To start a separate installation, choose a unique name, for example: SCHEMII_INSTANCE=schemii-dev bash ./start.sh %s\n' "$mode" >&2
+    exit 2
   else
     read -r instance_key _ <<< "$(printf '%s' "$script_dir" | cksum)"
     project="schemii-${instance_key}"
@@ -126,23 +162,27 @@ if [[ "$mode" == ai* && -z "${SCHEMII_OPENCODE_PASSWORD:-}" ]]; then
   export SCHEMII_OPENCODE_PASSWORD
 fi
 
+printf 'Starting Schemii instance %s in %s mode.\n' "$project" "$mode"
+printf 'The first start downloads images and dependencies and may take several minutes.\n'
 "${compose[@]}" up --build -d --remove-orphans
 container_id="$("${compose[@]}" ps -q schemii)"
 if [[ -z "$container_id" ]]; then
   printf 'Schemii did not start. Review the Docker Compose output above.\n' >&2
   exit 1
 fi
+container_name="$(docker inspect --format '{{.Name}}' "$container_id" 2>/dev/null || true)"
+container_name="${container_name#/}"
 for _ in {1..60}; do
   health="$(docker inspect --format '{{.State.Health.Status}}' "$container_id" 2>/dev/null || true)"
   [[ "$health" == "healthy" ]] && break
   if [[ "$health" == "unhealthy" ]]; then
-    printf 'Schemii failed its container health check. Run docker compose logs schemii for details.\n' >&2
+    printf 'Schemii failed its container health check. Run docker logs %s for details.\n' "${container_name:-$container_id}" >&2
     exit 1
   fi
   sleep 1
 done
 if [[ "${health:-}" != "healthy" ]]; then
-  printf 'Schemii did not become ready within 60 seconds. Run docker compose logs schemii for details.\n' >&2
+  printf 'Schemii did not become ready within 60 seconds after the build. Run docker logs %s for details.\n' "${container_name:-$container_id}" >&2
   exit 1
 fi
 printf '\nSchemii is ready at %s\n' "$url"

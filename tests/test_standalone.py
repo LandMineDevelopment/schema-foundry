@@ -1,6 +1,10 @@
 import ast
+import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -15,6 +19,141 @@ from schemii.server import _paths
 
 
 class StandaloneRuntimeTests(unittest.TestCase):
+    def run_shell_launcher(self, mode="ui", docker_script=None, system_tools=False):
+        with tempfile.TemporaryDirectory() as directory:
+            if docker_script is not None:
+                docker = Path(directory) / "docker"
+                docker.write_text("#!/bin/sh\n" + docker_script, encoding="utf-8")
+                docker.chmod(0o755)
+            return subprocess.run(
+                ["/bin/bash", str(ROOT / "start.sh"), mode],
+                cwd=ROOT,
+                env={**os.environ, "PATH": directory + (":/usr/bin:/bin" if system_tools else "")},
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+
+    def test_launcher_help_does_not_require_docker(self):
+        result = self.run_shell_launcher("--help")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("Complete UI, tutorial PostgreSQL, and AI stack", result.stdout)
+        self.assertIn("#install-docker", result.stdout)
+
+    def test_powershell_launcher_help_when_powershell_is_available(self):
+        executable = shutil.which("pwsh") or shutil.which("powershell")
+        if executable is None:
+            self.skipTest("PowerShell is not installed")
+        result = subprocess.run(
+            [executable, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ROOT / "start.ps1"), "-Help"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Complete UI, tutorial PostgreSQL, and AI stack", result.stdout)
+        self.assertIn("#install-docker", result.stdout)
+
+    def test_launcher_prerequisite_errors_link_to_install_help(self):
+        missing = self.run_shell_launcher()
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("Docker was not found", missing.stderr)
+        self.assertIn("#install-docker", missing.stderr)
+
+        unavailable = self.run_shell_launcher(docker_script='[ "$1" = "info" ] && exit 1\nexit 0\n')
+        self.assertNotEqual(unavailable.returncode, 0)
+        self.assertIn("daemon is unavailable or your user lacks permission", unavailable.stderr)
+        self.assertIn("docker info", unavailable.stderr)
+
+        no_compose = self.run_shell_launcher(docker_script='[ "$1" = "info" ] && exit 0\n[ "$1 $2 $3" = "compose version " ] && exit 1\nexit 1\n')
+        self.assertNotEqual(no_compose.returncode, 0)
+        self.assertIn("Docker Compose was not found", no_compose.stderr)
+        self.assertIn("docs.docker.com/compose/install", no_compose.stderr)
+
+    def test_launcher_stops_for_ambiguous_legacy_volumes(self):
+        docker_script = '''
+case "$*" in
+  info|"compose version"|"volume inspect schemii_schemii-config"|"volume inspect schemii_schemii-schemas") exit 0 ;;
+  ps*) exit 0 ;;
+  *) exit 1 ;;
+esac
+'''
+        result = self.run_shell_launcher(docker_script=docker_script, system_tools=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Legacy Schemii data volumes were found", result.stderr)
+        self.assertIn("SCHEMII_INSTANCE=schemii", result.stderr)
+        self.assertIn("SCHEMII_INSTANCE=schemii-dev", result.stderr)
+
+    def test_readme_has_beginner_docker_and_no_git_paths(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        for link in (
+            "desktop/setup/install/windows-install",
+            "desktop/setup/install/mac-install",
+            "engine/install/",
+            "compose/install/linux/",
+        ):
+            self.assertIn(link, readme)
+        self.assertIn("### Without Git", readme)
+        self.assertIn("bash ./start.sh", readme)
+        self.assertIn("first start downloads", readme)
+
+    def test_uninstallers_are_scoped_confirmed_and_avoid_prune(self):
+        shell = (ROOT / "uninstall.sh").read_text(encoding="utf-8")
+        powershell = (ROOT / "uninstall.ps1").read_text(encoding="utf-8")
+        for source in (shell, powershell):
+            self.assertIn("UNINSTALL", source)
+            self.assertIn("com.docker.compose.project", source)
+            self.assertIn("schemii-opencode-data", source)
+            self.assertIn("schemii-postgres", source)
+            self.assertNotIn("system prune", source)
+            self.assertNotIn("volume prune", source)
+        self.assertIn('! -f "$repo_dir/compose.yaml"', shell)
+        self.assertIn("not a recognized Schemii repository", powershell)
+
+    def test_shell_uninstaller_removes_only_discovered_resources_and_its_repo(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "schemii-copy"
+            (repository / "src/schemii").mkdir(parents=True)
+            shutil.copy2(ROOT / "uninstall.sh", repository / "uninstall.sh")
+            (repository / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+            (repository / "start.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+            binary = root / "bin"
+            binary.mkdir()
+            log = root / "docker.log"
+            docker = binary / "docker"
+            docker.write_text('''#!/bin/sh
+printf '%s\n' "$*" >> "$DOCKER_LOG"
+case "$1 $2" in
+  "info ") exit 0 ;;
+  "ps -a") printf 'demo-one\n' ;;
+  "volume ls") printf 'demo-one_schemii-config\ndemo-one_schemii-schemas\nother_data\n' ;;
+  "ps -aq") printf 'container-one\ncontainer-two\n' ;;
+  "network ls") printf 'network-one\n' ;;
+  *) exit 0 ;;
+esac
+''', encoding="utf-8")
+            docker.chmod(0o755)
+
+            result = subprocess.run(
+                ["/bin/bash", str(repository / "uninstall.sh"), "--yes"],
+                cwd=repository,
+                env={**os.environ, "PATH": f"{binary}:/usr/bin:/bin", "DOCKER_LOG": str(log)},
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(repository.exists())
+            calls = log.read_text(encoding="utf-8")
+            self.assertIn("rm -f container-one container-two", calls)
+            self.assertIn("network rm network-one", calls)
+            self.assertIn("volume rm demo-one_schemii-config", calls)
+            self.assertIn("volume rm demo-one_schemii-schemas", calls)
+            self.assertNotIn("other_data:/", calls)
+
     def test_backend_has_no_outbound_clients_or_process_execution(self):
         forbidden_modules = {
             "aiohttp", "ftplib", "httpx", "paramiko", "requests", "smtplib",
@@ -97,6 +236,7 @@ class StandaloneRuntimeTests(unittest.TestCase):
             self.assertIn("SCHEMII_INSTANCE", source)
             self.assertIn("--project-name", source)
             self.assertIn("SCHEMII_HOST_PORT", source)
+            self.assertIn("Legacy Schemii data volumes were found", source)
         self.assertIn("service_completed_successfully", postgres_compose)
         self.assertIn("/seed/001_bookstore.sql:ro", postgres_compose)
         self.assertIn("SCHEMII_EXAMPLES: all", postgres_compose)

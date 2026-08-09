@@ -36,7 +36,7 @@ The launcher generates a new random OpenCode server password for the process env
 
 Schemii uses `ghcr.io/anomalyco/opencode:1.18.15` through a small derived image that contains the pinned custom-tool helper. In normal bridge mode, OpenCode has no published host port. The browser communicates only with same-origin `/api/ai/...` routes, and the Schemii backend calls OpenCode using Basic authentication.
 
-Linux host-database mode publishes OpenCode only on `127.0.0.1:4096` because the host-networked Schemii container cannot resolve the private Compose service name. A strong generated password remains required.
+Linux `ai-local-db` mode maps OpenCode's container port 4096 to an installation-specific host port bound only to `127.0.0.1`, because the host-networked Schemii container cannot resolve the private Compose service name. The launcher prints only the Schemii URL; OpenCode remains an internal, Basic-authenticated service and must not be opened directly.
 
 OpenCode receives a read-only assistant workspace. Shell, filesystem reads and writes, external directories, web access, tasks, dynamic MCP, sharing, LSP, formatters, and unrelated skills are denied. Do not weaken these controls or expose OpenCode publicly.
 

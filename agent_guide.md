@@ -65,6 +65,7 @@ Run at least:
 python3 -m unittest discover -s tests
 python3 -m compileall -q src
 node --check src/schemii/web/app.js
+for test_file in tests/test_*.js; do node "$test_file" || exit 1; done
 git diff --check
 ```
 

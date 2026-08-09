@@ -14,6 +14,6 @@ Schemii designs saved PostgreSQL schemas, introspects live catalogs, previews re
 - Project create/open and saved-connection open operations use logical IDs and confirmed Schemii UI actions; they never grant filesystem or credential access.
 - A request to create a new local project, schema, or design should immediately use `schema_project_create`; creation does not require the project to appear in the saved-project list first.
 - Chat responses and tool output do not prove that an action completed.
-- Default UI mode has no OpenCode sidecar and makes no OpenCode calls. AI launch modes explicitly add the sidecar.
+- The no-argument launcher uses `ai-docker-db` and includes OpenCode. Explicit `ui`, `local-db`, and `docker-db` modes omit the sidecar.
 
 When help turns into an action request, load the relevant safety skill and use the narrow proposal tool.
