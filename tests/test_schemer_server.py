@@ -60,6 +60,10 @@ class FakePostgresService:
         self.calls.append(("preview_relation_rows", profile_id, source, offset, limit))
         return {**source, "columns": [], "rows": [{"id": 1}], "offset": offset, "nextOffset": offset + 1, "hasMore": False, "stableOrder": False}
 
+    def verify_relation_source(self, profile_id, source):
+        self.calls.append(("verify_relation_source", profile_id, source))
+        return {"status": "verified", "matches": True, **source, "missingColumns": [], "addedColumns": [], "changedColumns": []}
+
     def catalog_status(self, profile_id, namespace):
         self.calls.append(("catalog_status", profile_id, namespace))
         return {"profileId": profile_id, "namespace": namespace, "fingerprint": "live"}
@@ -167,6 +171,11 @@ class SchemerServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["rows"], [{"id": 1}])
         self.assertIn(("preview_relation_rows", "shared", preview_source, 0, 20), self.service.calls)
+        verify_path = "/api/postgres/profiles/shared/relation/verify"
+        status, body, _ = self.request(verify_path, "POST", {"source": preview_source}, True)
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body)["matches"])
+        self.assertIn(("verify_relation_source", "shared", preview_source), self.service.calls)
         self.assertIn(("test_profile", "shared"), self.service.calls)
 
     def test_profile_writes_use_shared_router_and_redact_password(self):

@@ -321,6 +321,42 @@ class PostgresServiceTests(unittest.TestCase):
             with self.subTest(source=invalid_source, limit=limit), self.assertRaises(ValidationError):
                 service.preview_relation_rows("local", invalid_source, limit=limit)
 
+    def test_relation_source_verification_reports_missing_added_and_changed_columns(self):
+        base_rows = [
+            {"column_name": "id", "data_type": "bigint", "nullable": False, "ordinal": 1, "type_category": "N", "type_name": "int8"},
+            {"column_name": "status", "data_type": "text", "nullable": False, "ordinal": 2, "type_category": "S", "type_name": "text"},
+        ]
+        base = {
+            "SELECT current_database() AS database": [{"database": "demo"}],
+            "c.relkind AS catalog_kind": [{"catalog_kind": "r", "relation_kind": "table", "view_definition": None}],
+            "a.attname AS column_name": base_rows,
+        }
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: Connection(responses=base))
+        descriptor = service.inspect_relation("local", "demo", "public", "orders")
+        source = {
+            **{key: descriptor[key] for key in ("profileId", "database", "namespace", "relation", "kind", "fingerprint")},
+            "columns": [{key: column[key] for key in ("name", "type", "nullable", "ordinal")} for column in descriptor["columns"]],
+        }
+        self.assertEqual(service.verify_relation_source("local", source)["status"], "verified")
+
+        changed = {**base, "a.attname AS column_name": [
+            {"column_name": "id", "data_type": "integer", "nullable": True, "ordinal": 2, "type_category": "N", "type_name": "int4"},
+            {"column_name": "created_at", "data_type": "timestamp", "nullable": False, "ordinal": 3, "type_category": "D", "type_name": "timestamp"},
+        ]}
+        changed_service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: Connection(responses=changed))
+        result = changed_service.verify_relation_source("local", source)
+        self.assertEqual(result["status"], "changed")
+        self.assertFalse(result["matches"])
+        self.assertEqual(result["missingColumns"], ["status"])
+        self.assertEqual(result["addedColumns"], ["created_at"])
+        self.assertEqual(result["changedColumns"], [{"name": "id", "changes": ["type", "nullable", "ordinal"]}])
+
+        missing = {**base, "c.relkind AS catalog_kind": []}
+        missing_service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: Connection(responses=missing))
+        missing_result = missing_service.verify_relation_source("local", source)
+        self.assertEqual(missing_result["status"], "missing")
+        self.assertEqual(missing_result["missingColumns"], ["id", "status"])
+
     def test_relation_inspection_rejects_stale_kind_and_fingerprint(self):
         responses = {
             "SELECT current_database() AS database": [{"database": "demo"}],

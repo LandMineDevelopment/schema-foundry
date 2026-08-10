@@ -798,11 +798,9 @@ class PostgresService:
             raise PostgresServiceError(409, "relation_changed", "The PostgreSQL relation definition changed; reselect the widget source")
         return descriptor
 
-    def preview_relation_rows(
-        self, profile_id: str, source: Any, offset: int = 0, limit: int = 20
-    ) -> dict[str, Any]:
-        fields = {"profileId", "database", "namespace", "relation", "kind", "fingerprint"}
-        if not isinstance(source, dict) or set(source) != fields or source.get("profileId") != profile_id:
+    def _validate_relation_source(self, profile_id: str, source: Any) -> tuple[str, str, str, str, str, list[dict[str, Any]] | None]:
+        identity_fields = {"profileId", "database", "namespace", "relation", "kind", "fingerprint"}
+        if not isinstance(source, dict) or set(source) not in (identity_fields, identity_fields | {"columns"}) or source.get("profileId") != profile_id:
             raise ValidationError("source must be one exact relation identity for the requested profile")
         database = self._validate_database(source.get("database"))
         namespace = self._validate_namespace(source.get("namespace"))
@@ -813,6 +811,68 @@ class PostgresService:
             raise ValidationError("source kind must be table, view, or materialized_view")
         if not isinstance(fingerprint, str) or not FINGERPRINT_RE.fullmatch(fingerprint):
             raise ValidationError("source fingerprint must be a 64-character lowercase hexadecimal fingerprint")
+        columns = source.get("columns")
+        if columns is not None:
+            if not isinstance(columns, list) or len(columns) > 1600:
+                raise ValidationError("source columns must be a bounded catalog snapshot")
+            names = set()
+            normalized_columns = []
+            for column in columns:
+                if not isinstance(column, dict) or set(column) != {"name", "type", "nullable", "ordinal"}:
+                    raise ValidationError("source column snapshot is invalid")
+                name = self._validate_relation_name(column.get("name"))
+                if name in names or not isinstance(column.get("type"), str) or not column["type"] or not isinstance(column.get("nullable"), bool) or isinstance(column.get("ordinal"), bool) or not isinstance(column.get("ordinal"), int) or not 1 <= column["ordinal"] <= 1600:
+                    raise ValidationError("source column snapshot is invalid")
+                names.add(name)
+                normalized_columns.append({key: column[key] for key in ("name", "type", "nullable", "ordinal")})
+            columns = normalized_columns
+        return database, namespace, relation, kind, fingerprint, columns
+
+    def verify_relation_source(self, profile_id: str, source: Any) -> dict[str, Any]:
+        database, namespace, relation, kind, fingerprint, expected_columns = self._validate_relation_source(profile_id, source)
+        connection = self._connect(profile_id)
+        try:
+            self._execute_statement(connection, "SET TRANSACTION READ ONLY")
+            try:
+                descriptor = self._inspect_relation_connection(
+                    connection, profile_id, database, namespace, relation, None, None
+                )
+            except NotFoundError:
+                return {
+                    "status": "missing", "matches": False, "profileId": profile_id, "database": database,
+                    "namespace": namespace, "relation": relation, "missingColumns": [column["name"] for column in expected_columns or []],
+                    "addedColumns": [], "changedColumns": [],
+                }
+            current_columns = {column["name"]: column for column in descriptor["columns"]}
+            saved_columns = {column["name"]: column for column in expected_columns or []}
+            missing_columns = sorted(set(saved_columns) - set(current_columns))
+            added_columns = sorted(set(current_columns) - set(saved_columns)) if expected_columns is not None else []
+            changed_columns = []
+            for name in sorted(set(saved_columns) & set(current_columns)):
+                saved = saved_columns[name]
+                current = current_columns[name]
+                changes = [field for field in ("type", "nullable", "ordinal") if saved[field] != current[field]]
+                if changes:
+                    changed_columns.append({"name": name, "changes": changes})
+            matches = descriptor["kind"] == kind and descriptor["fingerprint"] == fingerprint
+            return {
+                "status": "verified" if matches else "changed", "matches": matches,
+                "profileId": profile_id, "database": database, "namespace": namespace, "relation": relation,
+                "expectedKind": kind, "currentKind": descriptor["kind"],
+                "expectedFingerprint": fingerprint, "currentFingerprint": descriptor["fingerprint"],
+                "missingColumns": missing_columns, "addedColumns": added_columns, "changedColumns": changed_columns,
+            }
+        except PostgresServiceError:
+            raise
+        except Exception as exc:
+            raise PostgresServiceError(502, "introspection_failed", "PostgreSQL relation source could not be verified") from exc
+        finally:
+            self._close(connection)
+
+    def preview_relation_rows(
+        self, profile_id: str, source: Any, offset: int = 0, limit: int = 20
+    ) -> dict[str, Any]:
+        database, namespace, relation, kind, fingerprint, _ = self._validate_relation_source(profile_id, source)
         if isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset <= 10_000_000:
             raise ValidationError("offset must be an integer from 0 to 10000000")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 50:

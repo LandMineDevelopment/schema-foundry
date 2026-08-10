@@ -84,8 +84,8 @@ def _widget_configuration(value: Any, widget_id: str) -> dict[str, Any]:
     if not value:
         return {}
     source = value["source"]
-    fields = {"profileId", "database", "namespace", "relation", "kind", "fingerprint"}
-    if not isinstance(source, dict) or set(source) != fields:
+    identity_fields = {"profileId", "database", "namespace", "relation", "kind", "fingerprint"}
+    if not isinstance(source, dict) or set(source) not in (identity_fields, identity_fields | {"columns"}):
         raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} source identity is invalid")
     profile_id = source.get("profileId")
     if not isinstance(profile_id, str) or not PROFILE_ID_PATTERN.fullmatch(profile_id):
@@ -96,14 +96,40 @@ def _widget_configuration(value: Any, widget_id: str) -> dict[str, Any]:
     fingerprint = source.get("fingerprint")
     if not isinstance(fingerprint, str) or not FINGERPRINT_PATTERN.fullmatch(fingerprint):
         raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} source fingerprint is invalid")
-    return {"source": {
+    normalized_source = {
         "profileId": profile_id,
         "database": _postgres_identifier(source.get("database"), "source database"),
         "namespace": _postgres_identifier(source.get("namespace"), "source namespace"),
         "relation": _postgres_identifier(source.get("relation"), "source relation"),
         "kind": kind,
         "fingerprint": fingerprint,
-    }}
+    }
+    if "columns" in source:
+        columns = source["columns"]
+        if not isinstance(columns, list) or len(columns) > 1600:
+            raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} source columns are invalid")
+        normalized_columns = []
+        names = set()
+        ordinals = set()
+        for column in columns:
+            if not isinstance(column, dict) or set(column) != {"name", "type", "nullable", "ordinal"}:
+                raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} source column is invalid")
+            name = _postgres_identifier(column.get("name"), "source column")
+            ordinal = _integer(column.get("ordinal"), "source column ordinal", 1, 1600)
+            if name in names or ordinal in ordinals or not isinstance(column.get("nullable"), bool):
+                raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} source columns are duplicated or invalid")
+            names.add(name)
+            ordinals.add(ordinal)
+            normalized_columns.append({
+                "name": name,
+                "type": _bounded_text(column.get("type"), "source column type", 512),
+                "nullable": column["nullable"],
+                "ordinal": ordinal,
+            })
+        if [column["ordinal"] for column in normalized_columns] != sorted(ordinals):
+            raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} source columns must use ordinal order")
+        normalized_source["columns"] = normalized_columns
+    return {"source": normalized_source}
 
 
 def validate_dashboard_record(record: Any, dashboard_id: str | None = None) -> dict[str, Any]:

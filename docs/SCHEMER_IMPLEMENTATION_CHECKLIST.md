@@ -63,7 +63,7 @@ Approval required before implementation.
 - [x] Reject hidden joins, cross-relation column references, and stale relation fingerprints.
 - [x] Suggest likely dimension, measure, date, and identifier columns from PostgreSQL types without silently choosing them.
 - [x] Provide bounded read-only source-row preview.
-- [ ] Add catalog-change and missing-column handling.
+- [x] Add catalog-change and missing-column handling.
 
 Acceptance criteria: a widget can select one verified relation and inspect its columns; no Schemer API or UI can define a join.
 

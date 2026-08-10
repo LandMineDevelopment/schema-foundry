@@ -117,6 +117,8 @@ Relation columns include advisory role suggestions derived from PostgreSQL type 
 
 The relation detail pane can request a 20-row source preview. The dedicated preview API requires the complete verified source identity, rechecks kind and fingerprint in the same read-only transaction used for selection, applies the configured statement timeout, quotes every identifier, selects only verified columns from one relation, parameterizes offset and limit, and caps requests at 50 rows. It never accepts joins or caller SQL; preview order is explicitly reported as unstable.
 
+New source assignments also persist a semantic column snapshot containing only name, PostgreSQL type, nullability, and ordinal; older identity-only sources remain valid. Live verification compares that snapshot with PostgreSQL and reports missing relations plus named missing, added, and changed columns in the widget editor. Changed sources stay blocked until the user explicitly reselects the live relation; Schemer never rewrites the saved fingerprint or snapshot automatically.
+
 ```bash
 docker compose -f compose.yaml -f compose.postgres.yaml -f compose.schemer.yaml up --build -d
 ```

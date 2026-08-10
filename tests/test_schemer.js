@@ -33,8 +33,10 @@ assert.doesNotMatch(source, /widgetSelect|Widget receiving this source/, "the wi
 assert.match(source, /function openWidgetEditor\(widgetId\)[\s\S]*relationDetail\.replaceChildren\(\)[\s\S]*relationDetail\.hidden = true[\s\S]*currentSource[\s\S]*inspectSelectedRelation\(catalog, relation\)/, "widget editor reopen must clear stale controls and restore only that widget's saved source");
 assert.match(source, /assign\.disabled = !editMode[\s\S]*widget\.configuration = \{\}/, "View mode must not assign sources and Edit mode must support clearing one");
 assert.match(source, /sourceLabel\.textContent = `\$\{source\.database\}\.\$\{source\.namespace\}\.\$\{source\.relation\}\$\{suffix\}`/, "sourced widgets must display their exact relation identity and verification state");
-assert.match(source, /function sourceVerificationPath\(source\)[\s\S]*expectedKind=\$\{encodeURIComponent\(source\.kind\)\}[\s\S]*expectedFingerprint=\$\{encodeURIComponent\(source\.fingerprint\)\}/, "live source checks must require the saved relation kind and fingerprint");
+assert.match(source, /\/relation\/verify`[\s\S]*method: "POST", body: JSON\.stringify\(\{ source \}\)/, "live source checks must send the complete saved source snapshot to the dedicated verifier");
 assert.match(source, /async function verifyDashboardSources\(\)[\s\S]*state: "checking"[\s\S]*code: error\.code[\s\S]*renderDashboard\(\)/, "dashboard loading must visibly verify every persisted source");
+assert.match(source, /function sourceChangeMessage\(result\)[\s\S]*missingColumns[\s\S]*changedColumns[\s\S]*addedColumns/, "catalog changes must report named missing, changed, and added columns");
+assert.match(source, /function renderSourceChangeNotice\(verification\)[\s\S]*relation-change-notice/, "widget editors must display catalog-change details without rewriting the source");
 assert.match(source, /widget\.configuration\?\.source && verification\?\.state !== "verified"[\s\S]*return;/, "unverified or stale widget sources must not open results");
 assert.match(source, /if \(profilesLoading\) return profilesLoading[\s\S]*generation !== relationCatalogGeneration/, "concurrent profile and relation loads must not clear newer catalog inspection state");
 assert.match(source, /connections-button[\s\S]*if \(!profiles\.length\) await loadProfiles\(\)/, "opening an already loaded source browser must not clear its inspected relation");
@@ -90,6 +92,7 @@ assert.match(styles, /\.relation-assignment \{[^}]*display: grid/, "relation det
 assert.match(styles, /\.column-suggestions \{[^}]*display: flex/, "advisory column roles need a distinct visual treatment");
 assert.match(styles, /\.relation-preview-data \{[^}]*overflow: auto/, "bounded source rows need a contained preview surface");
 assert.match(styles, /\.widget-editor-layout \{[^}]*grid-template-columns: 175px minmax\(0, 1fr\)/, "widget configuration needs a dedicated editor layout");
+assert.match(styles, /\.relation-change-notice \{[^}]*border: 1px solid #713a42/, "missing or changed source metadata needs a prominent editor warning");
 assert.match(styles, /\.dashboard-canvas \.widget\.source-invalid \{[^}]*cursor: not-allowed/, "stale or unavailable sources need a visible blocked state");
 assert.match(styles, /\.focused-widget-body \{[^}]*flex: 1;[^}]*justify-content: center;/, "expanded graphics must be centered in the available widget body");
 assert.match(styles, /\.widget-inspector \{[^}]*padding: 18px;[^}]*background-image:/, "the inspector must use the same floating workspace treatment as the widget");

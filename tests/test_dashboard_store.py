@@ -20,6 +20,10 @@ SOURCE = {
     "kind": "table",
     "fingerprint": "a" * 64,
 }
+SOURCE_COLUMNS = [
+    {"name": "id", "type": "bigint", "nullable": False, "ordinal": 1},
+    {"name": "ordered_at", "type": "timestamp with time zone", "nullable": False, "ordinal": 2},
+]
 
 
 class DashboardStoreTests(unittest.TestCase):
@@ -74,9 +78,10 @@ class DashboardStoreTests(unittest.TestCase):
     def test_single_widget_source_persists_and_duplicates_independently(self):
         self.store.initialize_once()
         record = self.store.get("dashboard_mercury")
-        record["dashboard"]["widgets"][0]["configuration"] = {"source": SOURCE}
+        source = {**SOURCE, "columns": SOURCE_COLUMNS}
+        record["dashboard"]["widgets"][0]["configuration"] = {"source": source}
         saved = self.store.save(record["id"], record)
-        self.assertEqual(saved["dashboard"]["widgets"][0]["configuration"]["source"], SOURCE)
+        self.assertEqual(saved["dashboard"]["widgets"][0]["configuration"]["source"], source)
         duplicate = self.store.create("Sourced copy", record["id"])
         duplicate_source = duplicate["dashboard"]["widgets"][0]["configuration"]["source"]
         duplicate_source["relation"] = "customers"
@@ -93,6 +98,8 @@ class DashboardStoreTests(unittest.TestCase):
             {"source": {**SOURCE, "kind": "sequence"}},
             {"source": {**SOURCE, "fingerprint": "short"}},
             {"source": {key: value for key, value in SOURCE.items() if key != "namespace"}},
+            {"source": {**SOURCE, "columns": [{**SOURCE_COLUMNS[0], "suggestions": ["identifier"]}]}},
+            {"source": {**SOURCE, "columns": [SOURCE_COLUMNS[0], SOURCE_COLUMNS[0]]}},
         ]
         for configuration in invalid_configurations:
             with self.subTest(configuration=configuration):

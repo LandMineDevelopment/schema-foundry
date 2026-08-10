@@ -230,8 +230,33 @@ function exactSourceIdentity(descriptor) {
     namespace: descriptor.namespace,
     relation: descriptor.relation,
     kind: descriptor.kind,
-    fingerprint: descriptor.fingerprint
+    fingerprint: descriptor.fingerprint,
+    columns: descriptor.columns.map(column => ({
+      name: column.name, type: column.type, nullable: column.nullable, ordinal: column.ordinal
+    }))
   };
+}
+
+function sourceChangeMessage(result) {
+  if (result.status === "missing") return `Saved relation ${result.database}.${result.namespace}.${result.relation} no longer exists.`;
+  const details = [];
+  if (result.expectedKind !== result.currentKind) details.push(`kind changed to ${result.currentKind}`);
+  if (result.missingColumns?.length) details.push(`missing columns: ${result.missingColumns.join(", ")}`);
+  if (result.changedColumns?.length) details.push(`changed columns: ${result.changedColumns.map(column => column.name).join(", ")}`);
+  if (result.addedColumns?.length) details.push(`added columns: ${result.addedColumns.join(", ")}`);
+  return details.length ? `Source changed (${details.join("; ")}). Reselect it to accept the live catalog.` : "Source definition changed. Reselect it to accept the live catalog.";
+}
+
+function renderSourceChangeNotice(verification) {
+  if (verification?.state !== "error") return;
+  const notice = document.createElement("section");
+  notice.className = "relation-change-notice";
+  const title = document.createElement("strong");
+  title.textContent = verification.code === "relation_missing" ? "Saved source is missing" : "Saved source changed";
+  const copy = document.createElement("p");
+  copy.textContent = verification.message;
+  notice.append(title, copy);
+  elements.relationDetail.prepend(notice);
 }
 
 function renderRelationPreview(result, container) {
@@ -404,10 +429,6 @@ async function inspectSelectedRelation(catalog, relation) {
   }
 }
 
-function sourceVerificationPath(source) {
-  return `/api/postgres/profiles/${encodeURIComponent(source.profileId)}/relation?database=${encodeURIComponent(source.database)}&namespace=${encodeURIComponent(source.namespace)}&relation=${encodeURIComponent(source.relation)}&expectedKind=${encodeURIComponent(source.kind)}&expectedFingerprint=${encodeURIComponent(source.fingerprint)}`;
-}
-
 async function verifyDashboardSources() {
   const dashboardId = activeDashboard?.id;
   const generation = ++sourceVerificationGeneration;
@@ -420,8 +441,13 @@ async function verifyDashboardSources() {
   const results = new Map();
   await Promise.all(Array.from(uniqueSources, async ([key, source]) => {
     try {
-      await postgres.request(sourceVerificationPath(source));
-      results.set(key, { state: "verified" });
+      const result = await postgres.request(`/api/postgres/profiles/${encodeURIComponent(source.profileId)}/relation/verify`, {
+        method: "POST", body: JSON.stringify({ source })
+      });
+      results.set(key, result.matches ? { state: "verified" } : {
+        state: "error", code: result.status === "missing" ? "relation_missing" : "relation_changed",
+        message: sourceChangeMessage(result), details: result
+      });
     } catch (error) {
       results.set(key, { state: "error", code: error.code || "source_unavailable", message: error.message });
     }
@@ -524,11 +550,16 @@ async function openWidgetEditor(widgetId) {
   const catalog = await loadWidgetSourceNamespaces(profile, currentSource?.profileId === profile.id ? currentSource.namespace : null);
   if (editedWidgetId !== widget.id || !currentSource || !catalog || currentSource.profileId !== profile.id || currentSource.namespace !== catalog.namespace) return;
   const relation = catalog.relations.find(item => item.name === currentSource.relation);
-  if (!relation) return;
+  const verification = sourceVerification.get(widget.id);
+  if (!relation) {
+    elements.relationStatus.textContent = verification?.message || `Saved relation ${currentSource.database}.${currentSource.namespace}.${currentSource.relation} is unavailable.`;
+    return;
+  }
   for (const item of elements.relationList.querySelectorAll(".relation-item")) {
     item.classList.toggle("active", item.querySelector("strong")?.textContent === relation.name);
   }
   await inspectSelectedRelation(catalog, relation);
+  renderSourceChangeNotice(verification);
 }
 
 function closeWidgetEditor() {
@@ -573,7 +604,7 @@ function dashboardWidgetElement(widget) {
     const sourceLabel = document.createElement("small");
     sourceLabel.className = "widget-source-label";
     const verification = sourceVerification.get(widget.id);
-    const suffix = verification?.state === "checking" ? " · checking" : verification?.state === "error" ? verification.code === "relation_changed" ? " · source changed" : " · source unavailable" : "";
+    const suffix = verification?.state === "checking" ? " · checking" : verification?.state === "error" ? verification.code === "relation_changed" ? " · source changed" : verification.code === "relation_missing" ? " · source missing" : " · source unavailable" : "";
     sourceLabel.textContent = `${source.database}.${source.namespace}.${source.relation}${suffix}`;
     card.dataset.sourceState = verification?.state || "unverified";
     if (verification?.state === "error") {

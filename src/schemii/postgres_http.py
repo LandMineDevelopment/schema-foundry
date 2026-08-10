@@ -8,6 +8,7 @@ PROFILE_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,
 DATA_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/data$")
 SQL_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/sql$")
 RELATION_PREVIEW_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/relation/preview$")
+RELATION_VERIFY_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/relation/verify$")
 
 
 class PostgresHttpMixin:
@@ -68,15 +69,20 @@ class PostgresHttpMixin:
             return True
         sql_match = SQL_PATH.fullmatch(path)
         relation_preview_match = RELATION_PREVIEW_PATH.fullmatch(path)
+        relation_verify_match = RELATION_VERIFY_PATH.fullmatch(path)
         profile_match = PROFILE_PATH.fullmatch(path)
-        if not sql_match and not relation_preview_match and not (profile_match and profile_match.group(2) in {"test", "introspect"}):
+        if not sql_match and not relation_preview_match and not relation_verify_match and not (profile_match and profile_match.group(2) in {"test", "introspect"}):
             return False
         if not self._authorize_postgres():
             return True
         body = self._body_or_error()
         if body is None:
             return True
-        if relation_preview_match:
+        if relation_verify_match:
+            self._service_call(lambda: self.service.verify_relation_source(
+                relation_verify_match.group(1), body.get("source")
+            ))
+        elif relation_preview_match:
             self._service_call(lambda: self.service.preview_relation_rows(
                 relation_preview_match.group(1), body.get("source"), body.get("offset", 0), body.get("limit", 20)
             ))

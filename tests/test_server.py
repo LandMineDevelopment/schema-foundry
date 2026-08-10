@@ -61,6 +61,10 @@ class FakePostgresService:
         self.calls.append(("preview_relation_rows", profile_id, source, offset, limit))
         return {**source, "columns": [], "rows": [], "offset": offset, "nextOffset": offset, "hasMore": False, "stableOrder": False}
 
+    def verify_relation_source(self, profile_id, source):
+        self.calls.append(("verify_relation_source", profile_id, source))
+        return {"status": "verified", "matches": True, **source, "missingColumns": [], "addedColumns": [], "changedColumns": []}
+
     def catalog_status(self, profile_id, namespace):
         self.calls.append(("catalog_status", profile_id, namespace))
         return {"profileId": profile_id, "namespace": namespace, "fingerprint": "live"}
@@ -313,6 +317,9 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(self.request(preview_path, "POST", {"source": preview_source, "offset": 5, "limit": 10})[0], 403)
         self.assertEqual(self.request(preview_path, "POST", {"source": preview_source, "offset": 5, "limit": 10}, authorized=True)[0], 200)
         self.assertIn(("preview_relation_rows", "local", preview_source, 5, 10), self.service.calls)
+        verify_path = "/api/postgres/profiles/local/relation/verify"
+        self.assertEqual(self.request(verify_path, "POST", {"source": preview_source}, authorized=True)[0], 200)
+        self.assertIn(("verify_relation_source", "local", preview_source), self.service.calls)
 
     def test_test_introspect_preview_and_apply_routes_forward_contracts(self):
         schema = {"projectName": "demo.public", "tables": [], "relationships": [], "functions": []}
