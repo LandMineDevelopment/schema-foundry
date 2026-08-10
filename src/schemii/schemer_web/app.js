@@ -1426,8 +1426,12 @@ function renderDashboardList() {
     copy.append(count);
     button.append(marker, copy);
     button.addEventListener("click", async () => {
-      await flushPendingSave();
-      openDashboard(record.id);
+      try {
+        await flushPendingSave();
+        openDashboard(record.id);
+      } catch (_error) {
+        // The save status already explains why navigation was blocked.
+      }
     });
     elements.dashboardList.append(button);
   }
@@ -1484,7 +1488,7 @@ function markDashboardChanged(render = false) {
   saveTimer = setTimeout(() => {
     saveTimer = null;
     saveTimerDashboardId = null;
-    if (activeDashboard?.id === dashboardId) persistDashboard(dashboardId);
+    if (activeDashboard?.id === dashboardId) persistDashboard(dashboardId).catch(() => {});
   }, 450);
 }
 
@@ -1515,7 +1519,7 @@ async function persistDashboard(expectedDashboardId = activeDashboard?.id) {
         saveTimer = setTimeout(() => {
           saveTimer = null;
           saveTimerDashboardId = null;
-          if (activeDashboard?.id === dashboardId) persistDashboard(dashboardId);
+          if (activeDashboard?.id === dashboardId) persistDashboard(dashboardId).catch(() => {});
         }, 450);
       }
     } catch (error) {
@@ -1534,6 +1538,7 @@ async function persistDashboard(expectedDashboardId = activeDashboard?.id) {
       } else {
         setSaveStatus("Save failed", "error");
       }
+      throw error;
     }
   });
   return saveQueue;
@@ -1564,7 +1569,7 @@ function setEditMode(enabled, flush = true) {
     const widget = activeDashboard?.dashboard.widgets.find(item => item.id === card.dataset.widgetId);
     if (widget) card.setAttribute("aria-label", editMode ? `Move ${widget.title}` : `Open ${widget.title}`);
   }
-  if (!editMode && flush) flushPendingSave();
+  if (!editMode && flush) flushPendingSave().catch(() => {});
 }
 
 function nextWidgetId() {
@@ -1920,6 +1925,7 @@ function openDashboardForm(action) {
 async function submitDashboardForm() {
   const title = elements.dashboardName.value.trim();
   if (!title) return;
+  const previousTitle = activeDashboard?.dashboard.title;
   elements.dashboardFormStatus.textContent = "Saving...";
   try {
     if (formAction === "rename") {
@@ -1937,17 +1943,31 @@ async function submitDashboardForm() {
     }
     elements.formDialog.close();
   } catch (error) {
+    if (formAction === "rename" && activeDashboard && previousTitle !== undefined) {
+      activeDashboard.dashboard.title = previousTitle;
+      renderDashboard();
+    }
     elements.dashboardFormStatus.textContent = error.message;
   }
 }
 
 async function archiveDashboard() {
   if (!activeDashboard) return;
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  saveTimerDashboardId = null;
   activeDashboard.dashboard.archived = !activeDashboard.dashboard.archived;
   const archived = activeDashboard.dashboard.archived;
   changeGeneration += 1;
-  await persistDashboard();
-  await loadDashboards(archived ? null : activeDashboard.id);
+  try {
+    await persistDashboard();
+    await loadDashboards(archived ? null : activeDashboard.id);
+  } catch (_error) {
+    if (activeDashboard) {
+      activeDashboard.dashboard.archived = !archived;
+      renderDashboard();
+    }
+  }
 }
 
 async function deleteDashboard() {
@@ -2017,8 +2037,13 @@ elements.addWidgetButton.addEventListener("click", addWidget);
 document.querySelector("#new-dashboard").addEventListener("click", () => openDashboardForm("create"));
 document.querySelector("#mobile-new-dashboard").addEventListener("click", () => openDashboardForm("create"));
 elements.mobileDashboardSelect.addEventListener("change", async () => {
-  await flushPendingSave();
-  openDashboard(elements.mobileDashboardSelect.value);
+  const dashboardId = elements.mobileDashboardSelect.value;
+  try {
+    await flushPendingSave();
+    openDashboard(dashboardId);
+  } catch (_error) {
+    elements.mobileDashboardSelect.value = activeDashboard?.id ?? "";
+  }
 });
 document.querySelector("#rename-dashboard").addEventListener("click", () => openDashboardForm("rename"));
 document.querySelector("#duplicate-dashboard").addEventListener("click", () => openDashboardForm("duplicate"));

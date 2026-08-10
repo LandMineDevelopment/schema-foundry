@@ -111,6 +111,11 @@ assert.match(source, /error\.code === "invalid_dashboard"[\s\S]*Invalid layout r
 const persistSource = source.slice(source.indexOf("async function persistDashboard"), source.indexOf("async function flushPendingSave"));
 assert.ok(persistSource.indexOf("const snapshot = clone(activeDashboard)") > persistSource.indexOf("saveQueue = saveQueue"), "queued saves must capture the revision only after prior saves finish");
 assert.match(source, /saveTimerDashboardId = dashboardId[\s\S]*activeDashboard\?\.id === dashboardId[\s\S]*persistDashboard\(dashboardId\)/, "debounced saves must remain bound to the dashboard that scheduled them");
+assert.match(persistSource, /setSaveStatus\("Save failed", "error"\)[\s\S]*throw error;/, "save failures must remain visible and reject navigation callers");
+assert.match(source, /button\.addEventListener\("click", async \(\) => \{[\s\S]*await flushPendingSave\(\)[\s\S]*openDashboard\(record\.id\)[\s\S]*navigation was blocked/, "desktop dashboard navigation must stop when pending persistence fails");
+assert.match(source, /mobileDashboardSelect\.addEventListener\("change"[\s\S]*await flushPendingSave\(\)[\s\S]*mobileDashboardSelect\.value = activeDashboard\?\.id/, "mobile dashboard navigation must restore its selection after a failed save");
+assert.match(source, /const previousTitle = activeDashboard\?\.dashboard\.title[\s\S]*formAction === "rename"[\s\S]*activeDashboard\.dashboard\.title = previousTitle/, "failed dashboard renames must restore the local title");
+assert.match(source, /async function archiveDashboard\(\)[\s\S]*await persistDashboard\(\)[\s\S]*activeDashboard\.dashboard\.archived = !archived/, "failed archive changes must remain on the current dashboard and restore local state");
 assert.match(source, /formAction === "create"|action === "create"/, "create dashboard behavior is missing");
 for (const operation of ["rename", "duplicate", "archive", "delete"]) assert.match(source, new RegExp(`#${operation}-dashboard`), `${operation} dashboard behavior is missing`);
 assert.match(styles, /^@import url\("\/shared\/theme\.css"\);/, "Schemer must use the shared visual theme");
