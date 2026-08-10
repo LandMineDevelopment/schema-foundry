@@ -109,6 +109,8 @@ Schemer is an analytics workspace served separately from Schemii while reusing t
 
 The Data sources dialog includes a read-only relation browser for tables, views, and materialized views. Schemer sends the exact profile, configured database, and namespace to the shared PostgreSQL catalog route; the server verifies `current_database()` before returning relation identities and rejects mismatches with `database_changed`. Selecting a relation loads its normalized kind, ordered columns, PostgreSQL display types, nullability, and full deterministic catalog fingerprint. Fingerprints include semantic relation metadata and view definitions while excluding transient OIDs and timestamps.
 
+In Edit mode, a verified relation can be assigned to one dashboard widget. Version-1 dashboards remain compatible with empty widget configurations, while sourced widgets persist exactly one `source` object containing profile, database, namespace, relation, kind, and fingerprint. The validator rejects source arrays, joins, SQL, incomplete identities, unsupported kinds, malformed fingerprints, and unknown fields. Assignments can be cleared, and sourced tiles display their exact database, namespace, and relation.
+
 ```bash
 docker compose -f compose.yaml -f compose.postgres.yaml -f compose.schemer.yaml up --build -d
 ```

@@ -12,6 +12,16 @@ sys.path.insert(0, str(ROOT / "src"))
 from schemii.dashboard_store import DashboardStore, DashboardStoreError, mercury_dashboard_record
 
 
+SOURCE = {
+    "profileId": "schemii_example_postgres",
+    "database": "schemii",
+    "namespace": "bookstore",
+    "relation": "orders",
+    "kind": "table",
+    "fingerprint": "a" * 64,
+}
+
+
 class DashboardStoreTests(unittest.TestCase):
     def setUp(self):
         self.temporary_directory = tempfile.TemporaryDirectory()
@@ -60,6 +70,35 @@ class DashboardStoreTests(unittest.TestCase):
             self.store.save(record["id"], record)
         with self.assertRaises(DashboardStoreError):
             self.store.create("  invalid  ")
+
+    def test_single_widget_source_persists_and_duplicates_independently(self):
+        self.store.initialize_once()
+        record = self.store.get("dashboard_mercury")
+        record["dashboard"]["widgets"][0]["configuration"] = {"source": SOURCE}
+        saved = self.store.save(record["id"], record)
+        self.assertEqual(saved["dashboard"]["widgets"][0]["configuration"]["source"], SOURCE)
+        duplicate = self.store.create("Sourced copy", record["id"])
+        duplicate_source = duplicate["dashboard"]["widgets"][0]["configuration"]["source"]
+        duplicate_source["relation"] = "customers"
+        self.assertEqual(self.store.get(record["id"])["dashboard"]["widgets"][0]["configuration"]["source"]["relation"], "orders")
+
+    def test_widget_source_rejects_multiple_sources_joins_sql_and_malformed_identity(self):
+        invalid_configurations = [
+            {"sources": [SOURCE]},
+            {"source": {**SOURCE, "join": {"relation": "customers"}}},
+            {"source": {**SOURCE, "sql": "SELECT * FROM orders"}},
+            {"source": [SOURCE]},
+            {"source": {**SOURCE, "kind": "sequence"}},
+            {"source": {**SOURCE, "fingerprint": "short"}},
+            {"source": {key: value for key, value in SOURCE.items() if key != "namespace"}},
+        ]
+        for configuration in invalid_configurations:
+            with self.subTest(configuration=configuration):
+                record = mercury_dashboard_record()
+                record["dashboard"]["widgets"][0]["configuration"] = configuration
+                with self.assertRaises(DashboardStoreError) as error:
+                    self.store.save(record["id"], record)
+                self.assertEqual(error.exception.payload["error"]["code"], "invalid_dashboard")
 
     def test_malformed_file_is_not_listed_or_overwritten(self):
         malformed = self.root / "broken.json"

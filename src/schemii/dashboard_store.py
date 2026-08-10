@@ -12,6 +12,8 @@ from typing import Any
 
 
 DASHBOARD_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+PROFILE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+FINGERPRINT_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 DASHBOARD_VERSION = 1
 MAX_WIDGETS = 100
 
@@ -67,6 +69,43 @@ def _layout(value: Any, widget_id: str) -> dict[str, Any]:
     }
 
 
+def _postgres_identifier(value: Any, field: str) -> str:
+    if (
+        not isinstance(value, str) or not value or len(value.encode("utf-8")) > 63
+        or any(ord(char) < 32 or ord(char) == 127 for char in value)
+    ):
+        raise DashboardStoreError(400, "invalid_dashboard", f"{field} must be a valid PostgreSQL identifier up to 63 bytes")
+    return value
+
+
+def _widget_configuration(value: Any, widget_id: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) not in (set(), {"source"}):
+        raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} configuration must contain at most one source")
+    if not value:
+        return {}
+    source = value["source"]
+    fields = {"profileId", "database", "namespace", "relation", "kind", "fingerprint"}
+    if not isinstance(source, dict) or set(source) != fields:
+        raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} source identity is invalid")
+    profile_id = source.get("profileId")
+    if not isinstance(profile_id, str) or not PROFILE_ID_PATTERN.fullmatch(profile_id):
+        raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} source profile is invalid")
+    kind = source.get("kind")
+    if kind not in {"table", "view", "materialized_view"}:
+        raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} source kind is invalid")
+    fingerprint = source.get("fingerprint")
+    if not isinstance(fingerprint, str) or not FINGERPRINT_PATTERN.fullmatch(fingerprint):
+        raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} source fingerprint is invalid")
+    return {"source": {
+        "profileId": profile_id,
+        "database": _postgres_identifier(source.get("database"), "source database"),
+        "namespace": _postgres_identifier(source.get("namespace"), "source namespace"),
+        "relation": _postgres_identifier(source.get("relation"), "source relation"),
+        "kind": kind,
+        "fingerprint": fingerprint,
+    }}
+
+
 def validate_dashboard_record(record: Any, dashboard_id: str | None = None) -> dict[str, Any]:
     if not isinstance(record, dict):
         raise DashboardStoreError(400, "invalid_dashboard", "Dashboard record must be an object")
@@ -107,14 +146,12 @@ def validate_dashboard_record(record: Any, dashboard_id: str | None = None) -> d
         kind = _bounded_text(widget.get("kind"), "widget kind", 64)
         if kind not in {"preview", "placeholder"}:
             raise DashboardStoreError(400, "invalid_dashboard", "Widget kind is not supported by this dashboard version")
-        if not isinstance(widget.get("configuration"), dict) or widget["configuration"]:
-            raise DashboardStoreError(400, "invalid_dashboard", "Widget configuration is reserved for a later dashboard version")
         normalized_widgets.append({
             "id": widget_id,
             "kind": kind,
             "title": _bounded_text(widget.get("title"), "widget title", 128),
             "layout": _layout(widget.get("layout"), widget_id),
-            "configuration": {},
+            "configuration": _widget_configuration(widget.get("configuration"), widget_id),
         })
     viewport = dashboard.get("viewport")
     if not isinstance(viewport, dict) or set(viewport) != {"desktop", "mobile"}:

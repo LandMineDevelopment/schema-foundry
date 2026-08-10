@@ -18,6 +18,9 @@ assert.match(source, /selectedRelationIdentity = \{[\s\S]*profileId: descriptor\
 assert.match(html, /class="relation-browser"[\s\S]*Tables, views, and materialized views/, "the data-source dialog needs a supported relation browser");
 assert.match(source, /for \(const label of \["#", "Column", "PostgreSQL type", "Nullability"\]\)/, "relation inspection must display ordered PostgreSQL column metadata");
 assert.match(html, /class="relation-detail" id="relation-detail"/, "the relation browser needs a catalog detail pane");
+assert.match(source, /widget\.configuration = \{ source: \{[\s\S]*profileId: descriptor\.profileId,[\s\S]*fingerprint: descriptor\.fingerprint[\s\S]*markDashboardChanged\(true\)/, "Edit mode must assign exactly one verified source identity to a widget");
+assert.match(source, /assign\.disabled = !editMode[\s\S]*widget\.configuration = \{\}/, "View mode must not assign sources and Edit mode must support clearing one");
+assert.match(source, /sourceLabel\.textContent = `\$\{source\.database\}\.\$\{source\.namespace\}\.\$\{source\.relation\}`/, "sourced widgets must display their exact relation identity");
 assert.match(source, /if \(profilesLoading\) return profilesLoading[\s\S]*generation !== relationCatalogGeneration/, "concurrent profile and relation loads must not clear newer catalog inspection state");
 assert.match(source, /connections-button[\s\S]*if \(!profiles\.length\) await loadProfiles\(\)/, "opening an already loaded source browser must not clear its inspected relation");
 assert.match(source, /replaceChildren/, "connection metadata must render through DOM APIs");
@@ -68,6 +71,7 @@ assert.match(styles, /\.population-table \{[^}]*border-collapse: collapse/, "the
 assert.match(styles, /content: attr\(data-bar-value\)[\s\S]*content: attr\(data-bar-label\)/, "expanded KPI bars must display their values and date labels");
 assert.match(styles, /\.population-filter-row \{[^}]*display: grid/, "applied filters must be shown as distinct field/value rows");
 assert.match(styles, /\.executed-sql-dialog \{[^}]*width: min\(900px/, "executed SQL must open in a readable popup");
+assert.match(styles, /\.relation-assignment \{[^}]*display: grid/, "relation details need a clear widget assignment control");
 assert.match(styles, /\.focused-widget-body \{[^}]*flex: 1;[^}]*justify-content: center;/, "expanded graphics must be centered in the available widget body");
 assert.match(styles, /\.widget-inspector \{[^}]*padding: 18px;[^}]*background-image:/, "the inspector must use the same floating workspace treatment as the widget");
 assert.match(styles, /\.widget-inspector-body \{[^}]*border-radius: 0 0 8px 8px;[^}]*linear-gradient/, "the inspector header and table must form one floating card");

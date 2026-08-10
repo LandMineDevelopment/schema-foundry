@@ -250,7 +250,61 @@ function renderRelationDetail(descriptor) {
     body.append(row);
   }
   table.append(head, body);
-  elements.relationDetail.replaceChildren(header, fingerprintLabel, fingerprint, table);
+  const assignment = document.createElement("div");
+  assignment.className = "relation-assignment";
+  const assignmentLabel = document.createElement("label");
+  assignmentLabel.textContent = "Assign verified source to widget";
+  const widgetSelect = document.createElement("select");
+  widgetSelect.setAttribute("aria-label", "Widget receiving this source");
+  for (const widget of activeDashboard?.dashboard.widgets ?? []) {
+    const current = widget.configuration?.source;
+    const matches = current?.profileId === descriptor.profileId && current.database === descriptor.database && current.namespace === descriptor.namespace && current.relation === descriptor.relation && current.fingerprint === descriptor.fingerprint;
+    widgetSelect.append(new Option(`${widget.title}${matches ? " (current)" : ""}`, widget.id));
+  }
+  assignmentLabel.append(widgetSelect);
+  const actions = document.createElement("div");
+  const assign = document.createElement("button");
+  assign.type = "button";
+  assign.className = "button button-primary";
+  assign.textContent = "Assign source";
+  assign.disabled = !editMode || !widgetSelect.options.length;
+  const clear = document.createElement("button");
+  clear.type = "button";
+  clear.className = "button button-ghost";
+  clear.textContent = "Clear source";
+  clear.disabled = !editMode || !widgetSelect.options.length || !activeDashboard?.dashboard.widgets.find(widget => widget.id === widgetSelect.value)?.configuration?.source;
+  const assignmentStatus = document.createElement("span");
+  assignmentStatus.textContent = editMode ? "" : "Enter Edit mode to change widget sources.";
+  const updateClearState = () => {
+    clear.disabled = !editMode || !activeDashboard?.dashboard.widgets.find(widget => widget.id === widgetSelect.value)?.configuration?.source;
+  };
+  widgetSelect.addEventListener("change", updateClearState);
+  assign.addEventListener("click", () => {
+    const widget = activeDashboard?.dashboard.widgets.find(item => item.id === widgetSelect.value);
+    if (!editMode || !widget) return;
+    widget.configuration = { source: {
+      profileId: descriptor.profileId,
+      database: descriptor.database,
+      namespace: descriptor.namespace,
+      relation: descriptor.relation,
+      kind: descriptor.kind,
+      fingerprint: descriptor.fingerprint
+    }};
+    assignmentStatus.textContent = `Assigned to ${widget.title}.`;
+    markDashboardChanged(true);
+    updateClearState();
+  });
+  clear.addEventListener("click", () => {
+    const widget = activeDashboard?.dashboard.widgets.find(item => item.id === widgetSelect.value);
+    if (!editMode || !widget?.configuration?.source) return;
+    widget.configuration = {};
+    assignmentStatus.textContent = `Cleared source from ${widget.title}.`;
+    markDashboardChanged(true);
+    updateClearState();
+  });
+  actions.append(assign, clear, assignmentStatus);
+  assignment.append(assignmentLabel, actions);
+  elements.relationDetail.replaceChildren(header, fingerprintLabel, fingerprint, table, assignment);
   elements.relationDetail.hidden = false;
 }
 
@@ -351,6 +405,19 @@ function dashboardWidgetElement(widget) {
   card.removeAttribute("data-preview-id");
   const title = card.querySelector("header span");
   if (title) title.textContent = widget.title;
+  const source = widget.configuration?.source;
+  if (title && source) {
+    let titleGroup = title.parentElement?.tagName === "DIV" ? title.parentElement : null;
+    if (!titleGroup) {
+      titleGroup = document.createElement("div");
+      title.before(titleGroup);
+      titleGroup.append(title);
+    }
+    const sourceLabel = document.createElement("small");
+    sourceLabel.className = "widget-source-label";
+    sourceLabel.textContent = `${source.database}.${source.namespace}.${source.relation}`;
+    titleGroup.append(sourceLabel);
+  }
   const oldMenu = card.querySelector("header > button");
   oldMenu?.remove();
   const viewSql = document.createElement("button");

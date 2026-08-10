@@ -171,9 +171,14 @@ class SchemerServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         record = json.loads(body)["dashboards"][0]
         record["dashboard"]["title"] = "Updated dashboard"
+        record["dashboard"]["widgets"][0]["configuration"] = {"source": {
+            "profileId": "shared", "database": "schemii", "namespace": "bookstore",
+            "relation": "orders", "kind": "table", "fingerprint": "a" * 64,
+        }}
         status, body, _ = self.request(f"/api/dashboards/{record['id']}", "PUT", record, True)
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["revision"], record["revision"] + 1)
+        self.assertEqual(json.loads(body)["dashboard"]["widgets"][0]["configuration"]["source"]["relation"], "orders")
         self.assertEqual(self.request(f"/api/dashboards/{record['id']}", "PUT", record, True)[0], 409)
 
         status, body, _ = self.request("/api/dashboards", "POST", {"title": "New dashboard"}, True)
