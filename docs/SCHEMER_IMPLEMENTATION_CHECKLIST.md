@@ -106,15 +106,15 @@ Acceptance criteria: users can build and persist a grouped table such as publish
 
 Approval required before implementation.
 
-- [ ] Add compact in-widget controls for KPI, bar, line, donut, and aggregate table modes.
-- [ ] Add quick selectors for dimensions, visible measures, aggregation, and sort.
-- [ ] Keep deeper source, filter, formatting, interaction, and detail settings in an editor drawer.
-- [ ] Support multiple measures in KPI groups, grouped bars, lines, and aggregate tables.
-- [ ] Require one selected measure for donut charts while retaining unshown measures.
-- [ ] Offer explicit compatibility guidance when a visualization lacks required roles.
-- [ ] Apply smart suggestions without silently rewriting query configuration.
-- [ ] Restore all prior dimensions and measures when switching back to a compatible visualization.
-- [ ] Add hot-swap round-trip tests proving no configuration loss.
+- [x] Add compact in-widget controls for KPI, bar, line, donut, and aggregate table modes.
+- [x] Add quick selectors for dimensions, visible measures, aggregation, and sort.
+- [x] Keep deeper source, filter, formatting, interaction, and detail settings in an editor drawer.
+- [x] Support multiple measures in KPI groups, grouped bars, lines, and aggregate tables.
+- [x] Require one selected measure for donut charts while retaining unshown measures.
+- [x] Offer explicit compatibility guidance when a visualization lacks required roles.
+- [x] Apply smart suggestions without silently rewriting query configuration.
+- [x] Restore all prior dimensions and measures when switching back to a compatible visualization.
+- [x] Add hot-swap round-trip tests proving no configuration loss.
 
 Acceptance criteria: compatible visualizations switch immediately, and incompatible switches explain the missing role without deleting configuration.
 

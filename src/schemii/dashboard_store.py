@@ -19,6 +19,7 @@ FINGERPRINT_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 DASHBOARD_VERSION = 1
 MAX_WIDGETS = 100
 TABLE_PAGE_SIZES = {10, 25, 50, 100}
+VISUALIZATION_MODES = {"table", "kpi", "bar", "line", "donut"}
 
 
 class DashboardStoreError(Exception):
@@ -121,14 +122,59 @@ def _table_configuration(value: Any, query: dict[str, Any], widget_id: str) -> d
     return {"version": 1, "columns": normalized_columns, "pageSize": page_size}
 
 
+def _visualization_configuration(value: Any, query: dict[str, Any], widget_id: str) -> dict[str, Any]:
+    required = {"version", "mode", "selections"}
+    if not isinstance(value, dict) or set(value) != required or isinstance(value.get("version"), bool) or value.get("version") != 1:
+        raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} visualization configuration is invalid")
+    mode = value.get("mode")
+    selections = value.get("selections")
+    if not isinstance(mode, str) or mode not in VISUALIZATION_MODES or not isinstance(selections, dict) or set(selections) != {"kpi", "bar", "line", "donut"}:
+        raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} visualization mode or selections are invalid")
+    dimension_ids = {item["id"] for item in query["dimensions"]}
+    measure_ids = {item["id"] for item in query["measures"]}
+
+    def dimension_id(selection: dict[str, Any], kind: str) -> str | None:
+        selected = selection.get("dimensionId")
+        if selected is not None and (not isinstance(selected, str) or selected not in dimension_ids):
+            raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} {kind} dimension is not in its query")
+        return selected
+
+    def selected_measures(selection: dict[str, Any], kind: str) -> list[str]:
+        selected = selection.get("measureIds")
+        if not isinstance(selected, list) or not selected or any(not isinstance(item, str) for item in selected) or len(selected) != len(set(selected)) or any(item not in measure_ids for item in selected):
+            raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} {kind} measures are invalid")
+        return selected
+
+    kpi = selections["kpi"]
+    if not isinstance(kpi, dict) or set(kpi) != {"measureIds"}:
+        raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} KPI selection is invalid")
+    bar = selections["bar"]
+    line = selections["line"]
+    if not isinstance(bar, dict) or set(bar) != {"dimensionId", "measureIds"} or not isinstance(line, dict) or set(line) != {"dimensionId", "measureIds"}:
+        raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} chart selection is invalid")
+    donut = selections["donut"]
+    if not isinstance(donut, dict) or set(donut) != {"dimensionId", "measureId"} or not isinstance(donut.get("measureId"), str) or donut.get("measureId") not in measure_ids:
+        raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} donut selection is invalid")
+    return {
+        "version": 1,
+        "mode": mode,
+        "selections": {
+            "kpi": {"measureIds": selected_measures(kpi, "KPI")},
+            "bar": {"dimensionId": dimension_id(bar, "bar"), "measureIds": selected_measures(bar, "bar")},
+            "line": {"dimensionId": dimension_id(line, "line"), "measureIds": selected_measures(line, "line")},
+            "donut": {"dimensionId": dimension_id(donut, "donut"), "measureId": donut["measureId"]},
+        },
+    }
+
+
 def _widget_configuration(value: Any, widget_id: str, widget_kind: str) -> dict[str, Any]:
-    allowed = (set(), {"source"}, {"source", "query"}, {"source", "query", "table"})
+    allowed = (set(), {"source"}, {"source", "query"}, {"source", "query", "table"}, {"source", "query", "visualization"}, {"source", "query", "table", "visualization"})
     if not isinstance(value, dict) or set(value) not in allowed:
         raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} configuration must contain at most one source")
-    if widget_kind == "aggregate_report" and set(value) not in ({"source", "query"}, {"source", "query", "table"}):
+    if widget_kind == "aggregate_report" and set(value) not in ({"source", "query"}, {"source", "query", "table"}, {"source", "query", "visualization"}, {"source", "query", "table", "visualization"}):
         raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} aggregate report requires a source and query")
-    if widget_kind != "aggregate_report" and "table" in value:
-        raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} table presentation requires an aggregate report")
+    if widget_kind != "aggregate_report" and ({"table", "visualization"} & set(value)):
+        raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} presentation requires an aggregate report")
     if not value:
         return {}
     source = value["source"]
@@ -187,6 +233,8 @@ def _widget_configuration(value: Any, widget_id: str, widget_kind: str) -> dict[
             raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} query is invalid: {exc}") from exc
     if "table" in value:
         normalized["table"] = _table_configuration(value["table"], normalized["query"], widget_id)
+    if "visualization" in value:
+        normalized["visualization"] = _visualization_configuration(value["visualization"], normalized["query"], widget_id)
     return normalized
 
 

@@ -43,6 +43,16 @@ TABLE = {
     ],
     "pageSize": 25,
 }
+VISUALIZATION = {
+    "version": 1,
+    "mode": "bar",
+    "selections": {
+        "kpi": {"measureIds": ["measure_orders"]},
+        "bar": {"dimensionId": "dimension_date", "measureIds": ["measure_orders"]},
+        "line": {"dimensionId": "dimension_date", "measureIds": ["measure_orders"]},
+        "donut": {"dimensionId": "dimension_date", "measureId": "measure_orders"},
+    },
+}
 
 
 class DashboardStoreTests(unittest.TestCase):
@@ -153,6 +163,45 @@ class DashboardStoreTests(unittest.TestCase):
         widget["configuration"] = {"source": {**SOURCE, "columns": SOURCE_COLUMNS}, "query": QUERY, "table": TABLE}
         saved = self.store.save(record["id"], record)
         self.assertEqual(saved["dashboard"]["widgets"][0]["configuration"]["table"], TABLE)
+
+    def test_aggregate_report_visualization_round_trips_without_changing_query_or_table(self):
+        self.store.initialize_once()
+        record = self.store.get("dashboard_mercury")
+        widget = record["dashboard"]["widgets"][0]
+        widget["kind"] = "aggregate_report"
+        widget["configuration"] = {"source": {**SOURCE, "columns": SOURCE_COLUMNS}, "query": QUERY, "table": TABLE, "visualization": VISUALIZATION}
+        saved = self.store.save(record["id"], record)
+        configuration = saved["dashboard"]["widgets"][0]["configuration"]
+        self.assertEqual(configuration["visualization"], VISUALIZATION)
+        self.assertEqual(configuration["query"], QUERY)
+        self.assertEqual(configuration["table"], TABLE)
+        configuration["visualization"]["selections"]["bar"]["dimensionId"] = None
+        configuration["visualization"]["selections"]["line"]["dimensionId"] = None
+        configuration["visualization"]["selections"]["donut"]["dimensionId"] = None
+        saved_again = self.store.save(saved["id"], saved)
+        self.assertIsNone(saved_again["dashboard"]["widgets"][0]["configuration"]["visualization"]["selections"]["bar"]["dimensionId"])
+
+    def test_aggregate_report_rejects_invalid_visualization_references_and_shapes(self):
+        invalid_visualizations = [
+            {**VISUALIZATION, "version": 2},
+            {**VISUALIZATION, "mode": "scatter"},
+            {**VISUALIZATION, "mode": []},
+            {**VISUALIZATION, "selections": {**VISUALIZATION["selections"], "bar": {"dimensionId": "missing", "measureIds": ["measure_orders"]}}},
+            {**VISUALIZATION, "selections": {**VISUALIZATION["selections"], "bar": {"dimensionId": [], "measureIds": ["measure_orders"]}}},
+            {**VISUALIZATION, "selections": {**VISUALIZATION["selections"], "line": {"dimensionId": "dimension_date", "measureIds": []}}},
+            {**VISUALIZATION, "selections": {**VISUALIZATION["selections"], "line": {"dimensionId": "dimension_date", "measureIds": [[]]}}},
+            {**VISUALIZATION, "selections": {**VISUALIZATION["selections"], "kpi": {"measureIds": ["missing"]}}},
+            {**VISUALIZATION, "selections": {**VISUALIZATION["selections"], "donut": {"dimensionId": "dimension_date", "measureId": None}}},
+            {**VISUALIZATION, "selections": {**VISUALIZATION["selections"], "extra": {}}},
+        ]
+        for visualization in invalid_visualizations:
+            with self.subTest(visualization=visualization):
+                record = mercury_dashboard_record()
+                widget = record["dashboard"]["widgets"][0]
+                widget["kind"] = "aggregate_report"
+                widget["configuration"] = {"source": {**SOURCE, "columns": SOURCE_COLUMNS}, "query": QUERY, "visualization": visualization}
+                with self.assertRaises(DashboardStoreError):
+                    self.store.save(record["id"], record)
 
     def test_aggregate_report_rejects_invalid_presentation_without_breaking_existing_widgets(self):
         invalid_tables = [

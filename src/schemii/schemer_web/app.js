@@ -84,6 +84,7 @@ let sourceVerificationGeneration = 0;
 let queryExecutionGeneration = 0;
 let widgetQueryDraft = null;
 let widgetTableDraft = null;
+let widgetVisualizationDraft = null;
 let widgetEditorSection = "source";
 let widgetEditorGeneration = 0;
 let widgetQueryApplySession = null;
@@ -363,6 +364,60 @@ function reconcileTablePresentation(query, presentation = null) {
   return { version: 1, columns: ordered, pageSize: [10, 25, 50, 100].includes(presentation?.pageSize) ? presentation.pageSize : 25 };
 }
 
+function defaultVisualization(query) {
+  const dimensionId = query.dimensions[0]?.id ?? null;
+  const measureIds = query.measures.map(item => item.id);
+  return {
+    version: 1,
+    mode: "table",
+    selections: {
+      kpi: { measureIds: [...measureIds] },
+      bar: { dimensionId, measureIds: [...measureIds] },
+      line: { dimensionId, measureIds: [...measureIds] },
+      donut: { dimensionId, measureId: measureIds[0] }
+    }
+  };
+}
+
+function reconcileVisualization(query, visualization = null) {
+  const fallback = defaultVisualization(query);
+  const dimensions = new Set(query.dimensions.map(item => item.id));
+  const measures = new Set(query.measures.map(item => item.id));
+  const selectedMeasures = (selection, defaults) => {
+    const valid = (selection?.measureIds ?? []).filter((id, index, items) => measures.has(id) && items.indexOf(id) === index);
+    return valid.length ? valid : [...defaults];
+  };
+  const selectedDimension = selection => selection?.dimensionId === null ? (query.dimensions.length === 1 ? query.dimensions[0].id : null) : dimensions.has(selection?.dimensionId) ? selection.dimensionId : fallback.selections.bar.dimensionId;
+  return {
+    version: 1,
+    mode: ["table", "kpi", "bar", "line", "donut"].includes(visualization?.mode) ? visualization.mode : "table",
+    selections: {
+      kpi: { measureIds: selectedMeasures(visualization?.selections?.kpi, fallback.selections.kpi.measureIds) },
+      bar: { dimensionId: selectedDimension(visualization?.selections?.bar), measureIds: selectedMeasures(visualization?.selections?.bar, fallback.selections.bar.measureIds) },
+      line: { dimensionId: selectedDimension(visualization?.selections?.line), measureIds: selectedMeasures(visualization?.selections?.line, fallback.selections.line.measureIds) },
+      donut: {
+        dimensionId: selectedDimension(visualization?.selections?.donut),
+        measureId: measures.has(visualization?.selections?.donut?.measureId) ? visualization.selections.donut.measureId : fallback.selections.donut.measureId
+      }
+    }
+  };
+}
+
+function queryForVisualization(query, visualization = null) {
+  const presentation = reconcileVisualization(query, visualization);
+  if (presentation.mode === "table") return clone(query);
+  const selection = presentation.selections[presentation.mode];
+  const dimensionIds = presentation.mode === "kpi" ? [] : [selection.dimensionId].filter(Boolean);
+  const measureIds = presentation.mode === "donut" ? [selection.measureId] : selection.measureIds;
+  const targetIds = new Set([...dimensionIds, ...measureIds]);
+  return {
+    ...clone(query),
+    dimensions: query.dimensions.filter(item => dimensionIds.includes(item.id)).map(clone),
+    measures: query.measures.filter(item => measureIds.includes(item.id)).map(clone),
+    sort: query.sort.filter(item => targetIds.has(item.targetId)).map(clone)
+  };
+}
+
 function numericPostgresType(type) {
   return ["smallint", "integer", "bigint", "decimal", "numeric", "real", "double precision", "smallserial", "serial", "bigserial"].some(prefix => type.toLowerCase() === prefix || type.toLowerCase().startsWith(`${prefix}(`));
 }
@@ -601,6 +656,117 @@ function widgetQueryApplyActive() {
   return widgetQueryApplySession?.generation === widgetEditorGeneration && widgetQueryApplySession.widgetId === editedWidgetId;
 }
 
+function visualizationRoleIds(mode, visualization, query) {
+  if (mode === "table") return { dimensionIds: query.dimensions.map(item => item.id), measureIds: query.measures.map(item => item.id) };
+  const selection = visualization.selections[mode];
+  return {
+    dimensionIds: mode === "kpi" ? [] : [selection.dimensionId].filter(Boolean),
+    measureIds: mode === "donut" ? [selection.measureId] : [...selection.measureIds]
+  };
+}
+
+function portVisualizationRoles(sourceMode, targetMode) {
+  const source = visualizationRoleIds(sourceMode, widgetVisualizationDraft, widgetQueryDraft);
+  const dimensionId = source.dimensionIds[0] ?? widgetQueryDraft.dimensions[0]?.id ?? null;
+  const measureIds = source.measureIds.filter(id => widgetQueryDraft.measures.some(item => item.id === id));
+  const carriedMeasures = measureIds.length ? measureIds : widgetQueryDraft.measures.map(item => item.id);
+  if (targetMode === "kpi") widgetVisualizationDraft.selections.kpi.measureIds = [...carriedMeasures];
+  if (["bar", "line"].includes(targetMode)) widgetVisualizationDraft.selections[targetMode] = { dimensionId, measureIds: [...carriedMeasures] };
+  if (targetMode === "donut") widgetVisualizationDraft.selections.donut = { dimensionId, measureId: carriedMeasures[0] ?? widgetQueryDraft.measures[0].id };
+  widgetVisualizationDraft.mode = targetMode;
+}
+
+function editorVisualizationSample(mode) {
+  const descriptions = {
+    table: ["Aggregate table", "Rows and columns for detailed comparisons."],
+    kpi: ["KPI", "Headline values for quick status checks."],
+    bar: ["Grouped bar", "Bars compare categories across one or more measures."],
+    line: ["Line", "Lines show change across an ordered dimension."],
+    donut: ["Donut", "Slices show how categories contribute to a whole."]
+  };
+  const sample = document.createElement("figure");
+  sample.className = `visualization-sample visualization-sample-${mode}`;
+  sample.setAttribute("aria-label", `${mode.replace("bar", "grouped bar")} appearance sample; decorative only, no data`);
+  const graphic = document.createElement("div");
+  graphic.className = "visualization-sample-graphic";
+  if (mode === "table") {
+    for (let index = 0; index < 12; index += 1) graphic.append(document.createElement("i"));
+  } else if (mode === "kpi") {
+    for (let index = 0; index < 3; index += 1) {
+      const metric = document.createElement("i");
+      metric.append(document.createElement("span"), document.createElement("strong"));
+      graphic.append(metric);
+    }
+  } else if (mode === "bar") {
+    for (const widths of [[72, 45], [48, 82], [88, 58]]) {
+      const group = document.createElement("i");
+      for (const width of widths) {
+        const bar = document.createElement("span");
+        bar.style.width = `${width}%`;
+        group.append(bar);
+      }
+      graphic.append(group);
+    }
+  } else if (mode === "line") {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 240 90");
+    for (const points of ["6,70 48,46 90,57 132,24 174,36 234,12", "6,80 48,66 90,39 132,51 174,22 234,43"]) {
+      const line = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+      line.setAttribute("points", points);
+      svg.append(line);
+    }
+    graphic.append(svg);
+  } else {
+    const ring = document.createElement("i");
+    const legend = document.createElement("div");
+    for (let index = 0; index < 4; index += 1) legend.append(document.createElement("span"));
+    graphic.append(ring, legend);
+  }
+  const caption = document.createElement("figcaption");
+  const title = document.createElement("strong");
+  title.textContent = descriptions[mode][0];
+  const description = document.createElement("span");
+  description.textContent = descriptions[mode][1];
+  const disclaimer = document.createElement("small");
+  disclaimer.textContent = "Appearance only - no data";
+  caption.append(title, description, disclaimer);
+  sample.append(graphic, caption);
+  return sample;
+}
+
+function editorVisualizationSection() {
+  const [section, rows, add] = queryGroup("Visualization", "Presentation choices remain independent for each mode and never remove query fields.", "", () => {});
+  add.remove();
+  const visualization = widgetVisualizationDraft;
+  const controls = document.createElement("div");
+  controls.className = "query-editor-row visualization-editor-row";
+  controls.append(queryLabel("View", querySelect([["table", "Aggregate table"], ["kpi", "KPI"], ["bar", "Grouped bar"], ["line", "Line"], ["donut", "Donut"]], visualization.mode, value => {
+    portVisualizationRoles(visualization.mode, value);
+    renderWidgetQueryDraft();
+  })));
+  controls.append(editorVisualizationSample(visualization.mode));
+  rows.append(controls);
+  const note = document.createElement("p");
+  note.className = "visualization-editor-guidance";
+  note.textContent = visualization.mode === "table" ? "Table uses every configured grouping and measure." : visualization.mode === "kpi" ? "KPI uses no dimensions and one or more measures." : visualization.mode === "donut" ? "Donut uses one dimension and one measure." : `${visualization.mode === "bar" ? "Grouped bar" : "Line"} uses one dimension and one or more measures.`;
+  rows.append(note);
+  return section;
+}
+
+function markVisualizationRole(section, label, required = false) {
+  section.classList.add(required ? "visualization-role-required" : "visualization-role-linked");
+  const badge = document.createElement("span");
+  badge.className = "visualization-role-badge";
+  badge.textContent = label;
+  section.querySelector(":scope > header")?.append(badge);
+}
+
+function measureSupportsVisualization(measure, columns) {
+  if (["count_rows", "count"].includes(measure.aggregation)) return true;
+  const column = columns.find(item => item.name === measure.column);
+  return ["sum", "average", "minimum", "maximum"].includes(measure.aggregation) && numericPostgresType(column?.type ?? "");
+}
+
 function renderWidgetQueryDraft() {
   const widget = activeDashboard?.dashboard.widgets.find(item => item.id === editedWidgetId);
   const columns = widget?.configuration?.source?.columns ?? [];
@@ -616,31 +782,47 @@ function renderWidgetQueryDraft() {
   }
   document.querySelector("#apply-widget-query").disabled = false;
   widgetTableDraft = reconcileTablePresentation(widgetQueryDraft, widgetTableDraft);
+  widgetVisualizationDraft = reconcileVisualization(widgetQueryDraft, widgetVisualizationDraft);
+  const visualizationMode = widgetVisualizationDraft.mode;
+  const activeRoles = visualizationRoleIds(visualizationMode, widgetVisualizationDraft, widgetQueryDraft);
+  const activeDimensionIds = new Set(activeRoles.dimensionIds);
   const columnOptions = columns.map(column => [column.name, `${column.name} · ${column.type}`]);
   const dimensionColumns = columns.filter(column => comparablePostgresType(column.type));
-  const [dimensions, dimensionRows, addDimension] = queryGroup("Groupings", "Check the columns that define each aggregate result row.", "", () => {});
+  const dimensionTitle = visualizationMode === "table" ? "Table dimensions" : `${visualizationMode === "donut" ? "Donut" : visualizationMode === "bar" ? "Grouped bar" : "Line"} dimension`;
+  const [dimensions, dimensionRows, addDimension] = queryGroup(dimensionTitle, visualizationMode === "table" ? "Choose every grouping column shown by the aggregate table." : "Choose the single grouping column used by this visualization.", "", () => {});
   addDimension.remove();
   const groupingPicker = document.createElement("details");
   groupingPicker.className = "grouping-picker";
   const groupingSummary = document.createElement("summary");
-  groupingSummary.textContent = widgetQueryDraft.dimensions.length ? `${widgetQueryDraft.dimensions.length} grouping column${widgetQueryDraft.dimensions.length === 1 ? "" : "s"} selected` : "Choose grouping columns";
+  const activeDimensionCount = visualizationMode === "table" ? widgetQueryDraft.dimensions.length : activeDimensionIds.size;
+  groupingSummary.textContent = activeDimensionCount ? `${activeDimensionCount} ${visualizationMode === "table" ? "table dimension" : "chart dimension"}${activeDimensionCount === 1 ? "" : "s"} selected` : `Choose ${visualizationMode === "table" ? "table dimensions" : "a chart dimension"}`;
   const groupingOptions = document.createElement("div");
   for (const column of dimensionColumns) {
     const label = document.createElement("label");
     const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.checked = widgetQueryDraft.dimensions.some(item => item.column === column.name);
-    checkbox.disabled = !checkbox.checked && widgetQueryDraft.dimensions.length >= 32;
+    checkbox.type = visualizationMode === "table" ? "checkbox" : "radio";
+    if (checkbox.type === "radio") checkbox.name = `visualization-dimension-${editedWidgetId}`;
+    const existingDimension = widgetQueryDraft.dimensions.find(item => item.column === column.name);
+    checkbox.checked = visualizationMode === "table" ? Boolean(existingDimension) : Boolean(existingDimension && activeDimensionIds.has(existingDimension.id));
+    checkbox.disabled = visualizationMode === "table" && !checkbox.checked && widgetQueryDraft.dimensions.length >= 32;
     checkbox.addEventListener("change", () => {
-      if (checkbox.checked) widgetQueryDraft.dimensions.push({ id: nextQueryItemId("dimension"), label: column.name, column: column.name });
-      else {
-        const removed = widgetQueryDraft.dimensions.find(item => item.column === column.name);
-        widgetQueryDraft.dimensions = widgetQueryDraft.dimensions.filter(item => item !== removed);
-        if (removed) widgetQueryDraft.sort = widgetQueryDraft.sort.filter(sort => sort.targetId !== removed.id);
+      if (visualizationMode === "table") {
+        if (checkbox.checked) widgetQueryDraft.dimensions.push({ id: nextQueryItemId("dimension"), label: column.name, column: column.name });
+        else {
+          const removed = widgetQueryDraft.dimensions.find(item => item.column === column.name);
+          widgetQueryDraft.dimensions = widgetQueryDraft.dimensions.filter(item => item !== removed);
+          if (removed) widgetQueryDraft.sort = widgetQueryDraft.sort.filter(sort => sort.targetId !== removed.id);
+        }
+      } else {
+        let dimension = widgetQueryDraft.dimensions.find(item => item.column === column.name);
+        if (checkbox.checked && !dimension) {
+          dimension = { id: nextQueryItemId("dimension"), label: column.name, column: column.name };
+          widgetQueryDraft.dimensions.push(dimension);
+        }
+        widgetVisualizationDraft.selections[visualizationMode].dimensionId = dimension.id;
       }
       widgetQueryDraft.dimensions.sort((left, right) => columns.findIndex(item => item.name === left.column) - columns.findIndex(item => item.name === right.column));
-      groupingSummary.textContent = widgetQueryDraft.dimensions.length ? `${widgetQueryDraft.dimensions.length} grouping column${widgetQueryDraft.dimensions.length === 1 ? "" : "s"} selected` : "Choose grouping columns";
-      for (const option of groupingOptions.querySelectorAll('input[type="checkbox"]')) option.disabled = !option.checked && widgetQueryDraft.dimensions.length >= 32;
+      renderWidgetQueryDraft();
     });
     const copy = document.createElement("span");
     copy.textContent = column.name;
@@ -650,16 +832,26 @@ function renderWidgetQueryDraft() {
     groupingOptions.append(label);
   }
   groupingPicker.append(groupingSummary, groupingOptions);
-  groupingPicker.addEventListener("toggle", () => { if (!groupingPicker.open) renderWidgetQueryDraft(); });
   dimensionRows.append(groupingPicker);
-  const [measures, measureRows, addMeasure] = queryGroup("Measures", "One or more aggregate values calculated for every grouping.", "+ Measure", () => {
-    widgetQueryDraft.measures.push({ id: nextQueryItemId("measure"), label: "Row count", column: null, aggregation: "count_rows", distinct: false, nullBehavior: "preserve", numberFormat: { style: "integer" } });
+  const measureTitle = visualizationMode === "table" ? "Table measures" : visualizationMode === "kpi" ? "KPI measures" : visualizationMode === "donut" ? "Donut measure" : `${visualizationMode === "bar" ? "Grouped bar" : "Line"} measures`;
+  const measureCopy = visualizationMode === "donut" ? "Configure the single aggregate value used for donut slices." : `Configure the aggregate value${visualizationMode === "table" ? "s shown by the table" : "s used by this visualization"}.`;
+  const [measures, measureRows, addMeasure] = queryGroup(measureTitle, measureCopy, visualizationMode === "donut" ? "+ Replace measure" : "+ Measure", () => {
+    const measure = { id: nextQueryItemId("measure"), label: "Row count", column: null, aggregation: "count_rows", distinct: false, nullBehavior: "preserve", numberFormat: { style: "integer" } };
+    widgetQueryDraft.measures.push(measure);
+    if (visualizationMode === "donut") widgetVisualizationDraft.selections.donut.measureId = measure.id;
+    else if (["kpi", "bar", "line"].includes(visualizationMode)) widgetVisualizationDraft.selections[visualizationMode].measureIds.push(measure.id);
     renderWidgetQueryDraft();
   });
   addMeasure.disabled = widgetQueryDraft.measures.length >= 32;
-  for (const item of widgetQueryDraft.measures) {
-    const [row, remove] = queryRow(item, widgetQueryDraft.measures, removed => { widgetQueryDraft.sort = widgetQueryDraft.sort.filter(sort => sort.targetId !== removed.id); });
-    remove.disabled = widgetQueryDraft.measures.length === 1;
+  const activeMeasureIds = new Set(activeRoles.measureIds);
+  const displayedMeasures = visualizationMode === "table" ? widgetQueryDraft.measures : widgetQueryDraft.measures.filter(item => activeMeasureIds.has(item.id));
+  for (const item of displayedMeasures) {
+    const collection = visualizationMode === "table" ? widgetQueryDraft.measures : displayedMeasures;
+    const [row, remove] = queryRow(item, collection, removed => {
+      if (visualizationMode === "table") widgetQueryDraft.sort = widgetQueryDraft.sort.filter(sort => sort.targetId !== removed.id);
+      else if (visualizationMode !== "donut") widgetVisualizationDraft.selections[visualizationMode].measureIds = widgetVisualizationDraft.selections[visualizationMode].measureIds.filter(id => id !== removed.id);
+    });
+    remove.disabled = displayedMeasures.length === 1;
     const aggregationOptions = [["count_rows", "Count rows"], ["count", "Count column"]];
     if (columns.some(columnItem => sumPostgresType(columnItem.type))) aggregationOptions.push(["sum", "Sum"]);
     if (columns.some(columnItem => averagePostgresType(columnItem.type))) aggregationOptions.push(["average", "Average"]);
@@ -679,12 +871,10 @@ function renderWidgetQueryDraft() {
     if (!zeroAllowed && item.nullBehavior === "zero") item.nullBehavior = "preserve";
     const currency = queryInput(item.numberFormat.currency ?? "USD", value => { item.numberFormat.currency = value.trim().toUpperCase(); });
     currency.maxLength = 3;
-    currency.disabled = item.numberFormat.style !== "currency";
     const fractionDigits = queryInput(item.numberFormat.fractionDigits ?? 2, value => { item.numberFormat.fractionDigits = Number(value); }, "number");
     fractionDigits.min = "0";
     fractionDigits.max = "6";
-    fractionDigits.disabled = !["decimal", "currency", "percent"].includes(item.numberFormat.style);
-    row.append(
+    const measureControls = [
       queryLabel("Label", queryInput(item.label, value => { item.label = value; })),
       queryLabel("Aggregation", querySelect(aggregationOptions, item.aggregation, value => {
         item.aggregation = value;
@@ -702,11 +892,12 @@ function renderWidgetQueryDraft() {
       queryLabel("Number format", querySelect(formatOptions, item.numberFormat.style, value => {
         item.numberFormat = value === "currency" ? { style: value, currency: "USD", fractionDigits: 2 } : ["decimal", "percent"].includes(value) ? { style: value, fractionDigits: 2 } : { style: value };
         renderWidgetQueryDraft();
-      })),
-      queryLabel("Currency", currency),
-      queryLabel("Decimal places", fractionDigits),
-      remove
-    );
+      }))
+    ];
+    if (item.numberFormat.style === "currency") measureControls.push(queryLabel("Currency", currency));
+    if (["decimal", "currency", "percent"].includes(item.numberFormat.style)) measureControls.push(queryLabel("Decimal places", fractionDigits));
+    measureControls.push(remove);
+    row.append(...measureControls);
     measureRows.append(row);
   }
   const totalConditions = widgetQueryDraft.filters.reduce((total, group) => total + group.conditions.length, 0);
@@ -888,8 +1079,18 @@ function renderWidgetQueryDraft() {
   pageSizeRow.className = "table-page-size";
   pageSizeRow.append(queryLabel("Rows per page", querySelect([["10", "10"], ["25", "25"], ["50", "50"], ["100", "100"]], String(widgetTableDraft.pageSize), value => { widgetTableDraft.pageSize = Number(value); })));
   tableRows.append(pageSizeRow);
+  const visualization = editorVisualizationSection();
+  if (["bar", "line", "donut"].includes(visualizationMode)) {
+    markVisualizationRole(dimensions, activeRoles.dimensionIds.length ? "Active dimension" : "Choose a dimension", !activeRoles.dimensionIds.length);
+  }
+  if (visualizationMode !== "table") {
+    const selectedMeasures = activeRoles.measureIds.map(id => widgetQueryDraft.measures.find(item => item.id === id)).filter(Boolean);
+    const invalidMeasures = !selectedMeasures.length || selectedMeasures.some(item => !measureSupportsVisualization(item, columns));
+    markVisualizationRole(measures, invalidMeasures ? "Choose numeric values" : "Active values", invalidMeasures);
+  }
+  const querySections = visualizationMode === "kpi" ? [visualization, measures] : [visualization, dimensions, measures];
   const views = {
-    query: { heading: "Groupings & Measures", copy: "Choose result groupings and aggregate measures.", sections: [dimensions, measures] },
+    query: { heading: "Visualization, Dimensions & Measures", copy: "Each visualization exposes only the dimensions and measures it consumes.", sections: querySections },
     filters: { heading: "Filters", copy: "Build AND conditions inside separate OR groups.", sections: [filters] },
     sort: { heading: "Sort, Columns & Limit", copy: "Control SQL ordering, aggregate table presentation, and bounded result sizes.", sections: [sorting, tablePresentation] }
   };
@@ -899,7 +1100,7 @@ function renderWidgetQueryDraft() {
   elements.widgetQueryFields.replaceChildren(...view.sections);
   elements.widgetQueryLimit.value = widgetQueryDraft.limit;
   elements.widgetQueryLimitField.hidden = widgetEditorSection !== "sort";
-  elements.widgetQueryStatus.textContent = "Name and source save automatically. Query changes remain local until applied.";
+  elements.widgetQueryStatus.textContent = "Name and source save automatically. Query and visualization changes remain local until applied.";
   document.querySelector("#apply-widget-query").disabled = applying;
   if (applying) for (const control of elements.widgetQueryEditor.querySelectorAll("button, input, select, textarea")) control.disabled = true;
 }
@@ -1027,10 +1228,12 @@ function renderRelationDetail(descriptor) {
     const sameSource = JSON.stringify(widget.configuration?.source) === JSON.stringify(source);
     const savedQuery = sameSource ? widget.configuration?.query : null;
     const savedTable = sameSource ? widget.configuration?.table : null;
-    widget.configuration = { source, ...(savedQuery ? { query: savedQuery, ...(savedTable ? { table: savedTable } : {}) } : {}) };
+    const savedVisualization = sameSource ? widget.configuration?.visualization : null;
+    widget.configuration = { source, ...(savedQuery ? { query: savedQuery, ...(savedTable ? { table: savedTable } : {}), ...(savedVisualization ? { visualization: savedVisualization } : {}) } : {}) };
     if (!savedQuery) widget.kind = "placeholder";
     widgetQueryDraft = clone(savedQuery ?? defaultWidgetQuery());
     widgetTableDraft = reconcileTablePresentation(widgetQueryDraft, savedTable);
+    widgetVisualizationDraft = reconcileVisualization(widgetQueryDraft, savedVisualization);
     if (!sameSource) {
       invalidateWidgetRuntime(widget.id);
     }
@@ -1045,6 +1248,7 @@ function renderRelationDetail(descriptor) {
     widget.kind = "placeholder";
     widgetQueryDraft = null;
     widgetTableDraft = null;
+    widgetVisualizationDraft = null;
     invalidateWidgetRuntime(widget.id);
     assignmentStatus.textContent = `Cleared source from ${widget.title}.`;
     markDashboardChanged(true);
@@ -1197,6 +1401,7 @@ async function openWidgetEditor(widgetId) {
   editedWidgetId = widget.id;
   widgetQueryDraft = clone(widget.configuration?.query ?? defaultWidgetQuery());
   widgetTableDraft = reconcileTablePresentation(widgetQueryDraft, widget.configuration?.table);
+  widgetVisualizationDraft = reconcileVisualization(widgetQueryDraft, widget.configuration?.visualization);
   elements.widgetEditorName.disabled = false;
   document.querySelector("#reset-widget-query").disabled = false;
   elements.widgetQueryLimit.disabled = false;
@@ -1271,6 +1476,258 @@ function formatQueryValue(value, format = { style: "auto" }) {
   return new Intl.NumberFormat(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits }).format(numericValue);
 }
 
+function visualizationDataTable(widget, columns, rows) {
+  const details = document.createElement("details");
+  details.className = "visualization-data";
+  const summary = document.createElement("summary");
+  summary.textContent = "View chart data";
+  const scroll = document.createElement("div");
+  scroll.tabIndex = 0;
+  scroll.setAttribute("role", "region");
+  scroll.setAttribute("aria-label", `${widget.title} chart data`);
+  const table = document.createElement("table");
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const column of columns) {
+    const cell = document.createElement("th");
+    cell.textContent = column.label;
+    headRow.append(cell);
+  }
+  head.append(headRow);
+  const body = document.createElement("tbody");
+  for (const values of rows) {
+    const row = document.createElement("tr");
+    for (const column of columns) {
+      const cell = document.createElement("td");
+      cell.textContent = formatQueryValue(values[column.index], column.numberFormat);
+      row.append(cell);
+    }
+    body.append(row);
+  }
+  table.append(head, body);
+  scroll.append(table);
+  details.append(summary, scroll);
+  return details;
+}
+
+function visualizationLineage(result, values, measure = null) {
+  const dimensions = result.columns.filter(column => column.kind === "dimension").map(column => {
+    const value = values[result.columns.indexOf(column)];
+    return { targetId: column.id, column: column.sourceColumn, operator: value === null ? "is_null" : "eq", values: value === null ? [] : [value] };
+  });
+  return { dimensions, ...(measure ? { measure: result.lineage?.measures?.find(item => item.id === measure.id) ?? measure } : {}), filterGroups: result.lineage?.filterGroups ?? [] };
+}
+
+function visualizationGuidance(message) {
+  const guidance = document.createElement("section");
+  guidance.className = "visualization-guidance";
+  const title = document.createElement("strong");
+  title.textContent = "This view needs another role";
+  const copy = document.createElement("p");
+  copy.textContent = message;
+  guidance.append(title, copy);
+  return guidance;
+}
+
+function numericResultValue(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value))) return Number(value);
+  return null;
+}
+
+function selectedResultColumns(result, ids) {
+  return ids.map(id => {
+    const index = result.columns.findIndex(column => column.id === id);
+    return index < 0 ? null : { ...result.columns[index], index };
+  }).filter(Boolean);
+}
+
+function renderKpiVisualization(container, widget, execution, visualization) {
+  if (execution.result.columns.some(column => column.kind === "dimension")) {
+    container.append(visualizationGuidance("KPI groups require an ungrouped result."));
+    return;
+  }
+  const columns = selectedResultColumns(execution.result, visualization.selections.kpi.measureIds);
+  if (!columns.length) {
+    container.append(visualizationGuidance("Select at least one visible measure."));
+    return;
+  }
+  const values = execution.result.rows[0];
+  if (!values) {
+    container.append(visualizationGuidance("The query returned no aggregate row."));
+    return;
+  }
+  const group = document.createElement("div");
+  group.className = "live-kpi-group";
+  for (const column of columns) {
+    const metric = document.createElement("button");
+    metric.type = "button";
+    metric.className = "live-kpi";
+    metric.dataset.inspectMetric = column.label;
+    metric.dataset.drillLineage = JSON.stringify(visualizationLineage(execution.result, values, column));
+    const label = document.createElement("span");
+    label.textContent = column.label;
+    const value = document.createElement("strong");
+    value.textContent = formatQueryValue(values[column.index], column.numberFormat);
+    metric.append(label, value);
+    group.append(metric);
+  }
+  container.append(group, visualizationDataTable(widget, columns, [values]));
+}
+
+function renderBarVisualization(container, widget, execution, visualization) {
+  const selection = visualization.selections.bar;
+  const dimension = selectedResultColumns(execution.result, [selection.dimensionId])[0];
+  const measures = selectedResultColumns(execution.result, selection.measureIds);
+  if (!dimension) {
+    container.append(visualizationGuidance("Grouped bars require one grouping dimension. Add one in the widget editor or select another saved grouping here."));
+    return;
+  }
+  const numeric = measures.every(measure => execution.result.rows.every(row => row[measure.index] === null || numericResultValue(row[measure.index]) !== null));
+  const negative = measures.some(measure => execution.result.rows.some(row => (numericResultValue(row[measure.index]) ?? 0) < 0));
+  if (!measures.length || !numeric || negative) {
+    container.append(visualizationGuidance("Grouped bars require at least one non-negative numeric measure. Negative or non-numeric aggregates remain in the query and table view."));
+    return;
+  }
+  const maximum = Math.max(1, ...execution.result.rows.flatMap(row => measures.map(measure => numericResultValue(row[measure.index]) ?? 0)));
+  const chart = document.createElement("div");
+  chart.className = "live-bar-chart";
+  chart.setAttribute("role", "group");
+  chart.setAttribute("aria-label", `${widget.title}: ${measures.map(item => item.label).join(", ")} by ${dimension.label}`);
+  for (const values of execution.result.rows) {
+    const row = document.createElement("div");
+    row.className = "live-bar-row";
+    const category = document.createElement("span");
+    category.textContent = formatQueryValue(values[dimension.index]);
+    const bars = document.createElement("div");
+    bars.className = "live-bar-series";
+    measures.forEach((measure, seriesIndex) => {
+      const numericValue = numericResultValue(values[measure.index]);
+      const bar = document.createElement("button");
+      bar.type = "button";
+      bar.className = "live-bar-mark";
+      bar.style.setProperty("--bar-size", numericValue === null ? "auto" : `${numericValue / maximum * 100}%`);
+      bar.style.setProperty("--series", seriesIndex);
+      bar.classList.toggle("no-value", numericValue === null);
+      bar.dataset.inspectMetric = measure.label;
+      bar.dataset.drillLineage = JSON.stringify(visualizationLineage(execution.result, values, measure));
+      bar.textContent = `${measure.label}: ${formatQueryValue(values[measure.index], measure.numberFormat)}`;
+      bar.setAttribute("aria-label", `${formatQueryValue(values[dimension.index])}, ${bar.textContent}`);
+      bars.append(bar);
+    });
+    row.append(category, bars);
+    chart.append(row);
+  }
+  container.append(chart, visualizationDataTable(widget, [dimension, ...measures], execution.result.rows));
+}
+
+function renderLineVisualization(container, widget, execution, visualization) {
+  const selection = visualization.selections.line;
+  const dimension = selectedResultColumns(execution.result, [selection.dimensionId])[0];
+  const measures = selectedResultColumns(execution.result, selection.measureIds);
+  if (!dimension) {
+    container.append(visualizationGuidance("Lines require one ordered grouping dimension. Add one in the widget editor or select another saved grouping here."));
+    return;
+  }
+  const numeric = measures.every(measure => execution.result.rows.every(row => row[measure.index] === null || numericResultValue(row[measure.index]) !== null));
+  if (!measures.length || !numeric) {
+    container.append(visualizationGuidance("Lines require at least one numeric measure. Non-numeric aggregates remain available in the query and table view."));
+    return;
+  }
+  const values = execution.result.rows.flatMap(row => measures.map(measure => numericResultValue(row[measure.index])).filter(value => value !== null));
+  const minimum = Math.min(...values, 0);
+  const maximum = Math.max(...values, 1);
+  const range = maximum - minimum || 1;
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.classList.add("live-line-chart");
+  svg.setAttribute("viewBox", "0 0 700 260");
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", `${widget.title}: ${measures.map(item => item.label).join(", ")} by ${dimension.label}`);
+  measures.forEach((measure, seriesIndex) => {
+    let segment = [];
+    const appendSegment = () => {
+      if (segment.length > 1) {
+        const line = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+        line.setAttribute("points", segment.join(" "));
+        line.style.setProperty("--series", seriesIndex);
+        svg.append(line);
+      }
+      segment = [];
+    };
+    execution.result.rows.forEach((row, index) => {
+      const numericValue = numericResultValue(row[measure.index]);
+      if (numericValue === null) {
+        appendSegment();
+        return;
+      }
+      const x = execution.result.rows.length <= 1 ? 350 : 24 + index / (execution.result.rows.length - 1) * 652;
+      const y = 230 - (numericValue - minimum) / range * 200;
+      segment.push(`${x},${y}`);
+      const point = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+      point.setAttribute("cx", String(x));
+      point.setAttribute("cy", String(y));
+      point.setAttribute("r", "4");
+      point.setAttribute("tabindex", "0");
+      point.setAttribute("role", "button");
+      point.setAttribute("aria-label", `${measure.label}: ${formatQueryValue(row[measure.index], measure.numberFormat)} for ${formatQueryValue(row[dimension.index])}`);
+      point.style.setProperty("--series", seriesIndex);
+      point.dataset.inspectMetric = measure.label;
+      point.dataset.drillLineage = JSON.stringify(visualizationLineage(execution.result, row, measure));
+      svg.append(point);
+    });
+    appendSegment();
+  });
+  container.append(svg, visualizationDataTable(widget, [dimension, ...measures], execution.result.rows));
+}
+
+function renderDonutVisualization(container, widget, execution, visualization) {
+  const selection = visualization.selections.donut;
+  const dimension = selectedResultColumns(execution.result, [selection.dimensionId])[0];
+  const measure = selectedResultColumns(execution.result, [selection.measureId])[0];
+  if (!dimension) {
+    container.append(visualizationGuidance("Donut charts require one grouping dimension. Add one in the widget editor or select another saved grouping here."));
+    return;
+  }
+  const values = measure ? execution.result.rows.map(row => numericResultValue(row[measure.index])) : [];
+  if (!measure || values.some(value => value === null || value < 0) || !values.some(value => value > 0)) {
+    container.append(visualizationGuidance("Donut charts require exactly one non-negative numeric measure with a positive total. Other measures remain retained for every other mode."));
+    return;
+  }
+  const total = values.reduce((sum, value) => sum + value, 0);
+  let offset = 0;
+  const stops = values.map((value, index) => {
+    const start = offset;
+    offset += value / total * 100;
+    return `var(--series-${index % 6}) ${start}% ${offset}%`;
+  });
+  const layout = document.createElement("div");
+  layout.className = "live-donut-layout";
+  const donut = document.createElement("div");
+  donut.className = "live-donut";
+  donut.style.background = `radial-gradient(circle at center, #141a21 0 52%, transparent 53%), conic-gradient(${stops.join(", ")})`;
+  donut.setAttribute("role", "img");
+  donut.setAttribute("aria-label", `${widget.title}: ${measure.label} by ${dimension.label}`);
+  const totalValue = document.createElement("strong");
+  totalValue.textContent = formatQueryValue(total, measure.numberFormat);
+  const totalLabel = document.createElement("span");
+  totalLabel.textContent = measure.label;
+  donut.append(totalValue, totalLabel);
+  const legend = document.createElement("div");
+  legend.className = "live-donut-legend";
+  execution.result.rows.forEach((row, index) => {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.style.setProperty("--series", index);
+    item.style.borderLeftColor = `var(--series-${index % 6})`;
+    item.dataset.inspectMetric = measure.label;
+    item.dataset.drillLineage = JSON.stringify(visualizationLineage(execution.result, row, measure));
+    item.textContent = `${formatQueryValue(row[dimension.index])} ${formatQueryValue(row[measure.index], measure.numberFormat)}`;
+    legend.append(item);
+  });
+  layout.append(donut, legend);
+  container.append(layout, visualizationDataTable(widget, [dimension, measure], execution.result.rows));
+}
+
 function renderQueryResult(card, widget) {
   if (!widget.configuration?.query) return;
   const focusedBody = card.querySelector(":scope > .focused-widget-body");
@@ -1279,6 +1736,8 @@ function renderQueryResult(card, widget) {
   else while (card.querySelector(":scope > header")?.nextSibling) card.querySelector(":scope > header").nextSibling.remove();
   card.classList.add("query-result-widget");
   if (widget.kind === "aggregate_report") card.classList.add("aggregate-report-widget");
+  const visualization = reconcileVisualization(widget.configuration.query, widget.configuration.visualization);
+  card.dataset.visualizationMode = visualization.mode;
   const execution = widgetQueryResults.get(widget.id);
   if (!execution || execution.state !== "ready") {
     const status = document.createElement("p");
@@ -1287,6 +1746,10 @@ function renderQueryResult(card, widget) {
     container.append(status);
     return;
   }
+  if (visualization.mode === "kpi") return renderKpiVisualization(container, widget, execution, visualization);
+  if (visualization.mode === "bar") return renderBarVisualization(container, widget, execution, visualization);
+  if (visualization.mode === "line") return renderLineVisualization(container, widget, execution, visualization);
+  if (visualization.mode === "donut") return renderDonutVisualization(container, widget, execution, visualization);
   const presentation = reconcileTablePresentation(widget.configuration.query, widget.configuration.table);
   const resultColumns = new Map(execution.result.columns.map((column, index) => [column.id, { column, index }]));
   const visibleColumns = presentation.columns.map(item => ({ presentation: item, ...resultColumns.get(item.targetId) })).filter(item => item.column && !item.presentation.hidden);
@@ -1398,11 +1861,12 @@ function renderQueryResult(card, widget) {
   container.append(scroll, summary);
 }
 
-async function executeWidgetQuery(widget, query = widget.configuration?.query, { render = true, publish = true } = {}) {
+async function executeWidgetQuery(widget, query = widget.configuration?.query, { render = true, publish = true, visualization = widget.configuration?.visualization } = {}) {
   if (!widget.configuration?.source || !query) return null;
   const dashboardId = activeDashboard?.id;
   const sourceSnapshot = clone(widget.configuration.source);
   const querySnapshot = clone(query);
+  const executionQuerySnapshot = queryForVisualization(querySnapshot, visualization);
   const executionToken = {};
   const tokenKey = `${widget.id}:${publish ? "publish" : "draft"}`;
   widgetQueryExecutionTokens.set(tokenKey, executionToken);
@@ -1410,7 +1874,7 @@ async function executeWidgetQuery(widget, query = widget.configuration?.query, {
   if (publish && render) renderDashboard();
   try {
     const result = await postgres.request(`/api/postgres/profiles/${encodeURIComponent(widget.configuration.source.profileId)}/relation/query`, {
-      method: "POST", body: JSON.stringify({ source: sourceSnapshot, query: querySnapshot })
+      method: "POST", body: JSON.stringify({ source: sourceSnapshot, query: executionQuerySnapshot })
     });
     const currentWidget = activeDashboard?.dashboard.widgets.find(item => item.id === widget.id);
     const sourceCurrent = currentWidget === widget && JSON.stringify(widget.configuration?.source) === JSON.stringify(sourceSnapshot);
@@ -1731,7 +2195,9 @@ async function flushPendingSave() {
 }
 
 function setEditMode(enabled, flush = true) {
-  editMode = Boolean(enabled && activeDashboard && !dashboardConflict);
+  const nextEditMode = Boolean(enabled && activeDashboard && !dashboardConflict);
+  const modeChanged = editMode !== nextEditMode;
+  editMode = nextEditMode;
   document.body.classList.toggle("dashboard-edit-mode", editMode);
   elements.canvas.classList.toggle("editing", editMode);
   elements.editModeButton.textContent = editMode ? "Finish editing" : "Edit dashboard";
@@ -1744,6 +2210,7 @@ function setEditMode(enabled, flush = true) {
     const widget = activeDashboard?.dashboard.widgets.find(item => item.id === card.dataset.widgetId);
     if (widget) card.setAttribute("aria-label", editMode ? `Move ${widget.title}` : `Open ${widget.title}`);
   }
+  if (modeChanged) renderDashboard();
   if (!editMode && flush) flushPendingSave().catch(() => {});
 }
 
@@ -2237,6 +2704,7 @@ elements.widgetEditor.addEventListener("close", () => {
   editedWidgetId = null;
   widgetQueryDraft = null;
   widgetTableDraft = null;
+  widgetVisualizationDraft = null;
   relationInspectionGeneration += 1;
   relationCatalogGeneration += 1;
 });
@@ -2265,6 +2733,7 @@ document.querySelector("#reset-widget-query").addEventListener("click", () => {
   const widget = activeDashboard?.dashboard.widgets.find(item => item.id === editedWidgetId);
   widgetQueryDraft = clone(widget?.configuration?.query ?? defaultWidgetQuery());
   widgetTableDraft = reconcileTablePresentation(widgetQueryDraft, widget?.configuration?.table);
+  widgetVisualizationDraft = reconcileVisualization(widgetQueryDraft, widget?.configuration?.visualization);
   renderWidgetQueryDraft();
 });
 document.querySelector("#apply-widget-query").addEventListener("click", async event => {
@@ -2276,6 +2745,7 @@ document.querySelector("#apply-widget-query").addEventListener("click", async ev
   const source = clone(widget.configuration.source);
   const draft = clone(widgetQueryDraft);
   const tableDraft = reconcileTablePresentation(draft, clone(widgetTableDraft));
+  const visualizationDraft = reconcileVisualization(draft, clone(widgetVisualizationDraft));
   const applySession = { dashboardId, widgetId, generation: widgetEditorGeneration };
   widgetQueryApplySession = applySession;
   renderWidgetQueryDraft();
@@ -2283,14 +2753,15 @@ document.querySelector("#apply-widget-query").addEventListener("click", async ev
   let finalMessage = "";
   let queryExecuted = false;
   try {
-    const result = await executeWidgetQuery(widget, draft, { publish: false });
+    const result = await executeWidgetQuery(widget, draft, { publish: false, visualization: visualizationDraft });
     queryExecuted = true;
     const currentWidget = activeDashboard?.dashboard.widgets.find(item => item.id === widgetId);
     if (activeDashboard?.id !== dashboardId || editedWidgetId !== widgetId || widgetEditorGeneration !== applySession.generation || currentWidget !== widget || sourceVerification.get(widgetId)?.state !== "verified" || JSON.stringify(widget.configuration.source) !== JSON.stringify(source)) return;
     widget.kind = "aggregate_report";
-    widget.configuration = { source, query: draft, table: tableDraft };
+    widget.configuration = { source, query: draft, table: tableDraft, visualization: visualizationDraft };
     widgetQueryDraft = clone(draft);
     widgetTableDraft = clone(tableDraft);
+    widgetVisualizationDraft = clone(visualizationDraft);
     widgetQueryExecutionTokens.set(`${widget.id}:publish`, {});
     widgetTablePages.set(widget.id, 0);
     widgetQueryResults.set(widget.id, { state: "ready", result });
@@ -2358,7 +2829,7 @@ function finishWidgetDrag() {
 }
 elements.canvas.addEventListener("dragstart", event => {
   const card = event.target.closest(".widget");
-  if (!editMode || !card || event.target.closest("button")) return event.preventDefault();
+  if (!editMode || !card || event.target.closest("button, input, select, textarea, summary, details")) return event.preventDefault();
   const rect = card.getBoundingClientRect();
   draggedWidgetId = card.dataset.widgetId;
   dragCenterOffset = { x: rect.left + rect.width / 2 - event.clientX, y: rect.top + rect.height / 2 - event.clientY };
