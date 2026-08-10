@@ -180,6 +180,7 @@ esac
         html = (WEB / "index.html").read_text(encoding="utf-8")
         css = (WEB / "styles.css").read_text(encoding="utf-8")
         javascript = (WEB / "app.js").read_text(encoding="utf-8")
+        postgres_client = (ROOT / "src/schemii/shared_web/postgres-client.js").read_text(encoding="utf-8")
 
         resource_urls = re.findall(r'''(?:src|href)=["']([^"']+)["']''', html)
         self.assertTrue(resource_urls)
@@ -192,7 +193,7 @@ esac
         literal_fetches = re.findall(r'''fetch\(\s*(["'`])([^"'`]+)\1''', javascript)
         self.assertTrue(literal_fetches)
         self.assertTrue(all(target.startswith("/api/") for _, target in literal_fetches))
-        self.assertIn('!path.startsWith("/api/postgres/")', javascript)
+        self.assertIn('!path.startsWith("/api/postgres/")', postgres_client)
 
     def test_storage_paths_are_absolute_and_independent_of_launch_directory(self):
         with patch.dict(
@@ -246,6 +247,17 @@ esac
 
         self.assertIn("restart: on-failure", compose)
         self.assertNotIn("restart: unless-stopped", compose)
+
+    def test_schemer_is_a_separate_service_with_shared_profiles(self):
+        compose = (ROOT / "compose.schemer.yaml").read_text(encoding="utf-8")
+        dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        package = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+        self.assertIn("target: schemer-runtime", compose)
+        self.assertIn('127.0.0.1:${SCHEMER_HOST_PORT:-8081}:8081', compose)
+        self.assertIn("schemii-config:/data/config", compose)
+        self.assertIn("FROM runtime AS schemer-runtime", dockerfile)
+        self.assertIn('schemer = "schemii.schemer_server:main"', package)
 
     def test_container_runtime_is_cross_platform_and_self_checking(self):
         compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")

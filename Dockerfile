@@ -30,4 +30,13 @@ RUN useradd --create-home --uid 10001 schemii \
 USER schemii
 EXPOSE 8080
 
+FROM runtime AS schemer-runtime
+ENV SCHEMER_HOST=0.0.0.0 \
+    SCHEMER_PORT=8081 \
+    SCHEMER_CONFIG_DIR=/data/config \
+    SCHEMER_BEHIND_LOOPBACK_PROXY=1
+EXPOSE 8081
+CMD ["schemer"]
+
+FROM runtime AS schemii-runtime
 CMD ["schemii"]

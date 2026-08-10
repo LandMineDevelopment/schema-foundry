@@ -103,6 +103,16 @@ Use the folder button to switch designs, the disk button to save, and the Postgr
 
 Deleting an example remains respected across restarts. Use **? > Restore examples** to reinstall missing examples. Existing saved designs and layouts are not replaced. In included-database mode, restoration can refresh the reserved tutorial connection password from current `.env` settings, so re-preview any open migration afterward.
 
+### Schemer Dashboard Preview
+
+Schemer is an initial analytics workspace served separately from Schemii while reusing the same Python `PostgresService`, PostgreSQL HTTP routes, browser API client, profile store, and visual theme.
+
+```bash
+docker compose -f compose.yaml -f compose.postgres.yaml -f compose.schemer.yaml up --build -d
+```
+
+Open Schemii at `http://127.0.0.1:8080/` and Schemer at `http://127.0.0.1:8081/`. Saved PostgreSQL profiles are shared through the existing `schemii-config` volume; passwords remain server-side and are never returned to either browser.
+
 ## Everyday Use
 
 Rerun the same launcher command to start or update an installation. The launcher reuses its saved designs, profiles, database, AI credentials, and chats.

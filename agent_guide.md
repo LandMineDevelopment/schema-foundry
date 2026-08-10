@@ -2,7 +2,7 @@
 
 ## Scope
 
-This repository is a standalone PostgreSQL schema design, introspection, migration-preview, and migration-apply application. Keep changes focused on generic PostgreSQL behavior, saved schema records, browser layout, tests, and project documentation.
+This repository contains Schemii, a PostgreSQL schema design and migration application, and Schemer, its dashboarding sibling. Keep shared PostgreSQL profiles, HTTP routes, browser clients, and visual tokens in common modules; do not copy connection implementations between the apps.
 
 For installation, launch modes, Docker networking, persistent-volume safety, and setup verification, follow `docs/AI_AGENT_SETUP.md`.
 
@@ -65,6 +65,7 @@ Run at least:
 python3 -m unittest discover -s tests
 python3 -m compileall -q src
 node --check src/schemii/web/app.js
+node --check src/schemii/schemer_web/app.js
 for test_file in tests/test_*.js; do node "$test_file" || exit 1; done
 git diff --check
 ```

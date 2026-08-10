@@ -5,28 +5,21 @@ import os
 import re
 import secrets
 import threading
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .examples import ExampleInstaller, installer_from_environment
+from .http_common import CONTENT_SECURITY_POLICY, MAX_BODY_SIZE, is_local_request as _is_local_request, make_local_app_handler
 from .opencode_service import OpenCodeService, OpenCodeServiceError
+from .postgres_http import PROFILE_PATH, PostgresHttpMixin
 from .postgres_service import PostgresService, PostgresServiceError
 from .schema_store import SchemaStore, SchemaStoreError
 
 
-MAX_BODY_SIZE = 5 * 1024 * 1024
 AI_MAX_BODY_SIZE = 128 * 1024
 AI_CONTEXT_SIZE = 64 * 1024
-CONTENT_SECURITY_POLICY = (
-    "default-src 'self'; connect-src 'self'; img-src 'self' data:; "
-    "style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; "
-    "frame-ancestors 'none'; form-action 'self'"
-)
-PROFILE_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})(?:/(namespaces|fingerprint|test|introspect|preview))?$")
 APPLY_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/plans/([A-Za-z0-9_-]+)/apply$")
-DATA_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/data$")
-SQL_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/sql$")
 AI_AUTH_PATH = re.compile(r"^/api/ai/auth/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})$")
 AI_SESSION_PATH = re.compile(r"^/api/ai/sessions/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})(?:/(messages))?$")
 AI_ACTIVITY_PATH = re.compile(r"^/api/ai/sessions/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})/activity$")
@@ -262,15 +255,6 @@ def _paths() -> tuple[Path, Path, Path]:
     return web_dir, config_dir, schema_dir
 
 
-def _is_local_request(client_host: str, host_header: str, origin: str | None, behind_loopback_proxy: bool) -> bool:
-    host = host_header.rsplit(":", 1)[0].strip("[]").lower()
-    return (
-        (behind_loopback_proxy or client_host in {"127.0.0.1", "::1"})
-        and host in {"localhost", "127.0.0.1", "::1"}
-        and (not origin or urlparse(origin).hostname in {"localhost", "127.0.0.1", "::1"})
-    )
-
-
 def make_handler(
     web_dir: Path,
     service: PostgresService,
@@ -282,39 +266,11 @@ def make_handler(
     example_installer: ExampleInstaller | None = None,
     behind_loopback_proxy: bool = False,
 ):
-    class SchemiiHandler(SimpleHTTPRequestHandler):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, directory=str(web_dir), **kwargs)
+    base_handler = make_local_app_handler(
+        web_dir, service, session_token, server_id=server_id, behind_loopback_proxy=behind_loopback_proxy,
+    )
 
-        def end_headers(self):
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Security-Policy", CONTENT_SECURITY_POLICY)
-            super().end_headers()
-
-        def send_json(self, status: int, payload):
-            content = json.dumps(payload).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(content)))
-            self.end_headers()
-            self.wfile.write(content)
-
-        def _is_local_request(self) -> bool:
-            return _is_local_request(
-                self.client_address[0],
-                self.headers.get("Host", ""),
-                self.headers.get("Origin"),
-                behind_loopback_proxy,
-            )
-
-        def _authorize_postgres(self) -> bool:
-            if not self._is_local_request():
-                self.send_json(403, {"error": {"code": "forbidden", "message": "PostgreSQL API requires a local origin"}})
-                return False
-            if self.headers.get("X-Schemii-Token") != session_token:
-                self.send_json(403, {"error": {"code": "invalid_session", "message": "PostgreSQL session token is missing or invalid"}})
-                return False
-            return True
+    class SchemiiHandler(PostgresHttpMixin, base_handler):
 
         def _authorize_ai(self) -> bool:
             if not self._is_local_request():
@@ -324,49 +280,6 @@ def make_handler(
                 self.send_json(403, {"error": {"code": "invalid_session", "message": "AI session token is missing or invalid"}})
                 return False
             return True
-
-        def _authorize_shutdown(self) -> bool:
-            if not self._is_local_request():
-                self.send_json(403, {"error": {"code": "forbidden", "message": "Shutdown requires a local origin"}})
-                return False
-            if self.headers.get("X-Schemii-Token") != session_token:
-                self.send_json(403, {"error": {"code": "invalid_session", "message": "Shutdown session token is missing or invalid"}})
-                return False
-            return True
-
-        def _read_json(self, maximum: int = MAX_BODY_SIZE):
-            try:
-                length = int(self.headers.get("Content-Length", "0"))
-            except ValueError as exc:
-                raise ValueError("Invalid content length") from exc
-            if length <= 0 or length > maximum:
-                raise ValueError("Request body is empty or too large")
-            if self.headers.get_content_type() != "application/json":
-                raise TypeError("Content-Type must be application/json")
-            try:
-                return json.loads(self.rfile.read(length))
-            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                raise ValueError("Invalid JSON") from exc
-
-        def _body_or_error(self, maximum: int = MAX_BODY_SIZE):
-            try:
-                body = self._read_json(maximum)
-            except TypeError as error:
-                self.send_json(415, {"error": {"code": "invalid_content_type", "message": str(error)}})
-                return None
-            except ValueError as error:
-                self.send_json(400, {"error": {"code": "invalid_request", "message": str(error)}})
-                return None
-            if not isinstance(body, dict):
-                self.send_json(400, {"error": {"code": "invalid_request", "message": "Request body must be an object"}})
-                return None
-            return body
-
-        def _service_call(self, callback, status: int = 200):
-            try:
-                self.send_json(status, callback())
-            except PostgresServiceError as error:
-                self.send_json(error.status, error.to_dict())
 
         def _schema_call(self, callback):
             try:
@@ -392,10 +305,8 @@ def make_handler(
         def do_GET(self):
             parsed = urlparse(self.path)
             path = parsed.path
-            if path == "/api/session":
-                if not self._is_local_request():
-                    return self.send_json(403, {"error": {"code": "forbidden", "message": "Session requires a local origin"}})
-                return self.send_json(200, {"token": session_token, "serverId": server_id})
+            if self._handle_common_get(path) or self._handle_postgres_get(parsed):
+                return
             if path == "/api/schemas":
                 return self._schema_call(lambda: {"schemas": store.list()})
             if path == "/api/ai/status":
@@ -424,10 +335,6 @@ def make_handler(
                 if ai_service is None:
                     return self.send_json(503, {"error": {"code": "ai_disabled", "message": "Embedded AI is not configured"}})
                 return self._ai_activity_stream(ai_service, activity_match.group(1))
-            if path == "/api/postgres/profiles":
-                if self._authorize_postgres():
-                    return self._service_call(lambda: {"profiles": service.list_profiles()})
-                return
             if path == "/api/postgres/history":
                 if not self._authorize_postgres():
                     return
@@ -437,27 +344,6 @@ def make_handler(
                 except ValueError:
                     return self.send_json(400, {"error": {"code": "validation_error", "message": "History limit must be an integer"}})
                 return self._service_call(lambda: {"history": service.list_history(query.get("profileId", [None])[0], limit)})
-            data_match = DATA_PATH.fullmatch(path)
-            if data_match:
-                if not self._authorize_postgres():
-                    return
-                query = parse_qs(parsed.query)
-                try:
-                    offset = int(query.get("offset", ["0"])[0])
-                    limit = int(query.get("limit", ["50"])[0])
-                except ValueError:
-                    return self.send_json(400, {"error": {"code": "validation_error", "message": "offset and limit must be integers"}})
-                return self._service_call(lambda: service.preview_table_data(
-                    data_match.group(1), query.get("namespace", [None])[0], query.get("table", [None])[0], offset, limit
-                ))
-            profile_match = PROFILE_PATH.fullmatch(path)
-            if profile_match and profile_match.group(2) in {"namespaces", "fingerprint"}:
-                if not self._authorize_postgres():
-                    return
-                if profile_match.group(2) == "namespaces":
-                    return self._service_call(lambda: {"namespaces": service.list_namespaces(profile_match.group(1))})
-                namespace = parse_qs(parsed.query).get("namespace", [None])[0]
-                return self._service_call(lambda: service.catalog_status(profile_match.group(1), namespace))
             if path == "/":
                 self.path = "/index.html"
             return super().do_GET()
@@ -526,32 +412,20 @@ def make_handler(
                 if not session_match or session_match.group(2) != "messages":
                     return self.send_json(404, {"error": "Unknown API path"})
                 return self._ai_message(ai_service, session_match.group(1), body)
-            if path == "/api/postgres/profiles":
-                if not self._authorize_postgres():
-                    return
-                body = self._body_or_error()
-                if body is not None:
-                    return self._service_call(lambda: service.save_profile(None, body), 201)
+            if self._handle_postgres_post(path):
                 return
-            sql_match = SQL_PATH.fullmatch(path)
             apply_match = APPLY_PATH.fullmatch(path)
             profile_match = PROFILE_PATH.fullmatch(path)
-            if not sql_match and not apply_match and not (profile_match and profile_match.group(2) in {"test", "introspect", "preview"}):
+            if not apply_match and not (profile_match and profile_match.group(2) == "preview"):
                 return self.send_json(404, {"error": "Unknown API path"})
             if not self._authorize_postgres():
                 return
             body = self._body_or_error(20 * 1024 * 1024 if profile_match and profile_match.group(2) == "preview" else MAX_BODY_SIZE)
             if body is None:
                 return
-            if sql_match:
-                return self._service_call(lambda: service.execute_read_only_sql(sql_match.group(1), body.get("namespace"), body.get("sql")))
             if apply_match:
                 return self._service_call(lambda: service.apply(apply_match.group(1), apply_match.group(2), body.get("confirmDestructive", False)))
             profile_id, action = profile_match.groups()
-            if action == "test":
-                return self._service_call(lambda: service.test_profile(profile_id))
-            if action == "introspect":
-                return self._service_call(lambda: service.introspect(profile_id, body.get("namespace")))
             return self._service_call(lambda: service.preview(
                 profile_id, body.get("namespace"), body.get("schema"), body.get("allowDestructive", False)
             ))
@@ -598,13 +472,7 @@ def make_handler(
 
         def do_PUT(self):
             path = urlparse(self.path).path
-            profile_match = PROFILE_PATH.fullmatch(path)
-            if profile_match and profile_match.group(2) is None:
-                if not self._authorize_postgres():
-                    return
-                body = self._body_or_error()
-                if body is not None:
-                    return self._service_call(lambda: service.save_profile(profile_match.group(1), body))
+            if self._handle_postgres_put(path):
                 return
             schema_id = self._schema_id()
             if schema_id is None:
@@ -630,10 +498,7 @@ def make_handler(
                 if ai_auth_match:
                     return self._ai_call(lambda: ai_service.delete_api_key(ai_auth_match.group(1)))
                 return self._ai_call(lambda: ai_service.delete_session(ai_session_match.group(1)))
-            profile_match = PROFILE_PATH.fullmatch(path)
-            if profile_match and profile_match.group(2) is None:
-                if self._authorize_postgres():
-                    return self._service_call(lambda: service.delete_profile(profile_match.group(1)))
+            if self._handle_postgres_delete(path):
                 return
             schema_id = self._schema_id()
             if schema_id is None:

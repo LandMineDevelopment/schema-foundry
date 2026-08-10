@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0d1117" />
+    <title>Schemer</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="topbar-leading"><div class="brand"><div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div><div><strong>Schemer</strong><span class="brand-subtitle">PostgreSQL dashboard studio</span></div></div></div>
+        <div class="dashboard-title"><span class="status-dot" aria-hidden="true"></span><strong>Mercury overview</strong><span>Draft dashboard</span></div>
+        <div class="top-actions"><button class="button button-ghost" id="connections-button" type="button">Data source</button><button class="button button-primary" id="add-widget-button" type="button">+ Widget</button></div>
+      </header>
+
+      <main class="schemer-layout">
+        <aside class="dashboard-sidebar">
+          <div class="sidebar-heading"><span>Dashboards</span><button type="button" aria-label="Create dashboard">+</button></div>
+          <button class="dashboard-link active" type="button"><i></i><span>Mercury overview<small>6 widgets</small></span></button>
+          <button class="dashboard-link" type="button"><i></i><span>Sales pulse<small>5 widgets</small></span></button>
+          <button class="dashboard-link" type="button"><i></i><span>Inventory health<small>4 widgets</small></span></button>
+          <div class="sidebar-section"><span>Workspace</span><button type="button">Shared with me <b>2</b></button><button type="button">Archived</button></div>
+          <div class="source-summary"><span class="source-light"></span><div><strong id="source-name">Preview dataset</strong><small id="source-detail">Connect PostgreSQL to use live data</small></div></div>
+        </aside>
+
+        <section class="dashboard-workspace">
+          <header class="dashboard-toolbar">
+            <div><span class="eyebrow">Analytics workspace</span><h1>Mercury Books</h1><p>Orders, customer activity, and inventory at a glance.</p></div>
+            <div class="toolbar-actions"><select id="namespace-select" aria-label="PostgreSQL namespace" disabled><option value="">No namespace</option></select><button class="button button-ghost" id="refresh-button" type="button">Refresh</button><button class="button button-ghost date-range" type="button">Jun 1 - Jun 30</button></div>
+          </header>
+
+          <div class="dashboard-canvas" id="dashboard-canvas">
+            <article class="widget metric-widget" draggable="true"><header><span>Gross revenue</span><button type="button" aria-label="Widget menu">...</button></header><strong>$42,860</strong><p><b>+12.4%</b> from previous period</p><div class="metric-sparkline"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></article>
+            <article class="widget metric-widget" draggable="true"><header><span>Orders</span><button type="button" aria-label="Widget menu">...</button></header><strong>500</strong><p><b>+8.1%</b> across 150 customers</p><div class="metric-sparkline blue"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></article>
+            <article class="widget metric-widget" draggable="true"><header><span>Average order</span><button type="button" aria-label="Widget menu">...</button></header><strong>$85.72</strong><p><em>-2.3%</em> from previous period</p><div class="metric-sparkline violet"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></article>
+            <article class="widget chart-widget wide" draggable="true">
+              <header><div><span>Revenue trend</span><small>Daily gross sales</small></div><button type="button" aria-label="Widget menu">...</button></header>
+              <div class="chart-area"><div class="chart-axis"><span>$4k</span><span>$3k</span><span>$2k</span><span>$1k</span><span>$0</span></div><svg viewBox="0 0 700 210" preserveAspectRatio="none" aria-label="Preview revenue line chart" role="img"><defs><linearGradient id="area-fill" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#f4b942" stop-opacity=".28"/><stop offset="1" stop-color="#f4b942" stop-opacity="0"/></linearGradient></defs><path class="grid" d="M0 20H700M0 65H700M0 110H700M0 155H700M0 200H700"/><path class="area" d="M0 173 C35 165 55 105 90 123 S145 144 180 102 S238 45 270 72 S323 122 360 91 S415 132 450 88 S510 42 545 64 S605 113 640 54 S678 45 700 27 L700 210 L0 210Z"/><path class="line" d="M0 173 C35 165 55 105 90 123 S145 144 180 102 S238 45 270 72 S323 122 360 91 S415 132 450 88 S510 42 545 64 S605 113 640 54 S678 45 700 27"/></svg><div class="chart-labels"><span>Jun 1</span><span>Jun 8</span><span>Jun 15</span><span>Jun 22</span><span>Jun 30</span></div></div>
+            </article>
+            <article class="widget status-widget" draggable="true"><header><div><span>Order status</span><small>Current distribution</small></div><button type="button" aria-label="Widget menu">...</button></header><div class="donut-wrap"><div class="donut"><strong>500</strong><span>orders</span></div></div><div class="status-legend"><span><i class="paid"></i>Paid <b>100</b></span><span><i class="shipped"></i>Shipped <b>100</b></span><span><i class="packed"></i>Packed <b>100</b></span><span><i class="pending"></i>Pending <b>100</b></span><span><i class="cancelled"></i>Cancelled <b>100</b></span></div></article>
+            <article class="widget table-widget full" draggable="true">
+              <header><div><span>Recent orders</span><small>Latest activity across all customers</small></div><button type="button" aria-label="Widget menu">...</button></header>
+              <div class="table-scroll"><table><thead><tr><th>Order</th><th>Customer</th><th>Status</th><th>Items</th><th>Total</th><th>Ordered</th></tr></thead><tbody><tr><td>#500</td><td>Harper Jones</td><td><span class="badge pending">Pending</span></td><td>2</td><td>$91.40</td><td>Jun 10, 20:00</td></tr><tr><td>#499</td><td>Casey Khan</td><td><span class="badge cancelled">Cancelled</span></td><td>4</td><td>$148.75</td><td>Jun 10, 05:00</td></tr><tr><td>#498</td><td>Morgan Foster</td><td><span class="badge shipped">Shipped</span></td><td>3</td><td>$76.20</td><td>Jun 9, 14:00</td></tr><tr><td>#497</td><td>Blair Evans</td><td><span class="badge packed">Packed</span></td><td>2</td><td>$63.95</td><td>Jun 8, 23:00</td></tr></tbody></table></div>
+            </article>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="connections-dialog">
+      <div class="dialog-head"><div><span class="eyebrow">Shared PostgreSQL service</span><h2>Data sources</h2><p>Connections saved here are immediately available in Schemii.</p></div><button id="close-connections" type="button" aria-label="Close">x</button></div>
+      <div class="connection-layout">
+        <section><div class="section-title"><span>Saved connections</span><button class="button button-ghost" id="new-connection" type="button">+ New</button></div><div class="connection-list" id="connection-list"></div></section>
+        <form id="connection-form">
+          <input id="profile-id" type="hidden" />
+          <label>Name<input id="profile-name" required maxlength="128" value="Analytics database" /></label>
+          <div class="field-pair"><label>Host<input id="profile-host" required value="127.0.0.1" /></label><label>Port<input id="profile-port" required type="number" min="1" max="65535" value="5432" /></label></div>
+          <div class="field-pair"><label>Database<input id="profile-database" required /></label><label>User<input id="profile-user" required /></label></div>
+          <label>Password<input id="profile-password" type="password" autocomplete="new-password" /><small>Leave empty while editing to keep the stored password.</small></label>
+          <div class="field-pair"><label>SSL mode<select id="profile-sslmode"><option>prefer</option><option>require</option><option>verify-ca</option><option>verify-full</option><option>disable</option><option>allow</option></select></label><label>Timeout<input id="profile-timeout" type="number" min="1" max="120" value="10" /></label></div>
+          <p class="form-status" id="connection-status"></p><div class="form-actions"><button class="button button-ghost" id="test-connection" type="button">Test</button><button class="button button-primary" type="submit">Save connection</button></div>
+        </form>
+      </div>
+    </dialog>
+
+    <script src="/shared/postgres-client.js"></script><script src="app.js"></script>
+  </body>
+</html>

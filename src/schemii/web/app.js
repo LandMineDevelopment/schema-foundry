@@ -915,36 +915,13 @@ function saveRecordFile(record) {
   return saveQueue;
 }
 
-async function postgresRequest(path, options = {}, retry = true) {
-  if (typeof path !== "string" || !path.startsWith("/api/postgres/")) {
-    throw new Error("PostgreSQL requests must use the local Schemii API");
-  }
-  if (!postgresState.token) {
-    const sessionResponse = await fetch("/api/session");
-    const session = await sessionResponse.json().catch(() => ({}));
-    if (!sessionResponse.ok || !session.token) throw new Error(session.error?.message || "Could not start a PostgreSQL session");
-    postgresState.token = session.token;
-  }
-  const response = await fetch(path, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      "X-Schemii-Token": postgresState.token,
-      ...(options.headers || {})
-    }
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    if (payload.error?.code === "invalid_session" && retry) {
-      postgresState.token = null;
-      return postgresRequest(path, options, false);
-    }
-    const error = new Error(payload.error?.message || payload.error || "PostgreSQL request failed");
-    error.code = payload.error?.code;
-    error.status = response.status;
-    throw error;
-  }
-  return payload;
+const sharedPostgresClient = window.SchemiiShared.createPostgresClient({
+  getToken: () => postgresState.token,
+  setToken: token => { postgresState.token = token; }
+});
+
+function postgresRequest(path, options = {}) {
+  return sharedPostgresClient.request(path, options);
 }
 
 async function restoreExamples(retry = true) {

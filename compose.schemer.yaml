@@ -1,0 +1,29 @@
+services:
+  schemer:
+    build:
+      context: .
+      target: schemer-runtime
+    image: ${SCHEMER_IMAGE:-schemer:local}
+    ports:
+      - "127.0.0.1:${SCHEMER_HOST_PORT:-8081}:8081"
+    environment:
+      SCHEMER_HOST: 0.0.0.0
+      SCHEMER_PORT: 8081
+      SCHEMER_CONFIG_DIR: /data/config
+      SCHEMER_BEHIND_LOOPBACK_PROXY: 1
+    volumes:
+      - schemii-config:/data/config
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/', timeout=2).read(1)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s
+    restart: on-failure

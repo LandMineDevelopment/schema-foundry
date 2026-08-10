@@ -17,11 +17,17 @@ import secrets
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from datetime import date, datetime, time as datetime_time, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
 from uuid import UUID
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - direct Windows use has one process per profile store.
+    fcntl = None
 
 PROFILE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 NAME_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,128}$")
@@ -342,6 +348,7 @@ class PostgresService:
             raise ValueError("statement_timeout_ms must be a positive integer")
         self.config_dir = Path(config_dir)
         self.profile_path = self.config_dir / "postgres_profiles.json"
+        self.profile_lock_path = self.config_dir / ".postgres_profiles.lock"
         self.history_path = self.config_dir / "migration_history.json"
         self._connect_factory = connect_factory
         self._plan_ttl = plan_ttl_seconds
@@ -373,6 +380,19 @@ class PostgresService:
             if not isinstance(data, dict) or not isinstance(data.get("profiles", {}), dict):
                 raise PostgresServiceError(500, "profile_store_error", "Profile store is invalid")
             return data.get("profiles", {})
+
+    @contextmanager
+    def _profile_store_lock(self):
+        descriptor = os.open(self.profile_lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            os.fchmod(descriptor, 0o600)
+            if fcntl is not None:
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
 
     def _write_profiles(self, profiles: dict[str, dict[str, Any]]) -> None:
         self._ensure_config_dir()
@@ -456,16 +476,17 @@ class PostgresService:
 
     def save_profile(self, profile_id: str | None, payload: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
-            profiles = self._read_profiles()
-            if profile_id is None:
-                profile_id = "pg_" + secrets.token_hex(8)
-                existing = None
-            else:
-                profile_id = self._validate_profile_id(profile_id)
-                existing = profiles.get(profile_id)
-            profile = self._validated_profile(payload, existing)
-            profiles[profile_id] = profile
-            self._write_profiles(profiles)
+            with self._profile_store_lock():
+                profiles = self._read_profiles()
+                if profile_id is None:
+                    profile_id = "pg_" + secrets.token_hex(8)
+                    existing = None
+                else:
+                    profile_id = self._validate_profile_id(profile_id)
+                    existing = profiles.get(profile_id)
+                profile = self._validated_profile(payload, existing)
+                profiles[profile_id] = profile
+                self._write_profiles(profiles)
             if existing is not None:
                 for plan_key in [key for key, plan in self._plans.items() if plan["profileId"] == profile_id]:
                     del self._plans[plan_key]
@@ -474,11 +495,12 @@ class PostgresService:
     def delete_profile(self, profile_id: str) -> dict[str, str]:
         profile_id = self._validate_profile_id(profile_id)
         with self._lock:
-            profiles = self._read_profiles()
-            if profile_id not in profiles:
-                raise NotFoundError("Profile was not found")
-            del profiles[profile_id]
-            self._write_profiles(profiles)
+            with self._profile_store_lock():
+                profiles = self._read_profiles()
+                if profile_id not in profiles:
+                    raise NotFoundError("Profile was not found")
+                del profiles[profile_id]
+                self._write_profiles(profiles)
             for plan_id in [key for key, plan in self._plans.items() if plan["profileId"] == profile_id]:
                 del self._plans[plan_id]
         return {"deleted": profile_id}

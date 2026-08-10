@@ -182,6 +182,17 @@ class PostgresServiceTests(unittest.TestCase):
             service.preview_table_data("local", "public", "missing")
         self.assertEqual(error.exception.code, "not_found")
 
+    def test_separate_service_instances_share_profile_updates(self):
+        first = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: Connection())
+        second = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: Connection())
+        first.save_profile("first", PROFILE)
+        second.save_profile("second", {**PROFILE, "name": "Reporting", "dbname": "reports"})
+
+        profiles = {profile["id"]: profile for profile in first.list_profiles()}
+        self.assertEqual(set(profiles), {"local", "first", "second"})
+        self.assertNotIn("password", profiles["first"])
+        self.assertTrue((Path(self.temporary_directory.name) / ".postgres_profiles.lock").is_file())
+
     def test_read_only_sql_limits_rows_and_serializes_values(self):
         query = "SELECT id, amount FROM payments"
         rows = [(UUID(int=index + 1), Decimal(f"{index}.25")) for index in range(501)]

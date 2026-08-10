@@ -3,7 +3,7 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 
 const source = fs.readFileSync("src/schemii/web/app.js", "utf8");
-const styles = fs.readFileSync("src/schemii/web/styles.css", "utf8");
+const styles = fs.readFileSync("src/schemii/shared_web/theme.css", "utf8") + fs.readFileSync("src/schemii/web/styles.css", "utf8");
 const html = fs.readFileSync("src/schemii/web/index.html", "utf8");
 const helperStart = source.indexOf("function isAdditiveTableSelection(event)");
 const helperEnd = source.indexOf("function selectTable(", helperStart);
