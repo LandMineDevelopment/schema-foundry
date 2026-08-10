@@ -7,20 +7,23 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+from .dashboard_store import DashboardStore, DashboardStoreError
 from .http_common import make_local_app_handler
 from .postgres_http import PostgresHttpMixin
 from .postgres_service import PostgresService
 
 
-def _paths() -> tuple[Path, Path]:
+def _paths() -> tuple[Path, Path, Path]:
     web_dir = Path(__file__).resolve().parent / "schemer_web"
     configured = os.environ.get("SCHEMER_CONFIG_DIR") or os.environ.get("SCHEMII_CONFIG_DIR", "~/.config/schemii")
-    return web_dir, Path(configured).expanduser().resolve()
+    dashboard_dir = os.environ.get("SCHEMER_DASHBOARD_DIR", "~/.local/share/schemer/dashboards")
+    return web_dir, Path(configured).expanduser().resolve(), Path(dashboard_dir).expanduser().resolve()
 
 
 def make_handler(
     web_dir: Path,
     service: PostgresService,
+    dashboard_store: DashboardStore,
     session_token: str,
     *,
     server_id: str,
@@ -31,11 +34,37 @@ def make_handler(
     )
 
     class SchemerHandler(PostgresHttpMixin, base_handler):
+        def _authorize_dashboard(self) -> bool:
+            return self._authorize_local_api("Dashboard API", "Dashboard session token is missing or invalid")
+
+        def _dashboard_call(self, callback, status: int = 200):
+            try:
+                self.send_json(status, callback())
+            except DashboardStoreError as error:
+                self.send_json(error.status, error.payload)
+
+        @staticmethod
+        def _dashboard_id(path: str) -> str | None:
+            prefix = "/api/dashboards/"
+            return path[len(prefix):] if path.startswith(prefix) else None
+
         def do_GET(self):
             parsed = urlparse(self.path)
-            if self._handle_common_get(parsed.path) or self._handle_postgres_get(parsed):
+            path = parsed.path
+            if self._handle_common_get(path):
                 return
-            if parsed.path == "/":
+            if path == "/api/dashboards":
+                if self._authorize_dashboard():
+                    self._dashboard_call(lambda: {"dashboards": dashboard_store.list()})
+                return
+            dashboard_id = self._dashboard_id(path)
+            if dashboard_id is not None:
+                if self._authorize_dashboard():
+                    self._dashboard_call(lambda: dashboard_store.get(dashboard_id))
+                return
+            if self._handle_postgres_get(parsed):
+                return
+            if path == "/":
                 self.path = "/index.html"
             return super().do_GET()
 
@@ -54,23 +83,45 @@ def make_handler(
                 self.wfile.flush()
                 shutdown_thread.start()
                 return
+            if path == "/api/dashboards":
+                if not self._authorize_dashboard():
+                    return
+                body = self._body_or_error()
+                if body is not None:
+                    self._dashboard_call(lambda: dashboard_store.create(body.get("title"), body.get("sourceId")), 201)
+                return
             if self._handle_postgres_post(path):
                 return
             self.send_json(404, {"error": "Unknown API path"})
 
         def do_PUT(self):
-            if not self._handle_postgres_put(urlparse(self.path).path):
+            path = urlparse(self.path).path
+            dashboard_id = self._dashboard_id(path)
+            if dashboard_id is not None:
+                if not self._authorize_dashboard():
+                    return
+                body = self._body_or_error()
+                if body is not None:
+                    self._dashboard_call(lambda: dashboard_store.save(dashboard_id, body))
+                return
+            if not self._handle_postgres_put(path):
                 self.send_json(404, {"error": "Unknown API path"})
 
         def do_DELETE(self):
-            if not self._handle_postgres_delete(urlparse(self.path).path):
+            path = urlparse(self.path).path
+            dashboard_id = self._dashboard_id(path)
+            if dashboard_id is not None:
+                if self._authorize_dashboard():
+                    self._dashboard_call(lambda: dashboard_store.delete(dashboard_id))
+                return
+            if not self._handle_postgres_delete(path):
                 self.send_json(404, {"error": "Unknown API path"})
 
     return SchemerHandler
 
 
 def main() -> None:
-    web_dir, config_dir = _paths()
+    web_dir, config_dir, dashboard_dir = _paths()
     host = os.environ.get("SCHEMER_HOST", "127.0.0.1")
     proxy_setting = os.environ.get("SCHEMER_BEHIND_LOOPBACK_PROXY", "0")
     if proxy_setting not in {"0", "1"}:
@@ -84,9 +135,12 @@ def main() -> None:
     if not web_dir.is_dir():
         raise SystemExit(f"Static web directory does not exist: {web_dir}")
     service = PostgresService(config_dir)
+    dashboard_store = DashboardStore(dashboard_dir)
+    dashboard_store.initialize_once()
     handler = make_handler(
         web_dir,
         service,
+        dashboard_store,
         secrets.token_urlsafe(32),
         server_id=secrets.token_urlsafe(18),
         behind_loopback_proxy=proxy_setting == "1",

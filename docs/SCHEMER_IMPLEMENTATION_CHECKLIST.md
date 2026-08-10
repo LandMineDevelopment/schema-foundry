@@ -40,15 +40,15 @@ This file is the durable implementation sequence for Schemer. Use it after a los
 
 Approval required before implementation.
 
-- [ ] Define a versioned dashboard record with stable dashboard and widget IDs.
-- [ ] Store dashboard title, source references, slicers, widgets, layout, and viewport independently from PostgreSQL profiles.
-- [ ] Add atomic, owner-only dashboard file persistence and validation.
-- [ ] Add dashboard create, open, rename, duplicate, archive, and delete workflows.
-- [ ] Add explicit View and Edit modes.
-- [ ] Allow drag and resize only in Edit mode.
-- [ ] Preserve desktop and mobile layout behavior without silently normalizing positions.
-- [ ] Add stale-write protection for concurrent browser tabs.
-- [ ] Add persistence, malformed-record, stale-write, and layout-preservation tests.
+- [x] Define a versioned dashboard record with stable dashboard and widget IDs.
+- [x] Store dashboard title, source references, slicers, widgets, layout, and viewport independently from PostgreSQL profiles.
+- [x] Add atomic, owner-only dashboard file persistence and validation.
+- [x] Add dashboard create, open, rename, duplicate, archive, and delete workflows.
+- [x] Add explicit View and Edit modes.
+- [x] Render widgets as uniform responsive tiles; reserve create, animated center-overlap swap, keyboard reorder, duplicate, and delete actions for Edit mode.
+- [x] Expand tiles from their dashboard position using their own header; split 50/50 into a filtered population table only after metric-level selection.
+- [x] Add stale-write protection for concurrent browser tabs.
+- [x] Add persistence, malformed-record, stale-write, and layout-preservation tests.
 
 Acceptance criteria: dashboard layout and metadata survive restart; View mode cannot accidentally mutate layout; stale tabs cannot overwrite current records.
 
@@ -56,8 +56,8 @@ Acceptance criteria: dashboard layout and metadata survive restart; View mode ca
 
 Approval required before implementation.
 
-- [ ] Add a relation browser for an exact profile, database, namespace, and table/view/materialized-view identity.
-- [ ] Return relation kind, columns, PostgreSQL types, nullability, and stable catalog fingerprint.
+- [x] Add a relation browser for an exact profile, database, namespace, and table/view/materialized-view identity.
+- [x] Return relation kind, columns, PostgreSQL types, nullability, and stable catalog fingerprint.
 - [ ] Enforce exactly one source relation per widget.
 - [ ] Reject hidden joins, cross-relation column references, and stale relation fingerprints.
 - [ ] Suggest likely dimension, measure, date, and identifier columns from PostgreSQL types without silently choosing them.

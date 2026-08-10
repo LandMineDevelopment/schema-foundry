@@ -256,7 +256,10 @@ esac
         self.assertIn("target: schemer-runtime", compose)
         self.assertIn('127.0.0.1:${SCHEMER_HOST_PORT:-8081}:8081', compose)
         self.assertIn("schemii-config:/data/config", compose)
+        self.assertIn("schemer-dashboards:/data/dashboards", compose)
+        self.assertIn("SCHEMER_DASHBOARD_DIR: /data/dashboards", compose)
         self.assertIn("FROM runtime AS schemer-runtime", dockerfile)
+        self.assertIn("/data/config /data/schemas /data/dashboards", dockerfile)
         self.assertIn('schemer = "schemii.schemer_server:main"', package)
 
     def test_container_runtime_is_cross_platform_and_self_checking(self):

@@ -657,6 +657,103 @@ class PostgresService:
         finally:
             self._close(connection)
 
+    def list_relations(self, profile_id: str, database: str, namespace: str) -> dict[str, Any]:
+        database = self._validate_database(database)
+        namespace = self._validate_namespace(namespace)
+        connection = self._connect(profile_id)
+        try:
+            self._execute_statement(connection, "SET TRANSACTION READ ONLY")
+            current = self._execute_rows(connection, "SELECT current_database() AS database")[0]["database"]
+            if current != database:
+                raise PostgresServiceError(409, "database_changed", "The connected PostgreSQL database does not match the requested database")
+            rows = self._execute_rows(connection, """
+                SELECT c.relname AS relation_name,
+                       CASE WHEN c.relkind IN ('r', 'p') THEN 'table'
+                            WHEN c.relkind = 'v' THEN 'view'
+                            ELSE 'materialized_view' END AS relation_kind
+                FROM pg_catalog.pg_class c
+                JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = %s AND c.relkind IN ('r', 'p', 'v', 'm')
+                ORDER BY relation_kind, c.relname
+            """, (namespace,))
+            return {
+                "profileId": profile_id,
+                "database": current,
+                "namespace": namespace,
+                "relations": [{"name": row["relation_name"], "kind": row["relation_kind"]} for row in rows],
+            }
+        except PostgresServiceError:
+            raise
+        except Exception as exc:
+            raise PostgresServiceError(502, "introspection_failed", "PostgreSQL relations could not be read") from exc
+        finally:
+            self._close(connection)
+
+    def inspect_relation(self, profile_id: str, database: str, namespace: str, relation: str) -> dict[str, Any]:
+        database = self._validate_database(database)
+        namespace = self._validate_namespace(namespace)
+        relation = self._validate_relation_name(relation)
+        connection = self._connect(profile_id)
+        try:
+            self._execute_statement(connection, "SET TRANSACTION READ ONLY")
+            current = self._execute_rows(connection, "SELECT current_database() AS database")[0]["database"]
+            if current != database:
+                raise PostgresServiceError(409, "database_changed", "The connected PostgreSQL database does not match the requested database")
+            relation_rows = self._execute_rows(connection, """
+                SELECT c.relkind AS catalog_kind,
+                       CASE WHEN c.relkind IN ('r', 'p') THEN 'table'
+                            WHEN c.relkind = 'v' THEN 'view'
+                            ELSE 'materialized_view' END AS relation_kind,
+                       CASE WHEN c.relkind IN ('v', 'm') THEN pg_catalog.pg_get_viewdef(c.oid, true) END AS view_definition
+                FROM pg_catalog.pg_class c
+                JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = %s AND c.relname = %s AND c.relkind IN ('r', 'p', 'v', 'm')
+            """, (namespace, relation))
+            if not relation_rows:
+                raise NotFoundError(f"Relation {namespace}.{relation} was not found")
+            relation_row = relation_rows[0]
+            column_rows = self._execute_rows(connection, """
+                SELECT a.attname AS column_name,
+                       pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
+                       NOT a.attnotnull AS nullable,
+                       a.attnum AS ordinal
+                FROM pg_catalog.pg_class c
+                JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                JOIN pg_catalog.pg_attribute a
+                  ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+                WHERE n.nspname = %s AND c.relname = %s AND c.relkind IN ('r', 'p', 'v', 'm')
+                ORDER BY a.attnum
+            """, (namespace, relation))
+            columns = [
+                {
+                    "name": row["column_name"],
+                    "type": row["data_type"],
+                    "nullable": bool(row["nullable"]),
+                    "ordinal": int(row["ordinal"]),
+                }
+                for row in column_rows
+            ]
+            descriptor = {
+                "profileId": profile_id,
+                "database": current,
+                "namespace": namespace,
+                "relation": relation,
+                "kind": relation_row["relation_kind"],
+                "columns": columns,
+            }
+            descriptor["fingerprint"] = canonical_fingerprint({
+                **descriptor,
+                "catalogKind": relation_row["catalog_kind"],
+                "viewDefinition": relation_row.get("view_definition"),
+            })
+            return descriptor
+        except PostgresServiceError:
+            raise
+        except Exception as exc:
+            raise PostgresServiceError(502, "introspection_failed", "PostgreSQL relation metadata could not be read") from exc
+        finally:
+            self._close(connection)
+
     def preview_table_data(
         self,
         profile_id: str,
@@ -795,6 +892,15 @@ class PostgresService:
     # ---- introspection --------------------------------------------------
 
     @staticmethod
+    def _validate_database(database: Any) -> str:
+        if (
+            not isinstance(database, str) or not NAME_RE.fullmatch(database)
+            or len(database.encode("utf-8")) > 63
+        ):
+            raise ValidationError("database must be a valid PostgreSQL name up to 63 bytes")
+        return database
+
+    @staticmethod
     def _validate_namespace(namespace: Any) -> str:
         if (
             not isinstance(namespace, str) or not NAME_RE.fullmatch(namespace)
@@ -809,7 +915,7 @@ class PostgresService:
             not isinstance(table_name, str) or not NAME_RE.fullmatch(table_name)
             or len(table_name.encode("utf-8")) > 63
         ):
-            raise ValidationError("table must be a valid PostgreSQL name up to 63 bytes")
+            raise ValidationError("relation must be a valid PostgreSQL name up to 63 bytes")
         return table_name
 
     def introspect(self, profile_id: str, namespace: str) -> dict[str, Any]:

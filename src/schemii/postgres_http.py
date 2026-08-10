@@ -4,7 +4,7 @@ import re
 from urllib.parse import parse_qs
 
 
-PROFILE_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})(?:/(namespaces|fingerprint|test|introspect|preview))?$")
+PROFILE_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})(?:/(namespaces|relations|relation|fingerprint|test|introspect|preview))?$")
 DATA_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/data$")
 SQL_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/sql$")
 
@@ -34,11 +34,22 @@ class PostgresHttpMixin:
             ))
             return True
         profile_match = PROFILE_PATH.fullmatch(path)
-        if profile_match and profile_match.group(2) in {"namespaces", "fingerprint"}:
+        if profile_match and profile_match.group(2) in {"namespaces", "relations", "relation", "fingerprint"}:
             if not self._authorize_postgres():
                 return True
             if profile_match.group(2) == "namespaces":
                 self._service_call(lambda: {"namespaces": self.service.list_namespaces(profile_match.group(1))})
+            elif profile_match.group(2) == "relations":
+                query = parse_qs(parsed.query)
+                self._service_call(lambda: self.service.list_relations(
+                    profile_match.group(1), query.get("database", [None])[0], query.get("namespace", [None])[0]
+                ))
+            elif profile_match.group(2) == "relation":
+                query = parse_qs(parsed.query)
+                self._service_call(lambda: self.service.inspect_relation(
+                    profile_match.group(1), query.get("database", [None])[0], query.get("namespace", [None])[0],
+                    query.get("relation", [None])[0]
+                ))
             else:
                 namespace = parse_qs(parsed.query).get("namespace", [None])[0]
                 self._service_call(lambda: self.service.catalog_status(profile_match.group(1), namespace))

@@ -171,6 +171,74 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertEqual(connection.executed[0][0], "SET TRANSACTION READ ONLY")
         self.assertTrue(connection.closed)
 
+    def test_relation_catalog_verifies_database_and_lists_supported_kinds(self):
+        connection = Connection(responses={
+            "SELECT current_database() AS database": [{"database": "demo"}],
+            "c.relname AS relation_name": [
+                {"relation_name": "orders", "relation_kind": "table"},
+                {"relation_name": "order_summary", "relation_kind": "view"},
+                {"relation_name": "daily_sales", "relation_kind": "materialized_view"},
+            ],
+        })
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connection)
+        result = service.list_relations("local", "demo", "public")
+        self.assertEqual(result["profileId"], "local")
+        self.assertEqual(result["database"], "demo")
+        self.assertEqual(result["namespace"], "public")
+        self.assertEqual([item["kind"] for item in result["relations"]], ["table", "view", "materialized_view"])
+        catalog_query = next(sql for sql, _ in connection.executed if "c.relname AS relation_name" in sql)
+        self.assertIn("c.relkind IN ('r', 'p', 'v', 'm')", catalog_query)
+        self.assertEqual(connection.executed[0][0], "SET TRANSACTION READ ONLY")
+        self.assertTrue(connection.closed)
+
+    def test_relation_catalog_rejects_unverified_database(self):
+        connection = Connection(responses={"SELECT current_database() AS database": [{"database": "other"}]})
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connection)
+        with self.assertRaises(PostgresServiceError) as error:
+            service.list_relations("local", "demo", "public")
+        self.assertEqual(error.exception.status, 409)
+        self.assertEqual(error.exception.code, "database_changed")
+        self.assertFalse(any("c.relname AS relation_name" in sql for sql, _ in connection.executed))
+        self.assertTrue(connection.closed)
+
+    def test_relation_inspection_returns_ordered_columns_and_stable_fingerprint(self):
+        responses = {
+            "SELECT current_database() AS database": [{"database": "demo"}],
+            "c.relkind AS catalog_kind": [{"catalog_kind": "v", "relation_kind": "view", "view_definition": "SELECT id, total FROM orders"}],
+            "a.attname AS column_name": [
+                {"column_name": "id", "data_type": "bigint", "nullable": False, "ordinal": 1},
+                {"column_name": "total", "data_type": "numeric(12,2)", "nullable": True, "ordinal": 2},
+            ],
+        }
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: Connection(responses=responses))
+        first = service.inspect_relation("local", "demo", "reporting", "order_summary")
+        second = service.inspect_relation("local", "demo", "reporting", "order_summary")
+        self.assertEqual(first["kind"], "view")
+        self.assertEqual(first["columns"], [
+            {"name": "id", "type": "bigint", "nullable": False, "ordinal": 1},
+            {"name": "total", "type": "numeric(12,2)", "nullable": True, "ordinal": 2},
+        ])
+        self.assertEqual(len(first["fingerprint"]), 64)
+        self.assertEqual(first["fingerprint"], second["fingerprint"])
+
+        changed = {**responses, "a.attname AS column_name": [
+            responses["a.attname AS column_name"][0],
+            {"column_name": "total", "data_type": "numeric(12,2)", "nullable": False, "ordinal": 2},
+        ]}
+        changed_service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: Connection(responses=changed))
+        self.assertNotEqual(first["fingerprint"], changed_service.inspect_relation("local", "demo", "reporting", "order_summary")["fingerprint"])
+
+    def test_relation_inspection_rejects_missing_relation(self):
+        connection = Connection(responses={
+            "SELECT current_database() AS database": [{"database": "demo"}],
+            "c.relkind AS catalog_kind": [],
+        })
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connection)
+        with self.assertRaises(PostgresServiceError) as error:
+            service.inspect_relation("local", "demo", "public", "missing")
+        self.assertEqual(error.exception.code, "not_found")
+        self.assertFalse(any("a.attname AS column_name" in sql for sql, _ in connection.executed))
+
     def test_table_data_preview_validates_page_and_missing_table(self):
         with self.assertRaises(ValidationError):
             self.service.preview_table_data("local", "public", "events", limit=51)

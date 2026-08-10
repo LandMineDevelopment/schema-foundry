@@ -49,6 +49,14 @@ class FakePostgresService:
         self.calls.append(("list_namespaces", profile_id))
         return ["public"]
 
+    def list_relations(self, profile_id, database, namespace):
+        self.calls.append(("list_relations", profile_id, database, namespace))
+        return {"profileId": profile_id, "database": database, "namespace": namespace, "relations": []}
+
+    def inspect_relation(self, profile_id, database, namespace, relation):
+        self.calls.append(("inspect_relation", profile_id, database, namespace, relation))
+        return {"profileId": profile_id, "database": database, "namespace": namespace, "relation": relation, "kind": "table", "columns": [], "fingerprint": "live"}
+
     def catalog_status(self, profile_id, namespace):
         self.calls.append(("catalog_status", profile_id, namespace))
         return {"profileId": profile_id, "namespace": namespace, "fingerprint": "live"}
@@ -281,6 +289,15 @@ class ServerTests(unittest.TestCase):
         self.assertIn(("list_namespaces", "local"), self.service.calls)
         self.assertIn(("catalog_status", "local", "public"), self.service.calls)
         self.assertIn(("list_history", "local", 25), self.service.calls)
+
+        relation_path = "/api/postgres/profiles/local/relations?database=demo&namespace=public"
+        self.assertEqual(self.request(relation_path)[0], 403)
+        self.assertEqual(self.request(relation_path, authorized=True)[0], 200)
+        self.assertIn(("list_relations", "local", "demo", "public"), self.service.calls)
+        inspect_path = "/api/postgres/profiles/local/relation?database=demo&namespace=public&relation=events"
+        self.assertEqual(self.request(inspect_path)[0], 403)
+        self.assertEqual(self.request(inspect_path, authorized=True)[0], 200)
+        self.assertIn(("inspect_relation", "local", "demo", "public", "events"), self.service.calls)
 
     def test_test_introspect_preview_and_apply_routes_forward_contracts(self):
         schema = {"projectName": "demo.public", "tables": [], "relationships": [], "functions": []}

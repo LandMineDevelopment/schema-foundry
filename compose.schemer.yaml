@@ -10,9 +10,11 @@ services:
       SCHEMER_HOST: 0.0.0.0
       SCHEMER_PORT: 8081
       SCHEMER_CONFIG_DIR: /data/config
+      SCHEMER_DASHBOARD_DIR: /data/dashboards
       SCHEMER_BEHIND_LOOPBACK_PROXY: 1
     volumes:
       - schemii-config:/data/config
+      - schemer-dashboards:/data/dashboards
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777
@@ -27,3 +29,6 @@ services:
       retries: 30
       start_period: 3s
     restart: on-failure
+
+volumes:
+  schemer-dashboards:

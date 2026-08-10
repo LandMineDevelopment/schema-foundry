@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from schemii.postgres_http import PostgresHttpMixin
+from schemii.dashboard_store import DashboardStore
 from schemii.schemer_server import ThreadingHTTPServer, make_handler
 
 
@@ -39,6 +40,21 @@ class FakePostgresService:
     def list_namespaces(self, profile_id):
         self.calls.append(("list_namespaces", profile_id))
         return ["bookstore", "public"]
+
+    def list_relations(self, profile_id, database, namespace):
+        self.calls.append(("list_relations", profile_id, database, namespace))
+        return {
+            "profileId": profile_id, "database": database, "namespace": namespace,
+            "relations": [{"name": "orders", "kind": "table"}],
+        }
+
+    def inspect_relation(self, profile_id, database, namespace, relation):
+        self.calls.append(("inspect_relation", profile_id, database, namespace, relation))
+        return {
+            "profileId": profile_id, "database": database, "namespace": namespace, "relation": relation,
+            "kind": "table", "columns": [{"name": "id", "type": "bigint", "nullable": False, "ordinal": 1}],
+            "fingerprint": "catalog-fingerprint",
+        }
 
     def catalog_status(self, profile_id, namespace):
         self.calls.append(("catalog_status", profile_id, namespace))
@@ -70,9 +86,12 @@ class SchemerServerTests(unittest.TestCase):
     def setUp(self):
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.service = FakePostgresService()
+        self.dashboard_store = DashboardStore(Path(self.temporary_directory.name) / "dashboards")
+        self.dashboard_store.initialize_once()
         handler = make_handler(
             ROOT / "src" / "schemii" / "schemer_web",
             self.service,
+            self.dashboard_store,
             "session-token",
             server_id="schemer-server",
         )
@@ -122,8 +141,18 @@ class SchemerServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["profiles"][0]["id"], "shared")
         self.assertEqual(self.request("/api/postgres/profiles/shared/namespaces", authorized=True)[0], 200)
+        relation_path = "/api/postgres/profiles/shared/relations?database=schemii&namespace=bookstore"
+        status, body, _ = self.request(relation_path, authorized=True)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["relations"][0], {"name": "orders", "kind": "table"})
+        inspect_path = "/api/postgres/profiles/shared/relation?database=schemii&namespace=bookstore&relation=orders"
+        status, body, _ = self.request(inspect_path, authorized=True)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["columns"][0]["type"], "bigint")
         self.assertEqual(self.request("/api/postgres/profiles/shared/test", "POST", {}, True)[0], 200)
         self.assertIn(("list_namespaces", "shared"), self.service.calls)
+        self.assertIn(("list_relations", "shared", "schemii", "bookstore"), self.service.calls)
+        self.assertIn(("inspect_relation", "shared", "schemii", "bookstore", "orders"), self.service.calls)
         self.assertIn(("test_profile", "shared"), self.service.calls)
 
     def test_profile_writes_use_shared_router_and_redact_password(self):
@@ -135,6 +164,23 @@ class SchemerServerTests(unittest.TestCase):
         self.assertEqual(status, 201)
         self.assertNotIn("password", json.loads(body))
         self.assertEqual(self.service.calls[-1], ("save_profile", None))
+
+    def test_dashboard_routes_require_session_and_reject_stale_updates(self):
+        self.assertEqual(self.request("/api/dashboards")[0], 403)
+        status, body, _ = self.request("/api/dashboards", authorized=True)
+        self.assertEqual(status, 200)
+        record = json.loads(body)["dashboards"][0]
+        record["dashboard"]["title"] = "Updated dashboard"
+        status, body, _ = self.request(f"/api/dashboards/{record['id']}", "PUT", record, True)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["revision"], record["revision"] + 1)
+        self.assertEqual(self.request(f"/api/dashboards/{record['id']}", "PUT", record, True)[0], 409)
+
+        status, body, _ = self.request("/api/dashboards", "POST", {"title": "New dashboard"}, True)
+        self.assertEqual(status, 201)
+        created = json.loads(body)
+        self.assertEqual(created["dashboard"]["widgets"], [])
+        self.assertEqual(self.request(f"/api/dashboards/{created['id']}", "DELETE", authorized=True)[0], 200)
 
 
 if __name__ == "__main__":

@@ -92,22 +92,19 @@ def make_local_app_handler(
             )
 
         def _authorize_postgres(self) -> bool:
+            return self._authorize_local_api("PostgreSQL API", "PostgreSQL session token is missing or invalid")
+
+        def _authorize_local_api(self, scope: str, invalid_session_message: str) -> bool:
             if not self._is_local_request():
-                self.send_json(403, {"error": {"code": "forbidden", "message": "PostgreSQL API requires a local origin"}})
+                self.send_json(403, {"error": {"code": "forbidden", "message": f"{scope} requires a local origin"}})
                 return False
             if self.headers.get("X-Schemii-Token") != session_token:
-                self.send_json(403, {"error": {"code": "invalid_session", "message": "PostgreSQL session token is missing or invalid"}})
+                self.send_json(403, {"error": {"code": "invalid_session", "message": invalid_session_message}})
                 return False
             return True
 
         def _authorize_shutdown(self) -> bool:
-            if not self._is_local_request():
-                self.send_json(403, {"error": {"code": "forbidden", "message": "Shutdown requires a local origin"}})
-                return False
-            if self.headers.get("X-Schemii-Token") != session_token:
-                self.send_json(403, {"error": {"code": "invalid_session", "message": "Shutdown session token is missing or invalid"}})
-                return False
-            return True
+            return self._authorize_local_api("Shutdown", "Shutdown session token is missing or invalid")
 
         def _read_json(self, maximum: int = MAX_BODY_SIZE):
             try:

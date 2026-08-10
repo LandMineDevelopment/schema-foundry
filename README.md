@@ -103,15 +103,19 @@ Use the folder button to switch designs, the disk button to save, and the Postgr
 
 Deleting an example remains respected across restarts. Use **? > Restore examples** to reinstall missing examples. Existing saved designs and layouts are not replaced. In included-database mode, restoration can refresh the reserved tutorial connection password from current `.env` settings, so re-preview any open migration afterward.
 
-### Schemer Dashboard Preview
+### Schemer Dashboard Workspace
 
-Schemer is an initial analytics workspace served separately from Schemii while reusing the same Python `PostgresService`, PostgreSQL HTTP routes, browser API client, profile store, and visual theme.
+Schemer is an analytics workspace served separately from Schemii while reusing the same Python `PostgresService`, PostgreSQL HTTP routes, browser API client, profile store, and visual theme. Dashboard widgets render as uniform responsive tiles. Clicking a tile expands it from its dashboard position into an app-wide detail view using the widget's own header. Expanded KPI bars show their date buckets and values. Activating a number, bar, series, status value, or table row creates a 50/50 split with explicit applied filters and the matching population table. `View SQL` is available on both widgets and population inspectors; static preview results state that no SQL ran rather than presenting a fabricated query. Edit mode supports persisted, animated drag-and-drop swaps when the dragged widget center overlaps another widget, keyboard-accessible earlier/later movement, widget creation, duplication, and deletion without freeform positioning or resizing.
+
+The Data sources dialog includes a read-only relation browser for tables, views, and materialized views. Schemer sends the exact profile, configured database, and namespace to the shared PostgreSQL catalog route; the server verifies `current_database()` before returning relation identities and rejects mismatches with `database_changed`. Selecting a relation loads its normalized kind, ordered columns, PostgreSQL display types, nullability, and full deterministic catalog fingerprint. Fingerprints include semantic relation metadata and view definitions while excluding transient OIDs and timestamps.
 
 ```bash
 docker compose -f compose.yaml -f compose.postgres.yaml -f compose.schemer.yaml up --build -d
 ```
 
-Open Schemii at `http://127.0.0.1:8080/` and Schemer at `http://127.0.0.1:8081/`. Saved PostgreSQL profiles are shared through the existing `schemii-config` volume; passwords remain server-side and are never returned to either browser.
+Open Schemii at `http://127.0.0.1:8080/` and Schemer at `http://127.0.0.1:8081/`. Saved PostgreSQL profiles are shared through the existing `schemii-config` volume; passwords remain server-side and are never returned to either browser. Versioned dashboard records are stored separately in the owner-only `schemer-dashboards` volume and survive container replacement or restart. Deleting that volume permanently deletes the saved dashboards. Direct launches use `SCHEMER_DASHBOARD_DIR`, which defaults to `~/.local/share/schemer/dashboards`.
+
+Schemer saves edits automatically using revision checks. If another browser tab saves the same dashboard first, the stale tab is blocked rather than overwriting the newer record and must reload the current dashboard.
 
 ## Everyday Use
 

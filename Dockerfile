@@ -24,7 +24,7 @@ ENV PATH="/opt/venv/bin:$PATH" \
 COPY --from=builder /opt/venv /opt/venv
 
 RUN useradd --create-home --uid 10001 schemii \
-    && mkdir -p /data/config /data/schemas \
+    && mkdir -p /data/config /data/schemas /data/dashboards \
     && chown -R schemii:schemii /data
 
 USER schemii
@@ -34,6 +34,7 @@ FROM runtime AS schemer-runtime
 ENV SCHEMER_HOST=0.0.0.0 \
     SCHEMER_PORT=8081 \
     SCHEMER_CONFIG_DIR=/data/config \
+    SCHEMER_DASHBOARD_DIR=/data/dashboards \
     SCHEMER_BEHIND_LOOPBACK_PROXY=1
 EXPOSE 8081
 CMD ["schemer"]

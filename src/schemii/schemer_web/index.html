@@ -11,40 +11,49 @@
     <div class="app-shell">
       <header class="topbar">
         <div class="topbar-leading"><div class="brand"><div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div><div><strong>Schemer</strong><span class="brand-subtitle">PostgreSQL dashboard studio</span></div></div></div>
-        <div class="dashboard-title"><span class="status-dot" aria-hidden="true"></span><strong>Mercury overview</strong><span>Draft dashboard</span></div>
-        <div class="top-actions"><button class="button button-ghost" id="connections-button" type="button">Data source</button><button class="button button-primary" id="add-widget-button" type="button">+ Widget</button></div>
+        <div class="dashboard-title"><span class="status-dot" aria-hidden="true"></span><strong id="top-dashboard-title">Loading dashboard</strong><span id="save-status">Loading...</span></div>
+        <div class="top-actions"><button class="button button-ghost" id="connections-button" type="button">Data source</button><button class="button button-ghost" id="edit-mode-button" type="button">Edit dashboard</button><button class="button button-primary" id="add-widget-button" type="button" hidden>+ Widget</button><details class="dashboard-menu" id="dashboard-menu"><summary class="button button-ghost" aria-label="Dashboard actions">...</summary><div><button id="rename-dashboard" type="button">Rename</button><button id="duplicate-dashboard" type="button">Duplicate</button><button id="archive-dashboard" type="button">Archive</button><button class="danger" id="delete-dashboard" type="button">Delete</button></div></details></div>
       </header>
 
       <main class="schemer-layout">
         <aside class="dashboard-sidebar">
-          <div class="sidebar-heading"><span>Dashboards</span><button type="button" aria-label="Create dashboard">+</button></div>
-          <button class="dashboard-link active" type="button"><i></i><span>Mercury overview<small>6 widgets</small></span></button>
-          <button class="dashboard-link" type="button"><i></i><span>Sales pulse<small>5 widgets</small></span></button>
-          <button class="dashboard-link" type="button"><i></i><span>Inventory health<small>4 widgets</small></span></button>
-          <div class="sidebar-section"><span>Workspace</span><button type="button">Shared with me <b>2</b></button><button type="button">Archived</button></div>
+          <div class="sidebar-heading"><span>Dashboards</span><button id="new-dashboard" type="button" aria-label="Create dashboard">+</button></div>
+          <div class="dashboard-list" id="dashboard-list"></div>
+          <div class="sidebar-section"><span>Workspace</span><button id="show-active-dashboards" type="button">Active <b id="active-dashboard-count">0</b></button><button id="show-archived-dashboards" type="button">Archived <b id="archived-dashboard-count">0</b></button></div>
           <div class="source-summary"><span class="source-light"></span><div><strong id="source-name">Preview dataset</strong><small id="source-detail">Connect PostgreSQL to use live data</small></div></div>
         </aside>
 
         <section class="dashboard-workspace">
           <header class="dashboard-toolbar">
-            <div><span class="eyebrow">Analytics workspace</span><h1>Mercury Books</h1><p>Orders, customer activity, and inventory at a glance.</p></div>
+            <div><span class="eyebrow">Analytics workspace</span><h1 id="dashboard-heading">Loading dashboard</h1><p id="dashboard-description">Saved layout and widget workspace.</p></div>
             <div class="toolbar-actions"><select id="namespace-select" aria-label="PostgreSQL namespace" disabled><option value="">No namespace</option></select><button class="button button-ghost" id="refresh-button" type="button">Refresh</button><button class="button button-ghost date-range" type="button">Jun 1 - Jun 30</button></div>
           </header>
 
-          <div class="dashboard-canvas" id="dashboard-canvas">
-            <article class="widget metric-widget" draggable="true"><header><span>Gross revenue</span><button type="button" aria-label="Widget menu">...</button></header><strong>$42,860</strong><p><b>+12.4%</b> from previous period</p><div class="metric-sparkline"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></article>
-            <article class="widget metric-widget" draggable="true"><header><span>Orders</span><button type="button" aria-label="Widget menu">...</button></header><strong>500</strong><p><b>+8.1%</b> across 150 customers</p><div class="metric-sparkline blue"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></article>
-            <article class="widget metric-widget" draggable="true"><header><span>Average order</span><button type="button" aria-label="Widget menu">...</button></header><strong>$85.72</strong><p><em>-2.3%</em> from previous period</p><div class="metric-sparkline violet"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></article>
-            <article class="widget chart-widget wide" draggable="true">
+          <div class="dashboard-canvas" id="dashboard-canvas" aria-live="polite"></div>
+          <div class="dashboard-conflict" id="dashboard-conflict" hidden><strong>This dashboard changed in another tab.</strong><button class="button button-primary" id="reload-dashboard" type="button">Reload current dashboard</button></div>
+          <section class="widget-focus" id="widget-focus" hidden>
+            <div class="widget-focus-main">
+              <div class="widget-focus-content" id="widget-focus-content"></div>
+            </div>
+            <aside class="widget-inspector" id="widget-inspector">
+              <header class="widget-inspector-head"><div><span class="eyebrow">Selected population</span><strong id="widget-inspector-title">Metric</strong></div><div class="widget-inspector-actions"><button class="button button-ghost" type="button" id="view-inspector-sql">View SQL</button><button type="button" id="close-widget-inspector" aria-label="Close widget inspector">x</button></div></header>
+              <div class="widget-inspector-body" id="widget-inspector-body"></div>
+            </aside>
+          </section>
+          <template id="preview-widget-templates">
+            <article class="widget metric-widget" data-preview-id="widget_revenue"><header><div><span>Gross revenue</span><small>Revenue by order date</small></div><button type="button" aria-label="Widget menu">...</button></header><strong>$42,860</strong><p><b>+12.4%</b> from previous period</p><div class="metric-sparkline"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></article>
+            <article class="widget metric-widget" data-preview-id="widget_orders"><header><div><span>Orders</span><small>Order count by order date</small></div><button type="button" aria-label="Widget menu">...</button></header><strong>500</strong><p><b>+8.1%</b> across 150 customers</p><div class="metric-sparkline blue"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></article>
+            <article class="widget metric-widget" data-preview-id="widget_average"><header><div><span>Average order</span><small>Average value by order date</small></div><button type="button" aria-label="Widget menu">...</button></header><strong>$85.72</strong><p><em>-2.3%</em> from previous period</p><div class="metric-sparkline violet"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></article>
+            <article class="widget chart-widget" data-preview-id="widget_trend">
               <header><div><span>Revenue trend</span><small>Daily gross sales</small></div><button type="button" aria-label="Widget menu">...</button></header>
               <div class="chart-area"><div class="chart-axis"><span>$4k</span><span>$3k</span><span>$2k</span><span>$1k</span><span>$0</span></div><svg viewBox="0 0 700 210" preserveAspectRatio="none" aria-label="Preview revenue line chart" role="img"><defs><linearGradient id="area-fill" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#f4b942" stop-opacity=".28"/><stop offset="1" stop-color="#f4b942" stop-opacity="0"/></linearGradient></defs><path class="grid" d="M0 20H700M0 65H700M0 110H700M0 155H700M0 200H700"/><path class="area" d="M0 173 C35 165 55 105 90 123 S145 144 180 102 S238 45 270 72 S323 122 360 91 S415 132 450 88 S510 42 545 64 S605 113 640 54 S678 45 700 27 L700 210 L0 210Z"/><path class="line" d="M0 173 C35 165 55 105 90 123 S145 144 180 102 S238 45 270 72 S323 122 360 91 S415 132 450 88 S510 42 545 64 S605 113 640 54 S678 45 700 27"/></svg><div class="chart-labels"><span>Jun 1</span><span>Jun 8</span><span>Jun 15</span><span>Jun 22</span><span>Jun 30</span></div></div>
             </article>
-            <article class="widget status-widget" draggable="true"><header><div><span>Order status</span><small>Current distribution</small></div><button type="button" aria-label="Widget menu">...</button></header><div class="donut-wrap"><div class="donut"><strong>500</strong><span>orders</span></div></div><div class="status-legend"><span><i class="paid"></i>Paid <b>100</b></span><span><i class="shipped"></i>Shipped <b>100</b></span><span><i class="packed"></i>Packed <b>100</b></span><span><i class="pending"></i>Pending <b>100</b></span><span><i class="cancelled"></i>Cancelled <b>100</b></span></div></article>
-            <article class="widget table-widget full" draggable="true">
+            <article class="widget status-widget" data-preview-id="widget_status"><header><div><span>Order status</span><small>Current distribution</small></div><button type="button" aria-label="Widget menu">...</button></header><div class="donut-wrap"><div class="donut"><strong>500</strong><span>orders</span></div></div><div class="status-legend"><span><i class="paid"></i>Paid <b>100</b></span><span><i class="shipped"></i>Shipped <b>100</b></span><span><i class="packed"></i>Packed <b>100</b></span><span><i class="pending"></i>Pending <b>100</b></span><span><i class="cancelled"></i>Cancelled <b>100</b></span></div></article>
+            <article class="widget table-widget" data-preview-id="widget_recent">
               <header><div><span>Recent orders</span><small>Latest activity across all customers</small></div><button type="button" aria-label="Widget menu">...</button></header>
               <div class="table-scroll"><table><thead><tr><th>Order</th><th>Customer</th><th>Status</th><th>Items</th><th>Total</th><th>Ordered</th></tr></thead><tbody><tr><td>#500</td><td>Harper Jones</td><td><span class="badge pending">Pending</span></td><td>2</td><td>$91.40</td><td>Jun 10, 20:00</td></tr><tr><td>#499</td><td>Casey Khan</td><td><span class="badge cancelled">Cancelled</span></td><td>4</td><td>$148.75</td><td>Jun 10, 05:00</td></tr><tr><td>#498</td><td>Morgan Foster</td><td><span class="badge shipped">Shipped</span></td><td>3</td><td>$76.20</td><td>Jun 9, 14:00</td></tr><tr><td>#497</td><td>Blair Evans</td><td><span class="badge packed">Packed</span></td><td>2</td><td>$63.95</td><td>Jun 8, 23:00</td></tr></tbody></table></div>
             </article>
-          </div>
+          </template>
         </section>
       </main>
     </div>
@@ -61,8 +70,21 @@
           <label>Password<input id="profile-password" type="password" autocomplete="new-password" /><small>Leave empty while editing to keep the stored password.</small></label>
           <div class="field-pair"><label>SSL mode<select id="profile-sslmode"><option>prefer</option><option>require</option><option>verify-ca</option><option>verify-full</option><option>disable</option><option>allow</option></select></label><label>Timeout<input id="profile-timeout" type="number" min="1" max="120" value="10" /></label></div>
           <p class="form-status" id="connection-status"></p><div class="form-actions"><button class="button button-ghost" id="test-connection" type="button">Test</button><button class="button button-primary" type="submit">Save connection</button></div>
+          <div class="relation-browser"><div class="relation-browser-head"><strong>Relations</strong><span>Tables, views, and materialized views</span></div><p id="relation-browser-status">Select a connection and namespace.</p><div class="relation-list" id="relation-list"></div><section class="relation-detail" id="relation-detail" hidden></section></div>
         </form>
       </div>
+    </dialog>
+
+    <dialog class="dashboard-form-dialog" id="dashboard-form-dialog">
+      <form id="dashboard-form">
+        <div class="dialog-head"><div><span class="eyebrow">Dashboard workspace</span><h2 id="dashboard-form-title">New dashboard</h2><p id="dashboard-form-copy">Create an empty dashboard.</p></div><button id="close-dashboard-form" type="button" aria-label="Close">x</button></div>
+        <div class="dashboard-form-body"><label>Dashboard name<input id="dashboard-name" required maxlength="128" /></label><p class="form-status" id="dashboard-form-status"></p><div class="form-actions"><button class="button button-ghost" id="cancel-dashboard-form" type="button">Cancel</button><button class="button button-primary" type="submit">Continue</button></div></div>
+      </form>
+    </dialog>
+
+    <dialog class="executed-sql-dialog" id="executed-sql-dialog">
+      <div class="dialog-head"><div><span class="eyebrow" id="executed-sql-context">Widget result</span><h2 id="executed-sql-title">Executed SQL</h2><p id="executed-sql-status"></p></div><button id="close-executed-sql" type="button" aria-label="Close executed SQL">x</button></div>
+      <div class="executed-sql-body"><pre><code id="executed-sql-code"></code></pre><section id="executed-sql-parameters" hidden><strong>Bound parameters</strong><pre><code id="executed-sql-parameter-code"></code></pre></section></div>
     </dialog>
 
     <script src="/shared/postgres-client.js"></script><script src="app.js"></script>
