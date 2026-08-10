@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .widget_query import QueryValidationError, normalize_query
+
 
 DASHBOARD_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 PROFILE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
@@ -79,7 +81,7 @@ def _postgres_identifier(value: Any, field: str) -> str:
 
 
 def _widget_configuration(value: Any, widget_id: str) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) not in (set(), {"source"}):
+    if not isinstance(value, dict) or set(value) not in (set(), {"source"}, {"source", "query"}):
         raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} configuration must contain at most one source")
     if not value:
         return {}
@@ -129,7 +131,15 @@ def _widget_configuration(value: Any, widget_id: str) -> dict[str, Any]:
         if [column["ordinal"] for column in normalized_columns] != sorted(ordinals):
             raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} source columns must use ordinal order")
         normalized_source["columns"] = normalized_columns
-    return {"source": normalized_source}
+    normalized = {"source": normalized_source}
+    if "query" in value:
+        if "columns" not in normalized_source:
+            raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} query requires a source column snapshot")
+        try:
+            normalized["query"] = normalize_query(value["query"], normalized_source["columns"])
+        except QueryValidationError as exc:
+            raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} query is invalid: {exc}") from exc
+    return normalized
 
 
 def validate_dashboard_record(record: Any, dashboard_id: str | None = None) -> dict[str, Any]:

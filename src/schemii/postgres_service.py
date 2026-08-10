@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any, Callable
 from uuid import UUID
 
+from .widget_query import QueryValidationError, compile_query, normalize_query
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - direct Windows use has one process per profile store.
@@ -816,15 +818,21 @@ class PostgresService:
             if not isinstance(columns, list) or len(columns) > 1600:
                 raise ValidationError("source columns must be a bounded catalog snapshot")
             names = set()
+            ordinals = set()
             normalized_columns = []
             for column in columns:
                 if not isinstance(column, dict) or set(column) != {"name", "type", "nullable", "ordinal"}:
                     raise ValidationError("source column snapshot is invalid")
                 name = self._validate_relation_name(column.get("name"))
-                if name in names or not isinstance(column.get("type"), str) or not column["type"] or not isinstance(column.get("nullable"), bool) or isinstance(column.get("ordinal"), bool) or not isinstance(column.get("ordinal"), int) or not 1 <= column["ordinal"] <= 1600:
+                column_type = column.get("type")
+                ordinal = column.get("ordinal")
+                if name in names or ordinal in ordinals or not isinstance(column_type, str) or not column_type or len(column_type) > 256 or any(ord(char) < 32 or ord(char) == 127 for char in column_type) or not isinstance(column.get("nullable"), bool) or isinstance(ordinal, bool) or not isinstance(ordinal, int) or not 1 <= ordinal <= 1600:
                     raise ValidationError("source column snapshot is invalid")
                 names.add(name)
+                ordinals.add(ordinal)
                 normalized_columns.append({key: column[key] for key in ("name", "type", "nullable", "ordinal")})
+            if [column["ordinal"] for column in normalized_columns] != sorted(ordinals):
+                raise ValidationError("source column snapshot must use ordinal order")
             columns = normalized_columns
         return database, namespace, relation, kind, fingerprint, columns
 
@@ -904,6 +912,77 @@ class PostgresService:
             raise
         except Exception as exc:
             raise PostgresServiceError(502, "data_preview_failed", "PostgreSQL relation rows could not be read") from exc
+        finally:
+            self._close(connection)
+
+    def execute_widget_query(self, profile_id: str, source: Any, query: Any) -> dict[str, Any]:
+        database, namespace, relation, kind, fingerprint, source_columns = self._validate_relation_source(profile_id, source)
+        if source_columns is None:
+            raise ValidationError("widget query requires a current source column snapshot")
+        try:
+            normalized_query = normalize_query(query, source_columns)
+        except QueryValidationError as exc:
+            raise ValidationError(str(exc)) from exc
+        profile = self._profile(profile_id)
+        if profile["dbname"] != database:
+            raise PostgresServiceError(409, "database_changed", "The saved profile database does not match the widget source")
+        connection = self._connect_profile(profile)
+        try:
+            self._execute_statement(connection, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            self._execute_statement(connection, f"SET LOCAL statement_timeout = '{self._statement_timeout_ms}ms'")
+            relation_sql = f"{quote_identifier(namespace)}.{quote_identifier(relation)}"
+            self._execute_statement(connection, f"LOCK TABLE {relation_sql} IN ACCESS SHARE MODE")
+            current_database = self._execute_rows(connection, "SELECT current_database() AS database")[0]["database"]
+            if current_database != database:
+                raise PostgresServiceError(409, "database_changed", "The connected PostgreSQL database does not match the requested database")
+            descriptor = self._inspect_relation_connection(
+                connection, profile_id, database, namespace, relation, kind, fingerprint
+            )
+            try:
+                normalized_query = normalize_query(normalized_query, descriptor["columns"])
+            except QueryValidationError as exc:
+                raise ValidationError(str(exc)) from exc
+            compiled = compile_query(source, normalized_query, quote_identifier)
+            rows = self._execute_rows(connection, compiled["sql"], tuple(compiled["parameters"]))
+            limit = normalized_query["limit"]
+            truncated = len(rows) > limit
+            page = rows[:limit]
+            result_rows = [
+                [self._json_cell(row.get(alias)) for alias in compiled["aliases"]]
+                for row in page
+            ]
+            connection.rollback()
+            return {
+                "source": {key: source[key] for key in ("profileId", "database", "namespace", "relation", "kind", "fingerprint")},
+                "queryVersion": 2,
+                "columns": compiled["columns"],
+                "rows": result_rows,
+                "rowCount": len(result_rows),
+                "limit": limit,
+                "truncated": truncated,
+                "sql": compiled["sql"],
+                "parameters": [self._json_cell(value) for value in compiled["parameters"]],
+                "lineage": {
+                    "dimensions": [{"id": item["id"], "sourceColumn": item["column"]} for item in normalized_query["dimensions"]],
+                    "measures": [{"id": item["id"], "sourceColumn": item["column"], "aggregation": item["aggregation"], "distinct": item["distinct"]} for item in normalized_query["measures"]],
+                    "filterGroups": [{
+                        "id": group["id"],
+                        "conditions": [{"id": item["id"], "sourceColumn": item["column"], "operator": item["operator"]} for item in group["conditions"]],
+                    } for group in normalized_query["filters"]],
+                },
+            }
+        except PostgresServiceError:
+            try:
+                connection.rollback()
+            except Exception:
+                pass
+            raise
+        except Exception as exc:
+            try:
+                connection.rollback()
+            except Exception:
+                pass
+            raise PostgresServiceError(422, "aggregate_query_failed", "Aggregate query failed") from exc
         finally:
             self._close(connection)
 

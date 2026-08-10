@@ -9,6 +9,7 @@ DATA_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63}
 SQL_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/sql$")
 RELATION_PREVIEW_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/relation/preview$")
 RELATION_VERIFY_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/relation/verify$")
+RELATION_QUERY_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/relation/query$")
 
 
 class PostgresHttpMixin:
@@ -70,15 +71,23 @@ class PostgresHttpMixin:
         sql_match = SQL_PATH.fullmatch(path)
         relation_preview_match = RELATION_PREVIEW_PATH.fullmatch(path)
         relation_verify_match = RELATION_VERIFY_PATH.fullmatch(path)
+        relation_query_match = RELATION_QUERY_PATH.fullmatch(path)
         profile_match = PROFILE_PATH.fullmatch(path)
-        if not sql_match and not relation_preview_match and not relation_verify_match and not (profile_match and profile_match.group(2) in {"test", "introspect"}):
+        if not sql_match and not relation_preview_match and not relation_verify_match and not relation_query_match and not (profile_match and profile_match.group(2) in {"test", "introspect"}):
             return False
         if not self._authorize_postgres():
             return True
         body = self._body_or_error()
         if body is None:
             return True
-        if relation_verify_match:
+        if relation_query_match:
+            if not isinstance(body, dict) or set(body) != {"source", "query"}:
+                self.send_json(400, {"error": {"code": "validation_error", "message": "query request must contain exactly source and query"}})
+            else:
+                self._service_call(lambda: self.service.execute_widget_query(
+                    relation_query_match.group(1), body["source"], body["query"]
+                ))
+        elif relation_verify_match:
             self._service_call(lambda: self.service.verify_relation_source(
                 relation_verify_match.group(1), body.get("source")
             ))

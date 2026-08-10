@@ -64,6 +64,10 @@ class FakePostgresService:
         self.calls.append(("verify_relation_source", profile_id, source))
         return {"status": "verified", "matches": True, **source, "missingColumns": [], "addedColumns": [], "changedColumns": []}
 
+    def execute_widget_query(self, profile_id, source, query):
+        self.calls.append(("execute_widget_query", profile_id, source, query))
+        return {"columns": [{"label": "Rows"}], "rows": [[1]], "sql": "SELECT count(*)", "parameters": []}
+
     def catalog_status(self, profile_id, namespace):
         self.calls.append(("catalog_status", profile_id, namespace))
         return {"profileId": profile_id, "namespace": namespace, "fingerprint": "live"}
@@ -176,6 +180,14 @@ class SchemerServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(json.loads(body)["matches"])
         self.assertIn(("verify_relation_source", "shared", preview_source), self.service.calls)
+        query = {"version": 1, "measures": []}
+        query_path = "/api/postgres/profiles/shared/relation/query"
+        self.assertEqual(self.request(query_path, "POST", {"source": preview_source, "query": query})[0], 403)
+        status, body, _ = self.request(query_path, "POST", {"source": preview_source, "query": query}, True)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["sql"], "SELECT count(*)")
+        self.assertIn(("execute_widget_query", "shared", preview_source, query), self.service.calls)
+        self.assertEqual(self.request(query_path, "POST", {"source": preview_source, "query": query, "sql": "SELECT 1"}, True)[0], 400)
         self.assertIn(("test_profile", "shared"), self.service.calls)
 
     def test_profile_writes_use_shared_router_and_redact_password(self):

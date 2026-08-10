@@ -24,6 +24,17 @@ SOURCE_COLUMNS = [
     {"name": "id", "type": "bigint", "nullable": False, "ordinal": 1},
     {"name": "ordered_at", "type": "timestamp with time zone", "nullable": False, "ordinal": 2},
 ]
+QUERY = {
+    "version": 2,
+    "dimensions": [{"id": "dimension_date", "label": "Order date", "column": "ordered_at"}],
+    "measures": [{"id": "measure_orders", "label": "Orders", "column": None, "aggregation": "count_rows", "distinct": False, "nullBehavior": "preserve", "numberFormat": {"style": "integer"}}],
+    "filters": [],
+    "sort": [
+        {"targetKind": "measure", "targetId": "measure_orders", "direction": "desc", "nulls": "last"},
+        {"targetKind": "dimension", "targetId": "dimension_date", "direction": "asc", "nulls": "last"},
+    ],
+    "limit": 100,
+}
 
 
 class DashboardStoreTests(unittest.TestCase):
@@ -108,6 +119,23 @@ class DashboardStoreTests(unittest.TestCase):
                 with self.assertRaises(DashboardStoreError) as error:
                     self.store.save(record["id"], record)
                 self.assertEqual(error.exception.payload["error"]["code"], "invalid_dashboard")
+
+    def test_versioned_widget_query_round_trips_and_requires_snapshot(self):
+        self.store.initialize_once()
+        record = self.store.get("dashboard_mercury")
+        record["dashboard"]["widgets"][0]["configuration"] = {"source": {**SOURCE, "columns": SOURCE_COLUMNS}, "query": QUERY}
+        saved = self.store.save(record["id"], record)
+        self.assertEqual(saved["dashboard"]["widgets"][0]["configuration"]["query"], QUERY)
+        for configuration in (
+            {"source": SOURCE, "query": QUERY},
+            {"source": {**SOURCE, "columns": SOURCE_COLUMNS}, "query": {**QUERY, "version": 3}},
+            {"source": {**SOURCE, "columns": SOURCE_COLUMNS}, "query": {**QUERY, "measures": []}},
+            {"query": QUERY},
+        ):
+            invalid = mercury_dashboard_record()
+            invalid["dashboard"]["widgets"][0]["configuration"] = configuration
+            with self.assertRaises(DashboardStoreError):
+                self.store.save(invalid["id"], invalid)
 
     def test_malformed_file_is_not_listed_or_overwritten(self):
         malformed = self.root / "broken.json"

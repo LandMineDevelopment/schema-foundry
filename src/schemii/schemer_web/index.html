@@ -10,7 +10,7 @@
   <body>
     <div class="app-shell">
       <header class="topbar">
-        <div class="topbar-leading"><div class="brand"><div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div><div><strong>Schemer</strong><span class="brand-subtitle">PostgreSQL dashboard studio</span></div></div></div>
+        <div class="topbar-leading"><div class="brand"><div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div><div><strong>Schemer</strong><span class="brand-subtitle">PostgreSQL dashboard studio</span></div></div><div class="mobile-dashboard-nav"><select id="mobile-dashboard-select" aria-label="Current dashboard"></select><button id="mobile-new-dashboard" type="button" aria-label="Create dashboard">+</button></div></div>
         <div class="dashboard-title"><span class="status-dot" aria-hidden="true"></span><strong id="top-dashboard-title">Loading dashboard</strong><span id="save-status">Loading...</span></div>
         <div class="top-actions"><button class="button button-ghost" id="connections-button" type="button">Data source</button><button class="button button-ghost" id="edit-mode-button" type="button">Edit dashboard</button><button class="button button-primary" id="add-widget-button" type="button" hidden>+ Widget</button><details class="dashboard-menu" id="dashboard-menu"><summary class="button button-ghost" aria-label="Dashboard actions">...</summary><div><button id="rename-dashboard" type="button">Rename</button><button id="duplicate-dashboard" type="button">Duplicate</button><button id="archive-dashboard" type="button">Archive</button><button class="danger" id="delete-dashboard" type="button">Delete</button></div></details></div>
       </header>
@@ -26,12 +26,12 @@
         <section class="dashboard-workspace">
           <header class="dashboard-toolbar">
             <div><span class="eyebrow">Analytics workspace</span><h1 id="dashboard-heading">Loading dashboard</h1><p id="dashboard-description">Saved layout and widget workspace.</p></div>
-            <div class="toolbar-actions"><select id="namespace-select" aria-label="PostgreSQL namespace" disabled><option value="">No namespace</option></select><button class="button button-ghost" id="refresh-button" type="button">Refresh</button><button class="button button-ghost date-range" type="button">Jun 1 - Jun 30</button></div>
+            <div class="toolbar-actions"><select id="namespace-select" aria-label="PostgreSQL namespace" disabled><option value="">No namespace</option></select><button class="button button-ghost" id="refresh-button" type="button">Refresh</button><button class="button button-ghost date-range" type="button" disabled title="Dashboard date filtering is not available yet">Jun 1 - Jun 30</button></div>
           </header>
 
           <div class="dashboard-canvas" id="dashboard-canvas" aria-live="polite"></div>
           <div class="dashboard-conflict" id="dashboard-conflict" hidden><strong>This dashboard changed in another tab.</strong><button class="button button-primary" id="reload-dashboard" type="button">Reload current dashboard</button></div>
-          <section class="widget-focus" id="widget-focus" hidden>
+          <section class="widget-focus" id="widget-focus" role="dialog" aria-modal="true" aria-label="Expanded widget" hidden>
             <div class="widget-focus-main">
               <div class="widget-focus-content" id="widget-focus-content"></div>
             </div>
@@ -82,10 +82,11 @@
     </dialog>
 
     <dialog class="widget-editor-dialog" id="widget-editor-dialog">
-      <div class="dialog-head"><div><span class="eyebrow">Widget configuration</span><h2 id="widget-editor-title">Edit widget</h2><p>Configure this widget without affecting other dashboard widgets.</p></div><button id="close-widget-editor" type="button" aria-label="Close widget editor">x</button></div>
+      <div class="dialog-head"><div><span class="eyebrow">Widget name</span><input class="widget-editor-name" id="widget-editor-name" required maxlength="128" aria-label="Widget name" /><p>Configure this widget without affecting other dashboard widgets.</p></div><button id="close-widget-editor" type="button" aria-label="Close widget editor">x</button></div>
       <div class="widget-editor-layout">
-        <nav class="widget-editor-nav" aria-label="Widget configuration sections"><button class="active" type="button">Source</button><button type="button" disabled>Groupings <small>Query model</small></button><button type="button" disabled>Filters <small>Query model</small></button></nav>
-        <section class="widget-source-editor"><div class="widget-source-selectors"><label>Connection<select id="widget-source-profile" aria-label="Widget source connection"></select></label><label>Namespace<select id="widget-source-namespace" aria-label="Widget source namespace"></select></label></div><div class="relation-browser"><div class="relation-browser-head"><strong>Relations</strong><span>Tables, views, and materialized views</span></div><p id="relation-browser-status">Select a connection and namespace.</p><div class="relation-list" id="relation-list"></div><section class="relation-detail" id="relation-detail" hidden></section></div></section>
+        <nav class="widget-editor-nav" role="tablist" aria-label="Widget configuration sections"><button class="active" role="tab" aria-controls="widget-source-editor" type="button" data-editor-section="source">Source</button><button role="tab" aria-controls="widget-query-editor" type="button" data-editor-section="query">Groupings <small>&amp; Measures</small></button><button role="tab" aria-controls="widget-query-editor" type="button" data-editor-section="filters">Filters <small>AND / OR</small></button><button role="tab" aria-controls="widget-query-editor" type="button" data-editor-section="sort">Sort <small>&amp; Limit</small></button></nav>
+        <section class="widget-source-editor" id="widget-source-editor" role="tabpanel"><div class="widget-source-selectors"><label>Connection<select id="widget-source-profile" aria-label="Widget source connection"></select></label><label>Namespace<select id="widget-source-namespace" aria-label="Widget source namespace"></select></label></div><div class="relation-browser"><div class="relation-browser-head"><strong>Relations</strong><span>Tables, views, and materialized views</span></div><p id="relation-browser-status" aria-live="polite">Select a connection and namespace.</p><div class="relation-list" id="relation-list"></div><section class="relation-detail" id="relation-detail" hidden></section></div></section>
+        <section class="widget-query-editor" id="widget-query-editor" role="tabpanel" hidden><header><div><strong id="widget-query-heading">Groupings &amp; Measures</strong><p id="widget-query-copy">Choose result groupings and aggregate measures.</p></div><button class="button button-ghost" id="reset-widget-query" type="button">Reset query to saved</button></header><div class="query-editor-groups" id="widget-query-fields"></div><footer><label id="widget-query-limit-field" hidden>Result row limit<input id="widget-query-limit" type="number" min="1" max="500" value="100" /></label><p class="form-status" id="widget-query-status" aria-live="polite">Name and source save automatically. Query changes remain local until applied.</p><button class="button button-primary" id="apply-widget-query" type="button">Apply query &amp; run</button></footer></section>
       </div>
     </dialog>
 

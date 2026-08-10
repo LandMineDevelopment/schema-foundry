@@ -65,6 +65,10 @@ class FakePostgresService:
         self.calls.append(("verify_relation_source", profile_id, source))
         return {"status": "verified", "matches": True, **source, "missingColumns": [], "addedColumns": [], "changedColumns": []}
 
+    def execute_widget_query(self, profile_id, source, query):
+        self.calls.append(("execute_widget_query", profile_id, source, query))
+        return {"columns": [{"label": "Rows"}], "rows": [[1]], "sql": "SELECT count(*)", "parameters": []}
+
     def catalog_status(self, profile_id, namespace):
         self.calls.append(("catalog_status", profile_id, namespace))
         return {"profileId": profile_id, "namespace": namespace, "fingerprint": "live"}
@@ -320,6 +324,12 @@ class ServerTests(unittest.TestCase):
         verify_path = "/api/postgres/profiles/local/relation/verify"
         self.assertEqual(self.request(verify_path, "POST", {"source": preview_source}, authorized=True)[0], 200)
         self.assertIn(("verify_relation_source", "local", preview_source), self.service.calls)
+        query = {"version": 1, "measures": []}
+        query_path = "/api/postgres/profiles/local/relation/query"
+        self.assertEqual(self.request(query_path, "POST", {"source": preview_source, "query": query})[0], 403)
+        self.assertEqual(self.request(query_path, "POST", {"source": preview_source, "query": query}, authorized=True)[0], 200)
+        self.assertIn(("execute_widget_query", "local", preview_source, query), self.service.calls)
+        self.assertEqual(self.request(query_path, "POST", {"source": preview_source, "query": query, "extra": True}, authorized=True)[0], 400)
 
     def test_test_introspect_preview_and_apply_routes_forward_contracts(self):
         schema = {"projectName": "demo.public", "tables": [], "relationships": [], "functions": []}

@@ -357,6 +357,64 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertEqual(missing_result["status"], "missing")
         self.assertEqual(missing_result["missingColumns"], ["id", "status"])
 
+    def test_widget_query_is_verified_read_only_bounded_and_returns_provenance(self):
+        responses = {
+            "SELECT current_database() AS database": [{"database": "demo"}],
+            "c.relkind AS catalog_kind": [{"catalog_kind": "r", "relation_kind": "table", "view_definition": None}],
+            "a.attname AS column_name": [
+                {"column_name": "status", "data_type": "text", "nullable": False, "ordinal": 1, "type_category": "S", "type_name": "text"},
+                {"column_name": "amount", "data_type": "numeric", "nullable": True, "ordinal": 2, "type_category": "N", "type_name": "numeric"},
+            ],
+            '"status" AS "__schemer_d0"': {
+                "columns": ["__schemer_d0", "__schemer_m0"],
+                "rows": [("paid", Decimal("30.50")), ("pending", Decimal("12")), ("extra", Decimal("1"))],
+            },
+        }
+        connections = []
+        service = PostgresService(
+            self.temporary_directory.name,
+            connect_factory=lambda **kwargs: (connections.append(Connection(responses=responses)) or connections[-1]),
+        )
+        descriptor = service.inspect_relation("local", "demo", "public", "orders")
+        source = {
+            **{key: descriptor[key] for key in ("profileId", "database", "namespace", "relation", "kind", "fingerprint")},
+            "columns": [{key: column[key] for key in ("name", "type", "nullable", "ordinal")} for column in descriptor["columns"]],
+        }
+        query = {
+            "version": 2,
+            "dimensions": [{"id": "dimension_status", "label": "Status", "column": "status"}],
+            "measures": [{"id": "measure_revenue", "label": "Revenue", "column": "amount", "aggregation": "sum", "distinct": False, "nullBehavior": "zero", "numberFormat": {"style": "currency", "currency": "USD", "fractionDigits": 2}}],
+            "filters": [{"id": "filter_group_status", "conditions": [{"id": "filter_status", "column": "status", "operator": "neq", "values": ["cancelled"]}]}],
+            "sort": [{"targetKind": "measure", "targetId": "measure_revenue", "direction": "desc", "nulls": "last"}],
+            "limit": 2,
+        }
+        result = service.execute_widget_query("local", source, query)
+        self.assertEqual(result["rows"], [["paid", "30.50"], ["pending", "12"]])
+        self.assertTrue(result["truncated"])
+        self.assertEqual(result["queryVersion"], 2)
+        self.assertEqual(result["parameters"], ["cancelled", 3])
+        self.assertEqual(result["lineage"]["measures"][0]["sourceColumn"], "amount")
+        self.assertEqual(result["lineage"]["filterGroups"][0]["conditions"][0]["operator"], "neq")
+        query_connection = connections[-1]
+        self.assertEqual(query_connection.executed[0][0], "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        self.assertIn(('LOCK TABLE "public"."orders" IN ACCESS SHARE MODE', ()), query_connection.executed)
+        sql, parameters = next(item for item in query_connection.executed if '"status" AS "__schemer_d0"' in item[0])
+        self.assertEqual(sql, result["sql"])
+        self.assertNotIn("cancelled", sql)
+        self.assertEqual(parameters, ("cancelled", 3))
+        self.assertNotIn("JOIN", sql.upper())
+        self.assertEqual(query_connection.rollbacks, 1)
+        self.assertTrue(query_connection.closed)
+
+        changed_source = {**source, "fingerprint": "0" * 64}
+        with self.assertRaises(PostgresServiceError) as error:
+            service.execute_widget_query("local", changed_source, query)
+        self.assertEqual(error.exception.code, "relation_changed")
+        self.assertFalse(any('"status" AS "__schemer_d0"' in sql for sql, _ in connections[-1].executed))
+        duplicate_ordinals = {**source, "columns": [{**column, "ordinal": 1} for column in source["columns"]]}
+        with self.assertRaises(ValidationError):
+            service.execute_widget_query("local", duplicate_ordinals, query)
+
     def test_relation_inspection_rejects_stale_kind_and_fingerprint(self):
         responses = {
             "SELECT current_database() AS database": [{"database": "demo"}],

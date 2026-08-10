@@ -71,16 +71,19 @@ Acceptance criteria: a widget can select one verified relation and inspect its c
 
 Approval required before implementation.
 
-- [ ] Define versioned query configuration with `dimensions[]`, `measures[]`, `filters[]`, `sort[]`, and optional limit.
-- [ ] Support zero or more dimensions and one or more measures.
-- [ ] Support count rows, count, count distinct, sum, average, minimum, and maximum.
-- [ ] Give every measure a stable ID, label, source column, aggregation, distinct setting, null behavior, and number format.
-- [ ] Allow independent display ordering for dimensions and measures.
-- [ ] Generate deterministic PostgreSQL SQL from validated catalog identities.
-- [ ] Quote identifiers and parameterize every filter value.
-- [ ] Enforce read-only transactions, statement timeouts, result limits, and bounded responses.
-- [ ] Preserve measure lineage needed by drill-through.
-- [ ] Add query-generation tests for multiple dimensions, multiple measures, nulls, sorting, and invalid/stale fields.
+- [x] Define versioned query configuration with `dimensions[]`, `measures[]`, grouped `filters[]`, `sort[]`, and optional limit; upgrade version-1 flat filters into one AND group.
+- [x] Support zero or more dimensions and one or more measures.
+- [x] Support count rows, count, count distinct, sum, average, minimum, and maximum.
+- [x] Give every measure a stable ID, label, source column, aggregation, distinct setting, null behavior, and number format.
+- [x] Allow independent display ordering for dimensions and measures.
+- [x] Generate deterministic PostgreSQL SQL from validated catalog identities.
+- [x] Quote identifiers and parameterize every filter value.
+- [x] Restrict filter operators by PostgreSQL column type and combine AND conditions inside OR groups.
+- [x] Provide typeable themed date/date-time calendar controls and parameterized numeric/temporal `between` bounds.
+- [x] Separate source, groupings/measures, filters, and sort/limit into connected top tabs with one content scrollbar and compact controls.
+- [x] Enforce read-only transactions, statement timeouts, result limits, and bounded responses.
+- [x] Preserve measure lineage needed by drill-through.
+- [x] Add query-generation tests for multiple dimensions, multiple measures, nulls, sorting, and invalid/stale fields.
 
 Acceptance criteria: one query can return any configured set of group-by columns and metric columns without accepting interpolated SQL values.
 
@@ -91,7 +94,7 @@ Approval required before implementation.
 - [ ] Add Aggregate Report as a first-class table widget.
 - [ ] Render any number of group-by columns followed by any number of metric columns.
 - [ ] Add column reorder, resize, hide/show, pinning, labels, and per-measure formatting.
-- [ ] Add sorting by dimensions or measures.
+- [x] Add ordered multi-column sorting by dimensions or measures.
 - [ ] Add bounded pagination or windowing for large grouped results.
 - [ ] Preserve the complete query configuration when columns are hidden.
 - [ ] Make aggregate rows and metric cells eligible for drill-through.
@@ -197,12 +200,12 @@ Approval required before each separately scoped capability.
 
 ## Required Verification For Every Phase
 
-- [ ] Focused Python and JavaScript tests for changed behavior.
-- [ ] Complete Python test suite.
-- [ ] Complete JavaScript test suite.
-- [ ] Python compile check and both application JavaScript syntax checks.
-- [ ] Compose configuration validation for affected service combinations.
-- [ ] Local Schemii and Schemer server smoke tests for `/`, `/api/session`, and affected routes.
-- [ ] Desktop and mobile render checks for frontend changes.
-- [ ] Disposable PostgreSQL verification for catalog, query, view, or migration changes.
-- [ ] `git diff --check`.
+- [x] Focused Python and JavaScript tests for changed behavior.
+- [x] Complete Python test suite.
+- [x] Complete JavaScript test suite.
+- [x] Python compile check and both application JavaScript syntax checks.
+- [x] Compose configuration validation for affected service combinations.
+- [x] Local Schemii and Schemer server smoke tests for `/`, `/api/session`, and affected routes.
+- [x] Desktop and mobile render checks for frontend changes.
+- [x] Disposable PostgreSQL verification for catalog, query, view, or migration changes.
+- [x] `git diff --check`.
