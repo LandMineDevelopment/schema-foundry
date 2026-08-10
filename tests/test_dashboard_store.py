@@ -35,6 +35,14 @@ QUERY = {
     ],
     "limit": 100,
 }
+TABLE = {
+    "version": 1,
+    "columns": [
+        {"targetId": "dimension_date", "width": 180, "hidden": False, "pinned": True, "label": "Order date"},
+        {"targetId": "measure_orders", "width": 120, "hidden": False, "pinned": False, "label": "Orders"},
+    ],
+    "pageSize": 25,
+}
 
 
 class DashboardStoreTests(unittest.TestCase):
@@ -136,6 +144,38 @@ class DashboardStoreTests(unittest.TestCase):
             invalid["dashboard"]["widgets"][0]["configuration"] = configuration
             with self.assertRaises(DashboardStoreError):
                 self.store.save(invalid["id"], invalid)
+
+    def test_aggregate_report_table_configuration_round_trips(self):
+        self.store.initialize_once()
+        record = self.store.get("dashboard_mercury")
+        widget = record["dashboard"]["widgets"][0]
+        widget["kind"] = "aggregate_report"
+        widget["configuration"] = {"source": {**SOURCE, "columns": SOURCE_COLUMNS}, "query": QUERY, "table": TABLE}
+        saved = self.store.save(record["id"], record)
+        self.assertEqual(saved["dashboard"]["widgets"][0]["configuration"]["table"], TABLE)
+
+    def test_aggregate_report_rejects_invalid_presentation_without_breaking_existing_widgets(self):
+        invalid_tables = [
+            {**TABLE, "pageSize": 500},
+            {**TABLE, "columns": TABLE["columns"][:-1]},
+            {**TABLE, "columns": [TABLE["columns"][0], TABLE["columns"][0]]},
+            {**TABLE, "columns": [TABLE["columns"][1], TABLE["columns"][0]]},
+            {**TABLE, "columns": [{**TABLE["columns"][0], "width": 63}, TABLE["columns"][1]]},
+            {**TABLE, "columns": [{**TABLE["columns"][0], "hidden": "no"}, TABLE["columns"][1]]},
+            {**TABLE, "columns": [{**TABLE["columns"][0], "targetId": []}, TABLE["columns"][1]]},
+        ]
+        for table in invalid_tables:
+            with self.subTest(table=table):
+                record = mercury_dashboard_record()
+                widget = record["dashboard"]["widgets"][0]
+                widget["kind"] = "aggregate_report"
+                widget["configuration"] = {"source": {**SOURCE, "columns": SOURCE_COLUMNS}, "query": QUERY, "table": table}
+                with self.assertRaises(DashboardStoreError):
+                    self.store.save(record["id"], record)
+        record = mercury_dashboard_record()
+        record["dashboard"]["widgets"][0]["kind"] = "aggregate_report"
+        with self.assertRaises(DashboardStoreError):
+            self.store.save(record["id"], record)
 
     def test_malformed_file_is_not_listed_or_overwritten(self):
         malformed = self.root / "broken.json"

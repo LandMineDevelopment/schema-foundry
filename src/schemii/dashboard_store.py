@@ -18,6 +18,7 @@ PROFILE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 FINGERPRINT_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 DASHBOARD_VERSION = 1
 MAX_WIDGETS = 100
+TABLE_PAGE_SIZES = {10, 25, 50, 100}
 
 
 class DashboardStoreError(Exception):
@@ -80,9 +81,54 @@ def _postgres_identifier(value: Any, field: str) -> str:
     return value
 
 
-def _widget_configuration(value: Any, widget_id: str) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) not in (set(), {"source"}, {"source", "query"}):
+def _table_configuration(value: Any, query: dict[str, Any], widget_id: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {"version", "columns", "pageSize"} or isinstance(value.get("version"), bool) or value.get("version") != 1:
+        raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} aggregate table configuration is invalid")
+    page_size = value.get("pageSize")
+    if isinstance(page_size, bool) or page_size not in TABLE_PAGE_SIZES:
+        raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} aggregate table page size is invalid")
+    targets = {item["id"]: "dimension" for item in query["dimensions"]} | {item["id"]: "measure" for item in query["measures"]}
+    columns = value.get("columns")
+    if not isinstance(columns, list) or len(columns) != len(targets):
+        raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} aggregate table columns must cover every query result field")
+    normalized_columns = []
+    seen = set()
+    measure_seen = False
+    for column in columns:
+        if not isinstance(column, dict) or set(column) != {"targetId", "width", "hidden", "pinned", "label"}:
+            raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} aggregate table column is invalid")
+        target_id = column.get("targetId")
+        if not isinstance(target_id, str) or not DASHBOARD_ID_PATTERN.fullmatch(target_id):
+            raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} aggregate table target is invalid or duplicated")
+        target_kind = targets.get(target_id)
+        if target_kind is None or target_id in seen:
+            raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} aggregate table target is invalid or duplicated")
+        if target_kind == "dimension" and measure_seen:
+            raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} aggregate table dimensions must precede measures")
+        measure_seen = measure_seen or target_kind == "measure"
+        if not isinstance(column.get("hidden"), bool) or not isinstance(column.get("pinned"), bool):
+            raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} aggregate table column behavior is invalid")
+        seen.add(target_id)
+        normalized_columns.append({
+            "targetId": target_id,
+            "width": _integer(column.get("width"), "aggregate table column width", 64, 1024),
+            "hidden": column["hidden"],
+            "pinned": column["pinned"],
+            "label": _bounded_text(column.get("label"), "aggregate table column label", 128),
+        })
+    if seen != set(targets):
+        raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} aggregate table columns must cover every query result field")
+    return {"version": 1, "columns": normalized_columns, "pageSize": page_size}
+
+
+def _widget_configuration(value: Any, widget_id: str, widget_kind: str) -> dict[str, Any]:
+    allowed = (set(), {"source"}, {"source", "query"}, {"source", "query", "table"})
+    if not isinstance(value, dict) or set(value) not in allowed:
         raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} configuration must contain at most one source")
+    if widget_kind == "aggregate_report" and set(value) not in ({"source", "query"}, {"source", "query", "table"}):
+        raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} aggregate report requires a source and query")
+    if widget_kind != "aggregate_report" and "table" in value:
+        raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} table presentation requires an aggregate report")
     if not value:
         return {}
     source = value["source"]
@@ -139,6 +185,8 @@ def _widget_configuration(value: Any, widget_id: str) -> dict[str, Any]:
             normalized["query"] = normalize_query(value["query"], normalized_source["columns"])
         except QueryValidationError as exc:
             raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} query is invalid: {exc}") from exc
+    if "table" in value:
+        normalized["table"] = _table_configuration(value["table"], normalized["query"], widget_id)
     return normalized
 
 
@@ -180,14 +228,14 @@ def validate_dashboard_record(record: Any, dashboard_id: str | None = None) -> d
             raise DashboardStoreError(400, "invalid_dashboard", "Widget ID is invalid or duplicated")
         widget_ids.add(widget_id)
         kind = _bounded_text(widget.get("kind"), "widget kind", 64)
-        if kind not in {"preview", "placeholder"}:
+        if kind not in {"preview", "placeholder", "aggregate_report"}:
             raise DashboardStoreError(400, "invalid_dashboard", "Widget kind is not supported by this dashboard version")
         normalized_widgets.append({
             "id": widget_id,
             "kind": kind,
             "title": _bounded_text(widget.get("title"), "widget title", 128),
             "layout": _layout(widget.get("layout"), widget_id),
-            "configuration": _widget_configuration(widget.get("configuration"), widget_id),
+            "configuration": _widget_configuration(widget.get("configuration"), widget_id, kind),
         })
     viewport = dashboard.get("viewport")
     if not isinstance(viewport, dict) or set(viewport) != {"desktop", "mobile"}:

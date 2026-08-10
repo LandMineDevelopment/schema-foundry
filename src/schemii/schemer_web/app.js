@@ -83,12 +83,14 @@ let lastSwapTargetId = null;
 let sourceVerificationGeneration = 0;
 let queryExecutionGeneration = 0;
 let widgetQueryDraft = null;
+let widgetTableDraft = null;
 let widgetEditorSection = "source";
 let widgetEditorGeneration = 0;
 let widgetQueryApplySession = null;
 const sourceVerification = new Map();
 const widgetQueryResults = new Map();
 const widgetQueryExecutionTokens = new Map();
+const widgetTablePages = new Map();
 const executedSqlByResult = new Map();
 const postgres = window.SchemiiShared.createPostgresClient({
   getToken: () => sessionToken,
@@ -103,6 +105,7 @@ function invalidateWidgetRuntime(widgetId) {
   widgetQueryExecutionTokens.set(`${widgetId}:publish`, {});
   widgetQueryExecutionTokens.set(`${widgetId}:draft`, {});
   widgetQueryResults.delete(widgetId);
+  widgetTablePages.delete(widgetId);
   executedSqlByResult.delete(`${widgetId}:widget`);
   sourceVerification.delete(widgetId);
   sourceVerificationGeneration += 1;
@@ -327,6 +330,37 @@ function defaultWidgetQuery() {
     sort: [],
     limit: 100
   };
+}
+
+function defaultTablePresentation(query) {
+  return {
+    version: 1,
+    columns: [...query.dimensions, ...query.measures].map(item => ({ targetId: item.id, width: 160, hidden: false, pinned: false, label: item.label })),
+    pageSize: 25
+  };
+}
+
+function reconcileTablePresentation(query, presentation = null) {
+  const fallback = defaultTablePresentation(query);
+  const targets = new Map([...query.dimensions.map(item => [item.id, { ...item, kind: "dimension" }]), ...query.measures.map(item => [item.id, { ...item, kind: "measure" }])]);
+  const previous = new Map((presentation?.columns ?? []).filter(item => targets.has(item.targetId)).map(item => [item.targetId, item]));
+  const ordered = [];
+  for (const kind of ["dimension", "measure"]) {
+    const saved = (presentation?.columns ?? []).filter(item => targets.get(item.targetId)?.kind === kind);
+    const defaults = fallback.columns.filter(item => targets.get(item.targetId)?.kind === kind && !saved.some(savedItem => savedItem.targetId === item.targetId));
+    for (const item of [...saved, ...defaults]) {
+      const target = targets.get(item.targetId);
+      const value = previous.get(item.targetId) ?? item;
+      ordered.push({
+        targetId: item.targetId,
+        width: Number.isInteger(value.width) && value.width >= 64 && value.width <= 1024 ? value.width : 160,
+        hidden: Boolean(value.hidden),
+        pinned: Boolean(value.pinned),
+        label: typeof value.label === "string" && value.label.trim() ? value.label.trim().slice(0, 128) : target.label
+      });
+    }
+  }
+  return { version: 1, columns: ordered, pageSize: [10, 25, 50, 100].includes(presentation?.pageSize) ? presentation.pageSize : 25 };
 }
 
 function numericPostgresType(type) {
@@ -581,6 +615,7 @@ function renderWidgetQueryDraft() {
     return;
   }
   document.querySelector("#apply-widget-query").disabled = false;
+  widgetTableDraft = reconcileTablePresentation(widgetQueryDraft, widgetTableDraft);
   const columnOptions = columns.map(column => [column.name, `${column.name} · ${column.type}`]);
   const dimensionColumns = columns.filter(column => comparablePostgresType(column.type));
   const [dimensions, dimensionRows, addDimension] = queryGroup("Groupings", "Check the columns that define each aggregate result row.", "", () => {});
@@ -801,10 +836,62 @@ function renderWidgetQueryDraft() {
     );
     sortRows.append(row);
   });
+  const [tablePresentation, tableRows, tableAdd] = queryGroup("Aggregate table", "Presentation only: hiding or reordering a column never removes it from the query.", "", () => {});
+  tableAdd.remove();
+  const queryTargets = new Map([...widgetQueryDraft.dimensions.map(item => [item.id, { ...item, kind: "dimension" }]), ...widgetQueryDraft.measures.map(item => [item.id, { ...item, kind: "measure" }])]);
+  widgetTableDraft.columns.forEach((item, tableIndex) => {
+    const target = queryTargets.get(item.targetId);
+    const row = document.createElement("div");
+    row.className = "query-editor-row table-column-row";
+    const targetName = document.createElement("strong");
+    targetName.className = "table-column-target";
+    targetName.textContent = `${target.kind === "dimension" ? "Grouping" : "Measure"} · ${target.label}`;
+    const label = queryInput(item.label, value => { item.label = value.trim() || target.label; });
+    label.maxLength = 128;
+    const width = queryInput(item.width, value => { item.width = Math.max(64, Math.min(1024, Number(value) || 160)); }, "number");
+    width.min = "64";
+    width.max = "1024";
+    width.step = "1";
+    const hidden = document.createElement("input");
+    hidden.type = "checkbox";
+    hidden.checked = item.hidden;
+    hidden.addEventListener("change", () => { item.hidden = hidden.checked; });
+    const pinned = document.createElement("input");
+    pinned.type = "checkbox";
+    pinned.checked = item.pinned;
+    pinned.addEventListener("change", () => { item.pinned = pinned.checked; });
+    const order = document.createElement("div");
+    order.className = "sort-priority table-column-order";
+    const orderLabel = document.createElement("span");
+    const kindPosition = widgetTableDraft.columns.slice(0, tableIndex + 1).filter(column => queryTargets.get(column.targetId)?.kind === target.kind).length;
+    orderLabel.textContent = `${target.kind === "dimension" ? "Grouping" : "Measure"} ${kindPosition}`;
+    order.append(orderLabel);
+    for (const [copy, offset] of [["Up", -1], ["Down", 1]]) {
+      const move = document.createElement("button");
+      move.type = "button";
+      move.className = "sort-order-button";
+      move.textContent = copy;
+      const neighbor = widgetTableDraft.columns[tableIndex + offset];
+      move.disabled = !neighbor || queryTargets.get(neighbor.targetId)?.kind !== target.kind;
+      move.setAttribute("aria-label", `Move ${item.label} ${copy.toLowerCase()} within ${target.kind}s`);
+      move.addEventListener("click", () => {
+        widgetTableDraft.columns.splice(tableIndex, 1);
+        widgetTableDraft.columns.splice(tableIndex + offset, 0, item);
+        renderWidgetQueryDraft();
+      });
+      order.append(move);
+    }
+    row.append(targetName, queryLabel("Display label", label), queryLabel("Width (px)", width), queryLabel("Hidden", hidden), queryLabel("Pin left", pinned), order);
+    tableRows.append(row);
+  });
+  const pageSizeRow = document.createElement("div");
+  pageSizeRow.className = "table-page-size";
+  pageSizeRow.append(queryLabel("Rows per page", querySelect([["10", "10"], ["25", "25"], ["50", "50"], ["100", "100"]], String(widgetTableDraft.pageSize), value => { widgetTableDraft.pageSize = Number(value); })));
+  tableRows.append(pageSizeRow);
   const views = {
     query: { heading: "Groupings & Measures", copy: "Choose result groupings and aggregate measures.", sections: [dimensions, measures] },
     filters: { heading: "Filters", copy: "Build AND conditions inside separate OR groups.", sections: [filters] },
-    sort: { heading: "Sort & Limit", copy: "Control stable result ordering and the maximum returned rows.", sections: [sorting] }
+    sort: { heading: "Sort, Columns & Limit", copy: "Control SQL ordering, aggregate table presentation, and bounded result sizes.", sections: [sorting, tablePresentation] }
   };
   const view = views[widgetEditorSection] ?? views.query;
   elements.widgetQueryHeading.textContent = view.heading;
@@ -939,8 +1026,11 @@ function renderRelationDetail(descriptor) {
     const source = exactSourceIdentity(descriptor);
     const sameSource = JSON.stringify(widget.configuration?.source) === JSON.stringify(source);
     const savedQuery = sameSource ? widget.configuration?.query : null;
-    widget.configuration = { source, ...(savedQuery ? { query: savedQuery } : {}) };
+    const savedTable = sameSource ? widget.configuration?.table : null;
+    widget.configuration = { source, ...(savedQuery ? { query: savedQuery, ...(savedTable ? { table: savedTable } : {}) } : {}) };
+    if (!savedQuery) widget.kind = "placeholder";
     widgetQueryDraft = clone(savedQuery ?? defaultWidgetQuery());
+    widgetTableDraft = reconcileTablePresentation(widgetQueryDraft, savedTable);
     if (!sameSource) {
       invalidateWidgetRuntime(widget.id);
     }
@@ -952,7 +1042,9 @@ function renderRelationDetail(descriptor) {
   clear.addEventListener("click", () => {
     if (!editMode || !widget?.configuration?.source) return;
     widget.configuration = {};
+    widget.kind = "placeholder";
     widgetQueryDraft = null;
+    widgetTableDraft = null;
     invalidateWidgetRuntime(widget.id);
     assignmentStatus.textContent = `Cleared source from ${widget.title}.`;
     markDashboardChanged(true);
@@ -993,6 +1085,7 @@ async function verifyDashboardSources() {
   const generation = ++sourceVerificationGeneration;
   sourceVerification.clear();
   widgetQueryResults.clear();
+  widgetTablePages.clear();
   widgetQueryExecutionTokens.clear();
   for (const key of executedSqlByResult.keys()) {
     if (key.endsWith(":widget")) executedSqlByResult.delete(key);
@@ -1103,6 +1196,7 @@ async function openWidgetEditor(widgetId) {
   widgetEditorGeneration += 1;
   editedWidgetId = widget.id;
   widgetQueryDraft = clone(widget.configuration?.query ?? defaultWidgetQuery());
+  widgetTableDraft = reconcileTablePresentation(widgetQueryDraft, widget.configuration?.table);
   elements.widgetEditorName.disabled = false;
   document.querySelector("#reset-widget-query").disabled = false;
   elements.widgetQueryLimit.disabled = false;
@@ -1179,54 +1273,129 @@ function formatQueryValue(value, format = { style: "auto" }) {
 
 function renderQueryResult(card, widget) {
   if (!widget.configuration?.query) return;
-  while (card.querySelector(":scope > header")?.nextSibling) card.querySelector(":scope > header").nextSibling.remove();
+  const focusedBody = card.querySelector(":scope > .focused-widget-body");
+  const container = focusedBody ?? card;
+  if (focusedBody) focusedBody.replaceChildren();
+  else while (card.querySelector(":scope > header")?.nextSibling) card.querySelector(":scope > header").nextSibling.remove();
   card.classList.add("query-result-widget");
+  if (widget.kind === "aggregate_report") card.classList.add("aggregate-report-widget");
   const execution = widgetQueryResults.get(widget.id);
   if (!execution || execution.state !== "ready") {
     const status = document.createElement("p");
     status.className = `query-result-status${execution?.state === "error" ? " error" : ""}`;
     status.textContent = execution?.message || "Waiting for source verification...";
-    card.append(status);
+    container.append(status);
     return;
   }
+  const presentation = reconcileTablePresentation(widget.configuration.query, widget.configuration.table);
+  const resultColumns = new Map(execution.result.columns.map((column, index) => [column.id, { column, index }]));
+  const visibleColumns = presentation.columns.map(item => ({ presentation: item, ...resultColumns.get(item.targetId) })).filter(item => item.column && !item.presentation.hidden);
+  if (!visibleColumns.length) {
+    const status = document.createElement("p");
+    status.className = "query-result-status";
+    status.textContent = "All aggregate report columns are hidden. Show a column in Sort, Columns & Limit.";
+    container.append(status);
+    return;
+  }
+  const pageSize = presentation.pageSize;
+  const pageCount = Math.max(1, Math.ceil(execution.result.rows.length / pageSize));
+  const page = Math.min(widgetTablePages.get(widget.id) ?? 0, pageCount - 1);
+  widgetTablePages.set(widget.id, page);
+  const rows = execution.result.rows.slice(page * pageSize, (page + 1) * pageSize);
   const scroll = document.createElement("div");
   scroll.className = "query-result-scroll";
   scroll.tabIndex = 0;
   scroll.setAttribute("role", "region");
   scroll.setAttribute("aria-label", `${widget.title} query results`);
   const table = document.createElement("table");
+  table.className = "aggregate-report-table";
+  const colgroup = document.createElement("colgroup");
+  for (const item of visibleColumns) {
+    const col = document.createElement("col");
+    col.style.width = `${item.presentation.width}px`;
+    colgroup.append(col);
+  }
   const head = document.createElement("thead");
   const headRow = document.createElement("tr");
-  for (const column of execution.result.columns) {
+  let pinnedOffset = 0;
+  const pinnedOffsets = new Map();
+  for (const { presentation: item, column } of visibleColumns) {
     const cell = document.createElement("th");
-    cell.textContent = column.label;
+    cell.textContent = item.label;
+    cell.dataset.resultFieldId = column.id;
+    cell.dataset.resultFieldKind = column.kind;
+    cell.dataset.sourceColumn = column.sourceColumn ?? "";
+    cell.style.width = `${item.width}px`;
+    if (item.pinned) {
+      pinnedOffsets.set(column.id, pinnedOffset);
+      cell.classList.add("pinned");
+      cell.style.left = `${pinnedOffset}px`;
+      pinnedOffset += item.width;
+    }
     headRow.append(cell);
   }
   head.append(headRow);
   const body = document.createElement("tbody");
-  for (const values of execution.result.rows) {
+  for (const values of rows) {
     const row = document.createElement("tr");
-    values.forEach((value, index) => {
+    const dimensions = execution.result.columns.filter(column => column.kind === "dimension").map((column, index) => ({
+      targetId: column.id,
+      column: column.sourceColumn,
+      operator: values[index] === null ? "is_null" : "eq",
+      values: values[index] === null ? [] : [values[index]]
+    }));
+    row.dataset.drillLineage = JSON.stringify({ dimensions, filterGroups: execution.result.lineage?.filterGroups ?? [] });
+    for (const { presentation: item, column, index } of visibleColumns) {
+      const value = values[index];
       const cell = document.createElement("td");
-      cell.textContent = formatQueryValue(value, execution.result.columns[index].numberFormat);
+      cell.textContent = formatQueryValue(value, column.numberFormat);
+      cell.dataset.resultFieldId = column.id;
+      cell.dataset.resultFieldKind = column.kind;
+      cell.dataset.sourceColumn = column.sourceColumn ?? "";
+      cell.style.width = `${item.width}px`;
+      if (item.pinned) {
+        cell.classList.add("pinned");
+        cell.style.left = `${pinnedOffsets.get(column.id)}px`;
+      }
+      if (column.kind === "measure") {
+        cell.classList.add("drill-eligible");
+        cell.dataset.drillLineage = JSON.stringify({ dimensions, measure: execution.result.lineage?.measures?.find(measure => measure.id === column.id) ?? column, filterGroups: execution.result.lineage?.filterGroups ?? [] });
+      }
       row.append(cell);
-    });
+    }
     body.append(row);
   }
-  if (!execution.result.rows.length) {
+  if (!rows.length) {
     const row = document.createElement("tr");
     const cell = document.createElement("td");
-    cell.colSpan = execution.result.columns.length;
+    cell.colSpan = visibleColumns.length;
     cell.textContent = "No rows matched this query.";
     row.append(cell);
     body.append(row);
   }
-  table.append(head, body);
+  table.append(colgroup, head, body);
   scroll.append(table);
-  const summary = document.createElement("p");
+  const summary = document.createElement("div");
   summary.className = "query-result-summary";
-  summary.textContent = `${execution.result.rowCount} result row${execution.result.rowCount === 1 ? "" : "s"}${execution.result.truncated ? ` · limited to ${execution.result.limit}` : ""}`;
-  card.append(scroll, summary);
+  const count = document.createElement("span");
+  count.textContent = `${execution.result.rowCount} result row${execution.result.rowCount === 1 ? "" : "s"}${execution.result.truncated ? ` · limited to ${execution.result.limit}` : ""}`;
+  const pagination = document.createElement("div");
+  pagination.className = "query-result-pagination";
+  const previous = document.createElement("button");
+  previous.type = "button";
+  previous.textContent = "Previous";
+  previous.disabled = page === 0;
+  const pageLabel = document.createElement("span");
+  pageLabel.textContent = `Page ${page + 1} of ${pageCount}`;
+  const next = document.createElement("button");
+  next.type = "button";
+  next.textContent = "Next";
+  next.disabled = page >= pageCount - 1;
+  previous.addEventListener("click", () => { widgetTablePages.set(widget.id, page - 1); renderQueryResult(card, widget); });
+  next.addEventListener("click", () => { widgetTablePages.set(widget.id, page + 1); renderQueryResult(card, widget); });
+  pagination.append(previous, pageLabel, next);
+  summary.append(count, pagination);
+  container.append(scroll, summary);
 }
 
 async function executeWidgetQuery(widget, query = widget.configuration?.query, { render = true, publish = true } = {}) {
@@ -1248,6 +1417,7 @@ async function executeWidgetQuery(widget, query = widget.configuration?.query, {
     const queryCurrent = !publish || JSON.stringify(widget.configuration?.query) === JSON.stringify(querySnapshot);
     if (activeDashboard?.id !== dashboardId || widgetQueryExecutionTokens.get(tokenKey) !== executionToken || !sourceCurrent || !queryCurrent) throw new Error("Query execution was superseded; run it again");
     if (publish) {
+      widgetTablePages.set(widget.id, 0);
       widgetQueryResults.set(widget.id, { state: "ready", result });
       executedSqlByResult.set(`${widget.id}:widget`, { sql: result.sql, parameters: result.parameters });
     }
@@ -1288,7 +1458,7 @@ function dashboardWidgetElement(widget) {
   }
   if (!card) {
     card = document.createElement("article");
-    card.className = "widget metric-widget placeholder-widget";
+    card.className = widget.kind === "aggregate_report" ? "widget table-widget aggregate-report-widget" : "widget metric-widget placeholder-widget";
     const header = document.createElement("header");
     const title = document.createElement("span");
     title.textContent = widget.title;
@@ -1300,6 +1470,10 @@ function dashboardWidgetElement(widget) {
     card.append(header, mark, copy);
   }
   card.dataset.widgetId = widget.id;
+  if (widget.configuration?.query) {
+    card.classList.add("aggregate-report-widget", "table-widget");
+    card.classList.remove("metric-widget", "placeholder-widget");
+  }
   card.tabIndex = 0;
   card.draggable = editMode;
   card.setAttribute("aria-label", editMode ? `Move ${widget.title}` : `Open ${widget.title}`);
@@ -1454,6 +1628,7 @@ function openDashboard(dashboardId) {
   activeDashboard = record ? clone(record) : null;
   queryExecutionGeneration += 1;
   widgetQueryResults.clear();
+  widgetTablePages.clear();
   widgetQueryExecutionTokens.clear();
   executedSqlByResult.clear();
   dashboardConflict = false;
@@ -1667,6 +1842,7 @@ function deleteWidget(widgetId) {
 }
 
 function widgetType(widget) {
+  if (widget.kind === "aggregate_report" || widget.configuration?.query) return "Aggregate report";
   if (widget.id === "widget_trend") return "Line chart";
   if (widget.id === "widget_status") return "Donut chart";
   if (widget.id === "widget_recent") return "Data table";
@@ -2060,6 +2236,7 @@ elements.widgetEditor.addEventListener("close", () => {
   widgetEditorGeneration += 1;
   editedWidgetId = null;
   widgetQueryDraft = null;
+  widgetTableDraft = null;
   relationInspectionGeneration += 1;
   relationCatalogGeneration += 1;
 });
@@ -2087,6 +2264,7 @@ elements.widgetQueryLimit.addEventListener("change", () => {
 document.querySelector("#reset-widget-query").addEventListener("click", () => {
   const widget = activeDashboard?.dashboard.widgets.find(item => item.id === editedWidgetId);
   widgetQueryDraft = clone(widget?.configuration?.query ?? defaultWidgetQuery());
+  widgetTableDraft = reconcileTablePresentation(widgetQueryDraft, widget?.configuration?.table);
   renderWidgetQueryDraft();
 });
 document.querySelector("#apply-widget-query").addEventListener("click", async event => {
@@ -2097,6 +2275,7 @@ document.querySelector("#apply-widget-query").addEventListener("click", async ev
   const widgetId = widget.id;
   const source = clone(widget.configuration.source);
   const draft = clone(widgetQueryDraft);
+  const tableDraft = reconcileTablePresentation(draft, clone(widgetTableDraft));
   const applySession = { dashboardId, widgetId, generation: widgetEditorGeneration };
   widgetQueryApplySession = applySession;
   renderWidgetQueryDraft();
@@ -2108,9 +2287,12 @@ document.querySelector("#apply-widget-query").addEventListener("click", async ev
     queryExecuted = true;
     const currentWidget = activeDashboard?.dashboard.widgets.find(item => item.id === widgetId);
     if (activeDashboard?.id !== dashboardId || editedWidgetId !== widgetId || widgetEditorGeneration !== applySession.generation || currentWidget !== widget || sourceVerification.get(widgetId)?.state !== "verified" || JSON.stringify(widget.configuration.source) !== JSON.stringify(source)) return;
-    widget.configuration = { source, query: draft };
+    widget.kind = "aggregate_report";
+    widget.configuration = { source, query: draft, table: tableDraft };
     widgetQueryDraft = clone(draft);
+    widgetTableDraft = clone(tableDraft);
     widgetQueryExecutionTokens.set(`${widget.id}:publish`, {});
+    widgetTablePages.set(widget.id, 0);
     widgetQueryResults.set(widget.id, { state: "ready", result });
     executedSqlByResult.set(`${widget.id}:widget`, { sql: result.sql, parameters: result.parameters });
     markDashboardChanged(true);

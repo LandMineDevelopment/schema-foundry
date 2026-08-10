@@ -91,14 +91,14 @@ Acceptance criteria: one query can return any configured set of group-by columns
 
 Approval required before implementation.
 
-- [ ] Add Aggregate Report as a first-class table widget.
-- [ ] Render any number of group-by columns followed by any number of metric columns.
-- [ ] Add column reorder, resize, hide/show, pinning, labels, and per-measure formatting.
+- [x] Add Aggregate Report as a first-class table widget.
+- [x] Render any number of group-by columns followed by any number of metric columns.
+- [x] Add column reorder, resize, hide/show, pinning, labels, and per-measure formatting.
 - [x] Add ordered multi-column sorting by dimensions or measures.
-- [ ] Add bounded pagination or windowing for large grouped results.
-- [ ] Preserve the complete query configuration when columns are hidden.
-- [ ] Make aggregate rows and metric cells eligible for drill-through.
-- [ ] Defer pivots, subtotals, and grand totals unless separately approved.
+- [x] Add bounded pagination or windowing for large grouped results.
+- [x] Preserve the complete query configuration when columns are hidden.
+- [x] Make aggregate rows and metric cells eligible for drill-through.
+- [x] Defer pivots, subtotals, and grand totals unless separately approved.
 
 Acceptance criteria: users can build and persist a grouped table such as publisher + format with orders, units, revenue, and average value metrics.
 
