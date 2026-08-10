@@ -70,7 +70,6 @@
           <label>Password<input id="profile-password" type="password" autocomplete="new-password" /><small>Leave empty while editing to keep the stored password.</small></label>
           <div class="field-pair"><label>SSL mode<select id="profile-sslmode"><option>prefer</option><option>require</option><option>verify-ca</option><option>verify-full</option><option>disable</option><option>allow</option></select></label><label>Timeout<input id="profile-timeout" type="number" min="1" max="120" value="10" /></label></div>
           <p class="form-status" id="connection-status"></p><div class="form-actions"><button class="button button-ghost" id="test-connection" type="button">Test</button><button class="button button-primary" type="submit">Save connection</button></div>
-          <div class="relation-browser"><div class="relation-browser-head"><strong>Relations</strong><span>Tables, views, and materialized views</span></div><p id="relation-browser-status">Select a connection and namespace.</p><div class="relation-list" id="relation-list"></div><section class="relation-detail" id="relation-detail" hidden></section></div>
         </form>
       </div>
     </dialog>
@@ -80,6 +79,14 @@
         <div class="dialog-head"><div><span class="eyebrow">Dashboard workspace</span><h2 id="dashboard-form-title">New dashboard</h2><p id="dashboard-form-copy">Create an empty dashboard.</p></div><button id="close-dashboard-form" type="button" aria-label="Close">x</button></div>
         <div class="dashboard-form-body"><label>Dashboard name<input id="dashboard-name" required maxlength="128" /></label><p class="form-status" id="dashboard-form-status"></p><div class="form-actions"><button class="button button-ghost" id="cancel-dashboard-form" type="button">Cancel</button><button class="button button-primary" type="submit">Continue</button></div></div>
       </form>
+    </dialog>
+
+    <dialog class="widget-editor-dialog" id="widget-editor-dialog">
+      <div class="dialog-head"><div><span class="eyebrow">Widget configuration</span><h2 id="widget-editor-title">Edit widget</h2><p>Configure this widget without affecting other dashboard widgets.</p></div><button id="close-widget-editor" type="button" aria-label="Close widget editor">x</button></div>
+      <div class="widget-editor-layout">
+        <nav class="widget-editor-nav" aria-label="Widget configuration sections"><button class="active" type="button">Source</button><button type="button" disabled>Groupings <small>Query model</small></button><button type="button" disabled>Filters <small>Query model</small></button></nav>
+        <section class="widget-source-editor"><div class="widget-source-selectors"><label>Connection<select id="widget-source-profile" aria-label="Widget source connection"></select></label><label>Namespace<select id="widget-source-namespace" aria-label="Widget source namespace"></select></label></div><div class="relation-browser"><div class="relation-browser-head"><strong>Relations</strong><span>Tables, views, and materialized views</span></div><p id="relation-browser-status">Select a connection and namespace.</p><div class="relation-list" id="relation-list"></div><section class="relation-detail" id="relation-detail" hidden></section></div></section>
+      </div>
     </dialog>
 
     <dialog class="executed-sql-dialog" id="executed-sql-dialog">

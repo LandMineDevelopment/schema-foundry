@@ -263,6 +263,64 @@ class PostgresServiceTests(unittest.TestCase):
         changed_service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: Connection(responses=changed_policy_input))
         self.assertEqual(result["fingerprint"], changed_service.inspect_relation("local", "demo", "public", "orders")["fingerprint"])
 
+    def test_verified_relation_preview_is_read_only_bounded_and_uses_one_relation(self):
+        responses = {
+            "SELECT current_database() AS database": [{"database": "demo"}],
+            "c.relkind AS catalog_kind": [{"catalog_kind": "v", "relation_kind": "view", "view_definition": "SELECT id, amount FROM payments"}],
+            "a.attname AS column_name": [
+                {"column_name": "id", "data_type": "bigint", "nullable": False, "ordinal": 1, "type_category": "N", "type_name": "int8"},
+                {"column_name": "amount", "data_type": "numeric", "nullable": True, "ordinal": 2, "type_category": "N", "type_name": "numeric"},
+            ],
+            'SELECT "id", "amount" FROM "public"."orders"': [
+                {"id": 1, "amount": Decimal("10.25")},
+                {"id": 2, "amount": Decimal("20")},
+                {"id": 3, "amount": Decimal("30")},
+            ],
+        }
+        connections = []
+        service = PostgresService(
+            self.temporary_directory.name,
+            connect_factory=lambda **kwargs: (connections.append(Connection(responses=responses)) or connections[-1]),
+        )
+        descriptor = service.inspect_relation("local", "demo", "public", "orders")
+        source = {key: descriptor[key] for key in ("profileId", "database", "namespace", "relation", "kind", "fingerprint")}
+        result = service.preview_relation_rows("local", source, offset=10, limit=2)
+        self.assertEqual(result["rows"], [{"id": 1, "amount": "10.25"}, {"id": 2, "amount": "20"}])
+        self.assertTrue(result["hasMore"])
+        self.assertEqual(result["nextOffset"], 12)
+        self.assertFalse(result["stableOrder"])
+        preview_connection = connections[-1]
+        self.assertEqual(preview_connection.executed[0][0], "SET TRANSACTION READ ONLY")
+        self.assertIn("SET LOCAL statement_timeout", preview_connection.executed[1][0])
+        data_sql, parameters = next(item for item in preview_connection.executed if 'FROM "public"."orders"' in item[0])
+        self.assertNotIn("*", data_sql)
+        self.assertNotIn("JOIN", data_sql.upper())
+        self.assertEqual(parameters, (3, 10))
+        self.assertTrue(preview_connection.closed)
+
+    def test_verified_relation_preview_rejects_stale_or_unbounded_sources_before_select(self):
+        responses = {
+            "SELECT current_database() AS database": [{"database": "demo"}],
+            "c.relkind AS catalog_kind": [{"catalog_kind": "r", "relation_kind": "table", "view_definition": None}],
+            "a.attname AS column_name": [{"column_name": "id", "data_type": "bigint", "nullable": False, "ordinal": 1, "type_category": "N", "type_name": "int8"}],
+        }
+        connections = []
+        service = PostgresService(
+            self.temporary_directory.name,
+            connect_factory=lambda **kwargs: (connections.append(Connection(responses=responses)) or connections[-1]),
+        )
+        source = {
+            "profileId": "local", "database": "demo", "namespace": "public", "relation": "orders",
+            "kind": "table", "fingerprint": "0" * 64,
+        }
+        with self.assertRaises(PostgresServiceError) as error:
+            service.preview_relation_rows("local", source)
+        self.assertEqual(error.exception.code, "relation_changed")
+        self.assertFalse(any('FROM "public"."orders"' in sql for sql, _ in connections[-1].executed))
+        for invalid_source, limit in (({**source, "join": "customers"}, 20), (source, 51)):
+            with self.subTest(source=invalid_source, limit=limit), self.assertRaises(ValidationError):
+                service.preview_relation_rows("local", invalid_source, limit=limit)
+
     def test_relation_inspection_rejects_stale_kind_and_fingerprint(self):
         responses = {
             "SELECT current_database() AS database": [{"database": "demo"}],

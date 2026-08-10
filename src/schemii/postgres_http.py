@@ -7,6 +7,7 @@ from urllib.parse import parse_qs
 PROFILE_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})(?:/(namespaces|relations|relation|fingerprint|test|introspect|preview))?$")
 DATA_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/data$")
 SQL_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/sql$")
+RELATION_PREVIEW_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/relation/preview$")
 
 
 class PostgresHttpMixin:
@@ -66,15 +67,20 @@ class PostgresHttpMixin:
                 self._service_call(lambda: self.service.save_profile(None, body), 201)
             return True
         sql_match = SQL_PATH.fullmatch(path)
+        relation_preview_match = RELATION_PREVIEW_PATH.fullmatch(path)
         profile_match = PROFILE_PATH.fullmatch(path)
-        if not sql_match and not (profile_match and profile_match.group(2) in {"test", "introspect"}):
+        if not sql_match and not relation_preview_match and not (profile_match and profile_match.group(2) in {"test", "introspect"}):
             return False
         if not self._authorize_postgres():
             return True
         body = self._body_or_error()
         if body is None:
             return True
-        if sql_match:
+        if relation_preview_match:
+            self._service_call(lambda: self.service.preview_relation_rows(
+                relation_preview_match.group(1), body.get("source"), body.get("offset", 0), body.get("limit", 20)
+            ))
+        elif sql_match:
             self._service_call(lambda: self.service.execute_read_only_sql(sql_match.group(1), body.get("namespace"), body.get("sql")))
         elif profile_match.group(2) == "test":
             self._service_call(lambda: self.service.test_profile(profile_match.group(1)))

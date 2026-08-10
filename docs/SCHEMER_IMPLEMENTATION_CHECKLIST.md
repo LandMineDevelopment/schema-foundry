@@ -22,6 +22,7 @@ This file is the durable implementation sequence for Schemer. Use it after a los
 - Drill-through details use the same source relation, slicers, widget filters, clicked dimensions, and measure-specific filters as the aggregate.
 - Generated aggregation SQL, parameters, source definitions, and detail SQL remain inspectable.
 - Visualization changes must not silently discard dimensions, measures, filters, formatting, or detail configuration.
+- Sources, groupings, measures, and filters are managed from the specific widget's editor in dashboard Edit mode, never from a global dashboard source picker.
 
 ## Phase 0: Shared Foundation
 
@@ -61,7 +62,7 @@ Approval required before implementation.
 - [x] Enforce exactly one source relation per widget.
 - [x] Reject hidden joins, cross-relation column references, and stale relation fingerprints.
 - [x] Suggest likely dimension, measure, date, and identifier columns from PostgreSQL types without silently choosing them.
-- [ ] Provide bounded read-only source-row preview.
+- [x] Provide bounded read-only source-row preview.
 - [ ] Add catalog-change and missing-column handling.
 
 Acceptance criteria: a widget can select one verified relation and inspect its columns; no Schemer API or UI can define a join.

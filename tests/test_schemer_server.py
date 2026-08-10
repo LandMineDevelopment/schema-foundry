@@ -56,6 +56,10 @@ class FakePostgresService:
             "fingerprint": "catalog-fingerprint",
         }
 
+    def preview_relation_rows(self, profile_id, source, offset, limit):
+        self.calls.append(("preview_relation_rows", profile_id, source, offset, limit))
+        return {**source, "columns": [], "rows": [{"id": 1}], "offset": offset, "nextOffset": offset + 1, "hasMore": False, "stableOrder": False}
+
     def catalog_status(self, profile_id, namespace):
         self.calls.append(("catalog_status", profile_id, namespace))
         return {"profileId": profile_id, "namespace": namespace, "fingerprint": "live"}
@@ -154,6 +158,15 @@ class SchemerServerTests(unittest.TestCase):
         self.assertIn(("list_namespaces", "shared"), self.service.calls)
         self.assertIn(("list_relations", "shared", "schemii", "bookstore"), self.service.calls)
         self.assertIn(("inspect_relation", "shared", "schemii", "bookstore", "orders", None, None), self.service.calls)
+        preview_source = {
+            "profileId": "shared", "database": "schemii", "namespace": "bookstore", "relation": "orders",
+            "kind": "table", "fingerprint": "a" * 64,
+        }
+        preview_path = "/api/postgres/profiles/shared/relation/preview"
+        status, body, _ = self.request(preview_path, "POST", {"source": preview_source, "limit": 20}, True)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["rows"], [{"id": 1}])
+        self.assertIn(("preview_relation_rows", "shared", preview_source, 0, 20), self.service.calls)
         self.assertIn(("test_profile", "shared"), self.service.calls)
 
     def test_profile_writes_use_shared_router_and_redact_password(self):

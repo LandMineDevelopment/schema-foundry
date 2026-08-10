@@ -6,6 +6,10 @@ const elements = {
   relationList: document.querySelector("#relation-list"),
   relationStatus: document.querySelector("#relation-browser-status"),
   relationDetail: document.querySelector("#relation-detail"),
+  widgetEditor: document.querySelector("#widget-editor-dialog"),
+  widgetEditorTitle: document.querySelector("#widget-editor-title"),
+  widgetSourceProfile: document.querySelector("#widget-source-profile"),
+  widgetSourceNamespace: document.querySelector("#widget-source-namespace"),
   sourceSummary: document.querySelector(".source-summary"),
   sourceName: document.querySelector("#source-name"),
   sourceDetail: document.querySelector("#source-detail"),
@@ -46,6 +50,7 @@ let profiles = [];
 let profilesLoading = null;
 let selectedProfileId = null;
 let selectedRelationIdentity = null;
+let editedWidgetId = null;
 let relationInspectionGeneration = 0;
 let relationCatalogGeneration = 0;
 let dashboards = [];
@@ -218,6 +223,43 @@ function renderRelations(catalog) {
   if (!catalog.relations.length) elements.relationStatus.textContent = `No supported relations in ${catalog.database}.${catalog.namespace}.`;
 }
 
+function exactSourceIdentity(descriptor) {
+  return {
+    profileId: descriptor.profileId,
+    database: descriptor.database,
+    namespace: descriptor.namespace,
+    relation: descriptor.relation,
+    kind: descriptor.kind,
+    fingerprint: descriptor.fingerprint
+  };
+}
+
+function renderRelationPreview(result, container) {
+  const table = document.createElement("table");
+  table.className = "relation-preview-table";
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const column of result.columns) {
+    const cell = document.createElement("th");
+    cell.textContent = column.name;
+    headRow.append(cell);
+  }
+  head.append(headRow);
+  const body = document.createElement("tbody");
+  for (const values of result.rows) {
+    const row = document.createElement("tr");
+    for (const column of result.columns) {
+      const cell = document.createElement("td");
+      const value = values[column.name];
+      cell.textContent = value === null ? "NULL" : typeof value === "object" ? JSON.stringify(value) : String(value);
+      row.append(cell);
+    }
+    body.append(row);
+  }
+  table.append(head, body);
+  container.replaceChildren(table);
+}
+
 function renderRelationDetail(descriptor) {
   const header = document.createElement("header");
   const title = document.createElement("strong");
@@ -263,53 +305,68 @@ function renderRelationDetail(descriptor) {
     body.append(row);
   }
   table.append(head, body);
+  const preview = document.createElement("section");
+  preview.className = "relation-preview";
+  const previewHeader = document.createElement("header");
+  const previewTitle = document.createElement("strong");
+  previewTitle.textContent = "Source rows";
+  const previewButton = document.createElement("button");
+  previewButton.type = "button";
+  previewButton.className = "button button-ghost";
+  previewButton.textContent = "Preview 20 rows";
+  previewHeader.append(previewTitle, previewButton);
+  const previewStatus = document.createElement("p");
+  previewStatus.textContent = "Read-only preview; row order is not guaranteed.";
+  const previewData = document.createElement("div");
+  previewData.className = "relation-preview-data";
+  previewButton.addEventListener("click", async () => {
+    previewButton.disabled = true;
+    previewStatus.textContent = "Loading verified source rows...";
+    try {
+      const result = await postgres.request(`/api/postgres/profiles/${encodeURIComponent(descriptor.profileId)}/relation/preview`, {
+        method: "POST",
+        body: JSON.stringify({ source: exactSourceIdentity(descriptor), offset: 0, limit: 20 })
+      });
+      renderRelationPreview(result, previewData);
+      previewStatus.textContent = `Showing ${result.rows.length} row${result.rows.length === 1 ? "" : "s"}${result.hasMore ? "; more rows are available" : ""}. Row order is not guaranteed.`;
+    } catch (error) {
+      previewData.replaceChildren();
+      previewStatus.textContent = error.message;
+    } finally {
+      previewButton.disabled = false;
+    }
+  });
+  preview.append(previewHeader, previewStatus, previewData);
   const assignment = document.createElement("div");
   assignment.className = "relation-assignment";
-  const assignmentLabel = document.createElement("label");
-  assignmentLabel.textContent = "Assign verified source to widget";
-  const widgetSelect = document.createElement("select");
-  widgetSelect.setAttribute("aria-label", "Widget receiving this source");
-  for (const widget of activeDashboard?.dashboard.widgets ?? []) {
-    const current = widget.configuration?.source;
-    const matches = current?.profileId === descriptor.profileId && current.database === descriptor.database && current.namespace === descriptor.namespace && current.relation === descriptor.relation && current.fingerprint === descriptor.fingerprint;
-    widgetSelect.append(new Option(`${widget.title}${matches ? " (current)" : ""}`, widget.id));
-  }
-  assignmentLabel.append(widgetSelect);
+  const widget = activeDashboard?.dashboard.widgets.find(item => item.id === editedWidgetId);
+  const assignmentLabel = document.createElement("strong");
+  assignmentLabel.textContent = widget ? `Source for ${widget.title}` : "Widget unavailable";
   const actions = document.createElement("div");
   const assign = document.createElement("button");
   assign.type = "button";
   assign.className = "button button-primary";
   assign.textContent = "Assign source";
-  assign.disabled = !editMode || !widgetSelect.options.length;
+  assign.disabled = !editMode || !widget;
   const clear = document.createElement("button");
   clear.type = "button";
   clear.className = "button button-ghost";
   clear.textContent = "Clear source";
-  clear.disabled = !editMode || !widgetSelect.options.length || !activeDashboard?.dashboard.widgets.find(widget => widget.id === widgetSelect.value)?.configuration?.source;
+  clear.disabled = !editMode || !widget?.configuration?.source;
   const assignmentStatus = document.createElement("span");
-  assignmentStatus.textContent = editMode ? "" : "Enter Edit mode to change widget sources.";
+  assignmentStatus.textContent = "";
   const updateClearState = () => {
-    clear.disabled = !editMode || !activeDashboard?.dashboard.widgets.find(widget => widget.id === widgetSelect.value)?.configuration?.source;
+    clear.disabled = !editMode || !widget?.configuration?.source;
   };
-  widgetSelect.addEventListener("change", updateClearState);
   assign.addEventListener("click", () => {
-    const widget = activeDashboard?.dashboard.widgets.find(item => item.id === widgetSelect.value);
     if (!editMode || !widget) return;
-    widget.configuration = { source: {
-      profileId: descriptor.profileId,
-      database: descriptor.database,
-      namespace: descriptor.namespace,
-      relation: descriptor.relation,
-      kind: descriptor.kind,
-      fingerprint: descriptor.fingerprint
-    }};
+    widget.configuration = { source: exactSourceIdentity(descriptor) };
     sourceVerification.set(widget.id, { state: "verified" });
     assignmentStatus.textContent = `Assigned to ${widget.title}.`;
     markDashboardChanged(true);
     updateClearState();
   });
   clear.addEventListener("click", () => {
-    const widget = activeDashboard?.dashboard.widgets.find(item => item.id === widgetSelect.value);
     if (!editMode || !widget?.configuration?.source) return;
     widget.configuration = {};
     sourceVerification.delete(widget.id);
@@ -319,7 +376,7 @@ function renderRelationDetail(descriptor) {
   });
   actions.append(assign, clear, assignmentStatus);
   assignment.append(assignmentLabel, actions);
-  elements.relationDetail.replaceChildren(header, fingerprintLabel, fingerprint, table, assignment);
+  elements.relationDetail.replaceChildren(header, fingerprintLabel, fingerprint, table, preview, assignment);
   elements.relationDetail.hidden = false;
 }
 
@@ -340,7 +397,6 @@ async function inspectSelectedRelation(catalog, relation) {
       fingerprint: descriptor.fingerprint
     };
     elements.relationStatus.textContent = `${descriptor.columns.length} column${descriptor.columns.length === 1 ? "" : "s"} · ${descriptor.database}.${descriptor.namespace}.${descriptor.relation}`;
-    elements.sourceDetail.textContent = `${descriptor.database}.${descriptor.namespace}.${descriptor.relation}`;
     renderRelationDetail(descriptor);
   } catch (error) {
     if (generation !== relationInspectionGeneration) return;
@@ -383,7 +439,7 @@ async function loadRelations(profile, namespace) {
   elements.relationDetail.hidden = true;
   if (!profile || !namespace) {
     elements.relationStatus.textContent = "Select a connection and namespace.";
-    return;
+    return null;
   }
   elements.relationStatus.textContent = `Loading ${profile.dbname}.${namespace}...`;
   try {
@@ -391,9 +447,11 @@ async function loadRelations(profile, namespace) {
     if (generation !== relationCatalogGeneration) return;
     elements.relationStatus.textContent = `${catalog.relations.length} supported relation${catalog.relations.length === 1 ? "" : "s"} in ${catalog.database}.${catalog.namespace}.`;
     renderRelations(catalog);
+    return catalog;
   } catch (error) {
     if (generation !== relationCatalogGeneration) return;
     elements.relationStatus.textContent = error.message;
+    return null;
   }
 }
 
@@ -409,15 +467,72 @@ async function selectProfile(profile) {
     elements.sourceName.textContent = profile.name;
     elements.sourceDetail.textContent = namespaces.length ? `${profile.dbname}.${namespaces[0]}` : `${profile.dbname} has no user namespaces`;
     setConnectionStatus(namespaces.length ? `Connected to ${profile.dbname}.` : "Connected; no user namespaces were found.");
-    await loadRelations(profile, namespaces[0]);
   } catch (error) {
     elements.namespaceSelect.replaceChildren(new Option("Connection unavailable", ""));
     elements.sourceSummary.classList.remove("connected");
     elements.sourceName.textContent = profile.name;
     elements.sourceDetail.textContent = error.message;
     setConnectionStatus(error.message, true);
-    await loadRelations(null, null);
   }
+}
+
+async function loadWidgetSourceNamespaces(profile, preferredNamespace = null) {
+  const widgetId = editedWidgetId;
+  elements.widgetSourceNamespace.disabled = true;
+  elements.widgetSourceNamespace.replaceChildren(new Option("Loading namespaces...", ""));
+  elements.relationList.replaceChildren();
+  elements.relationDetail.hidden = true;
+  try {
+    const result = await postgres.request(`/api/postgres/profiles/${encodeURIComponent(profile.id)}/namespaces`);
+    if (editedWidgetId !== widgetId) return;
+    const namespaces = result.namespaces ?? [];
+    elements.widgetSourceNamespace.replaceChildren(...namespaces.map(namespace => new Option(namespace, namespace)));
+    const namespace = namespaces.includes(preferredNamespace) ? preferredNamespace : namespaces[0];
+    if (namespace) elements.widgetSourceNamespace.value = namespace;
+    elements.widgetSourceNamespace.disabled = !namespaces.length;
+    return await loadRelations(profile, namespace);
+  } catch (error) {
+    if (editedWidgetId !== widgetId) return;
+    elements.widgetSourceNamespace.replaceChildren(new Option("Connection unavailable", ""));
+    elements.relationStatus.textContent = error.message;
+  }
+}
+
+async function openWidgetEditor(widgetId) {
+  const widget = activeDashboard?.dashboard.widgets.find(item => item.id === widgetId);
+  if (!editMode || !widget) return;
+  editedWidgetId = widget.id;
+  elements.widgetEditorTitle.textContent = `Edit ${widget.title}`;
+  elements.relationList.replaceChildren();
+  elements.relationDetail.replaceChildren();
+  elements.relationDetail.hidden = true;
+  elements.widgetEditor.showModal();
+  elements.relationStatus.textContent = "Loading widget sources...";
+  await loadProfiles();
+  if (editedWidgetId !== widget.id) return;
+  elements.widgetSourceProfile.replaceChildren(...profiles.map(profile => new Option(`${profile.name} · ${profile.dbname}`, profile.id)));
+  const currentSource = widget.configuration?.source;
+  const profile = profiles.find(item => item.id === currentSource?.profileId) ?? profiles.find(item => item.id === selectedProfileId) ?? profiles[0];
+  if (!profile) {
+    elements.widgetSourceProfile.replaceChildren(new Option("No saved connections", ""));
+    elements.widgetSourceProfile.disabled = true;
+    await loadRelations(null, null);
+    return;
+  }
+  elements.widgetSourceProfile.disabled = false;
+  elements.widgetSourceProfile.value = profile.id;
+  const catalog = await loadWidgetSourceNamespaces(profile, currentSource?.profileId === profile.id ? currentSource.namespace : null);
+  if (editedWidgetId !== widget.id || !currentSource || !catalog || currentSource.profileId !== profile.id || currentSource.namespace !== catalog.namespace) return;
+  const relation = catalog.relations.find(item => item.name === currentSource.relation);
+  if (!relation) return;
+  for (const item of elements.relationList.querySelectorAll(".relation-item")) {
+    item.classList.toggle("active", item.querySelector("strong")?.textContent === relation.name);
+  }
+  await inspectSelectedRelation(catalog, relation);
+}
+
+function closeWidgetEditor() {
+  elements.widgetEditor.close();
 }
 
 function dashboardWidgetElement(widget) {
@@ -478,6 +593,11 @@ function dashboardWidgetElement(widget) {
   const controls = document.createElement("div");
   controls.className = "widget-edit-controls";
   const widgetIndex = activeDashboard?.dashboard.widgets.findIndex(item => item.id === widget.id) ?? -1;
+  const edit = document.createElement("button");
+  edit.type = "button";
+  edit.dataset.action = "edit-widget";
+  edit.textContent = "Edit";
+  edit.setAttribute("aria-label", `Edit ${widget.title}`);
   const moveEarlier = document.createElement("button");
   moveEarlier.type = "button";
   moveEarlier.dataset.action = "move-widget-earlier";
@@ -498,7 +618,7 @@ function dashboardWidgetElement(widget) {
   remove.type = "button";
   remove.dataset.action = "delete-widget";
   remove.textContent = "Delete";
-  controls.append(moveEarlier, moveLater, duplicate, remove);
+  controls.append(edit, moveEarlier, moveLater, duplicate, remove);
   card.querySelector("header")?.append(viewSql, controls);
   applyWidgetLayout(card, widget);
   return card;
@@ -671,6 +791,7 @@ function setEditMode(enabled, flush = true) {
   elements.editModeButton.classList.toggle("button-primary", editMode);
   elements.editModeButton.classList.toggle("button-ghost", !editMode);
   elements.addWidgetButton.hidden = !editMode;
+  if (!editMode && elements.widgetEditor.open) closeWidgetEditor();
   for (const card of elements.canvas.querySelectorAll(".widget")) {
     card.draggable = editMode;
     const widget = activeDashboard?.dashboard.widgets.find(item => item.id === card.dataset.widgetId);
@@ -1080,7 +1201,6 @@ elements.namespaceSelect.addEventListener("change", () => {
   const profile = profiles.find(item => item.id === selectedProfileId);
   if (profile && elements.namespaceSelect.value) {
     elements.sourceDetail.textContent = `${profile.dbname}.${elements.namespaceSelect.value}`;
-    loadRelations(profile, elements.namespaceSelect.value);
   }
 });
 document.querySelector("#refresh-button").addEventListener("click", async event => {
@@ -1110,11 +1230,26 @@ document.querySelector("#close-dashboard-form").addEventListener("click", () => 
 document.querySelector("#cancel-dashboard-form").addEventListener("click", () => elements.formDialog.close());
 elements.dashboardForm.addEventListener("submit", event => { event.preventDefault(); submitDashboardForm(); });
 document.querySelector("#reload-dashboard").addEventListener("click", () => loadDashboards(activeDashboard?.id));
+document.querySelector("#close-widget-editor").addEventListener("click", closeWidgetEditor);
+elements.widgetEditor.addEventListener("close", () => {
+  editedWidgetId = null;
+  relationInspectionGeneration += 1;
+  relationCatalogGeneration += 1;
+});
+elements.widgetSourceProfile.addEventListener("change", () => {
+  const profile = profiles.find(item => item.id === elements.widgetSourceProfile.value);
+  if (profile) loadWidgetSourceNamespaces(profile);
+});
+elements.widgetSourceNamespace.addEventListener("change", () => {
+  const profile = profiles.find(item => item.id === elements.widgetSourceProfile.value);
+  if (profile) loadRelations(profile, elements.widgetSourceNamespace.value);
+});
 
 elements.canvas.addEventListener("click", event => {
   const action = event.target.closest("[data-action]")?.dataset.action;
   const widgetId = event.target.closest(".widget")?.dataset.widgetId;
   if (action === "view-widget-sql") return openExecutedSql(activeDashboard?.dashboard.widgets.find(widget => widget.id === widgetId));
+  if (action === "edit-widget") return openWidgetEditor(widgetId);
   if (action === "move-widget-earlier") return moveWidget(widgetId, -1);
   if (action === "move-widget-later") return moveWidget(widgetId, 1);
   if (action === "duplicate-widget") return duplicateWidget(widgetId);

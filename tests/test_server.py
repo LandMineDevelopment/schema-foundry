@@ -57,6 +57,10 @@ class FakePostgresService:
         self.calls.append(("inspect_relation", profile_id, database, namespace, relation, expected_kind, expected_fingerprint))
         return {"profileId": profile_id, "database": database, "namespace": namespace, "relation": relation, "kind": "table", "columns": [], "fingerprint": "live"}
 
+    def preview_relation_rows(self, profile_id, source, offset, limit):
+        self.calls.append(("preview_relation_rows", profile_id, source, offset, limit))
+        return {**source, "columns": [], "rows": [], "offset": offset, "nextOffset": offset, "hasMore": False, "stableOrder": False}
+
     def catalog_status(self, profile_id, namespace):
         self.calls.append(("catalog_status", profile_id, namespace))
         return {"profileId": profile_id, "namespace": namespace, "fingerprint": "live"}
@@ -301,6 +305,14 @@ class ServerTests(unittest.TestCase):
         verify_path = inspect_path + "&expectedKind=table&expectedFingerprint=" + "a" * 64
         self.assertEqual(self.request(verify_path, authorized=True)[0], 200)
         self.assertIn(("inspect_relation", "local", "demo", "public", "events", "table", "a" * 64), self.service.calls)
+        preview_source = {
+            "profileId": "local", "database": "demo", "namespace": "public", "relation": "events",
+            "kind": "table", "fingerprint": "a" * 64,
+        }
+        preview_path = "/api/postgres/profiles/local/relation/preview"
+        self.assertEqual(self.request(preview_path, "POST", {"source": preview_source, "offset": 5, "limit": 10})[0], 403)
+        self.assertEqual(self.request(preview_path, "POST", {"source": preview_source, "offset": 5, "limit": 10}, authorized=True)[0], 200)
+        self.assertIn(("preview_relation_rows", "local", preview_source, 5, 10), self.service.calls)
 
     def test_test_introspect_preview_and_apply_routes_forward_contracts(self):
         schema = {"projectName": "demo.public", "tables": [], "relationships": [], "functions": []}

@@ -709,10 +709,30 @@ class PostgresService:
         connection = self._connect(profile_id)
         try:
             self._execute_statement(connection, "SET TRANSACTION READ ONLY")
-            current = self._execute_rows(connection, "SELECT current_database() AS database")[0]["database"]
-            if current != database:
-                raise PostgresServiceError(409, "database_changed", "The connected PostgreSQL database does not match the requested database")
-            relation_rows = self._execute_rows(connection, """
+            return self._inspect_relation_connection(
+                connection, profile_id, database, namespace, relation, expected_kind, expected_fingerprint
+            )
+        except PostgresServiceError:
+            raise
+        except Exception as exc:
+            raise PostgresServiceError(502, "introspection_failed", "PostgreSQL relation metadata could not be read") from exc
+        finally:
+            self._close(connection)
+
+    def _inspect_relation_connection(
+        self,
+        connection: Any,
+        profile_id: str,
+        database: str,
+        namespace: str,
+        relation: str,
+        expected_kind: str | None,
+        expected_fingerprint: str | None,
+    ) -> dict[str, Any]:
+        current = self._execute_rows(connection, "SELECT current_database() AS database")[0]["database"]
+        if current != database:
+            raise PostgresServiceError(409, "database_changed", "The connected PostgreSQL database does not match the requested database")
+        relation_rows = self._execute_rows(connection, """
                 SELECT c.relkind AS catalog_kind,
                        CASE WHEN c.relkind IN ('r', 'p') THEN 'table'
                             WHEN c.relkind = 'v' THEN 'view'
@@ -721,11 +741,11 @@ class PostgresService:
                 FROM pg_catalog.pg_class c
                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
                 WHERE n.nspname = %s AND c.relname = %s AND c.relkind IN ('r', 'p', 'v', 'm')
-            """, (namespace, relation))
-            if not relation_rows:
-                raise NotFoundError(f"Relation {namespace}.{relation} was not found")
-            relation_row = relation_rows[0]
-            column_rows = self._execute_rows(connection, """
+        """, (namespace, relation))
+        if not relation_rows:
+            raise NotFoundError(f"Relation {namespace}.{relation} was not found")
+        relation_row = relation_rows[0]
+        column_rows = self._execute_rows(connection, """
                 SELECT a.attname AS column_name,
                        pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
                        NOT a.attnotnull AS nullable,
@@ -740,47 +760,90 @@ class PostgresService:
                 LEFT JOIN pg_catalog.pg_type base_type ON base_type.oid = attribute_type.typbasetype
                 WHERE n.nspname = %s AND c.relname = %s AND c.relkind IN ('r', 'p', 'v', 'm')
                 ORDER BY a.attnum
-            """, (namespace, relation))
-            fingerprint_columns = [
-                {
-                    "name": row["column_name"],
-                    "type": row["data_type"],
-                    "nullable": bool(row["nullable"]),
-                    "ordinal": int(row["ordinal"]),
-                }
-                for row in column_rows
-            ]
-            columns = [
-                {
-                    **column,
-                    "suggestions": self._column_role_suggestions(
-                        column["name"], row.get("type_category"), row.get("type_name")
-                    ),
-                }
-                for column, row in zip(fingerprint_columns, column_rows)
-            ]
-            descriptor = {
-                "profileId": profile_id,
-                "database": current,
-                "namespace": namespace,
-                "relation": relation,
-                "kind": relation_row["relation_kind"],
-                "columns": columns,
+        """, (namespace, relation))
+        fingerprint_columns = [
+            {
+                "name": row["column_name"],
+                "type": row["data_type"],
+                "nullable": bool(row["nullable"]),
+                "ordinal": int(row["ordinal"]),
             }
-            descriptor["fingerprint"] = canonical_fingerprint({
-                **descriptor, "columns": fingerprint_columns,
-                "catalogKind": relation_row["catalog_kind"],
-                "viewDefinition": relation_row.get("view_definition"),
-            })
-            if expected_kind is not None and descriptor["kind"] != expected_kind:
-                raise PostgresServiceError(409, "relation_changed", "The PostgreSQL relation kind changed; reselect the widget source")
-            if expected_fingerprint is not None and descriptor["fingerprint"] != expected_fingerprint:
-                raise PostgresServiceError(409, "relation_changed", "The PostgreSQL relation definition changed; reselect the widget source")
-            return descriptor
+            for row in column_rows
+        ]
+        columns = [
+            {
+                **column,
+                "suggestions": self._column_role_suggestions(
+                    column["name"], row.get("type_category"), row.get("type_name")
+                ),
+            }
+            for column, row in zip(fingerprint_columns, column_rows)
+        ]
+        descriptor = {
+            "profileId": profile_id,
+            "database": current,
+            "namespace": namespace,
+            "relation": relation,
+            "kind": relation_row["relation_kind"],
+            "columns": columns,
+        }
+        descriptor["fingerprint"] = canonical_fingerprint({
+            **descriptor, "columns": fingerprint_columns,
+            "catalogKind": relation_row["catalog_kind"],
+            "viewDefinition": relation_row.get("view_definition"),
+        })
+        if expected_kind is not None and descriptor["kind"] != expected_kind:
+            raise PostgresServiceError(409, "relation_changed", "The PostgreSQL relation kind changed; reselect the widget source")
+        if expected_fingerprint is not None and descriptor["fingerprint"] != expected_fingerprint:
+            raise PostgresServiceError(409, "relation_changed", "The PostgreSQL relation definition changed; reselect the widget source")
+        return descriptor
+
+    def preview_relation_rows(
+        self, profile_id: str, source: Any, offset: int = 0, limit: int = 20
+    ) -> dict[str, Any]:
+        fields = {"profileId", "database", "namespace", "relation", "kind", "fingerprint"}
+        if not isinstance(source, dict) or set(source) != fields or source.get("profileId") != profile_id:
+            raise ValidationError("source must be one exact relation identity for the requested profile")
+        database = self._validate_database(source.get("database"))
+        namespace = self._validate_namespace(source.get("namespace"))
+        relation = self._validate_relation_name(source.get("relation"))
+        kind = source.get("kind")
+        fingerprint = source.get("fingerprint")
+        if kind not in {"table", "view", "materialized_view"}:
+            raise ValidationError("source kind must be table, view, or materialized_view")
+        if not isinstance(fingerprint, str) or not FINGERPRINT_RE.fullmatch(fingerprint):
+            raise ValidationError("source fingerprint must be a 64-character lowercase hexadecimal fingerprint")
+        if isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset <= 10_000_000:
+            raise ValidationError("offset must be an integer from 0 to 10000000")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 50:
+            raise ValidationError("limit must be an integer from 1 to 50")
+        connection = self._connect(profile_id)
+        try:
+            self._execute_statement(connection, "SET TRANSACTION READ ONLY")
+            self._execute_statement(connection, f"SET LOCAL statement_timeout = '{self._statement_timeout_ms}ms'")
+            descriptor = self._inspect_relation_connection(
+                connection, profile_id, database, namespace, relation, kind, fingerprint
+            )
+            column_names = [column["name"] for column in descriptor["columns"]]
+            relation_sql = f"{quote_identifier(namespace)}.{quote_identifier(relation)}"
+            column_sql = ", ".join(quote_identifier(name) for name in column_names)
+            rows = self._execute_rows(
+                connection, f"SELECT {column_sql} FROM {relation_sql} LIMIT %s OFFSET %s", (limit + 1, offset)
+            )
+            has_more = len(rows) > limit
+            page = rows[:limit]
+            return {
+                **descriptor,
+                "rows": [{key: self._json_cell(value) for key, value in row.items()} for row in page],
+                "offset": offset,
+                "nextOffset": offset + len(page),
+                "hasMore": has_more,
+                "stableOrder": False,
+            }
         except PostgresServiceError:
             raise
         except Exception as exc:
-            raise PostgresServiceError(502, "introspection_failed", "PostgreSQL relation metadata could not be read") from exc
+            raise PostgresServiceError(502, "data_preview_failed", "PostgreSQL relation rows could not be read") from exc
         finally:
             self._close(connection)
 
