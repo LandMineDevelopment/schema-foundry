@@ -2102,8 +2102,10 @@ document.querySelector("#apply-widget-query").addEventListener("click", async ev
   renderWidgetQueryDraft();
   elements.widgetQueryStatus.textContent = "Validating and running against the verified source...";
   let finalMessage = "";
+  let queryExecuted = false;
   try {
     const result = await executeWidgetQuery(widget, draft, { publish: false });
+    queryExecuted = true;
     const currentWidget = activeDashboard?.dashboard.widgets.find(item => item.id === widgetId);
     if (activeDashboard?.id !== dashboardId || editedWidgetId !== widgetId || widgetEditorGeneration !== applySession.generation || currentWidget !== widget || sourceVerification.get(widgetId)?.state !== "verified" || JSON.stringify(widget.configuration.source) !== JSON.stringify(source)) return;
     widget.configuration = { source, query: draft };
@@ -2112,9 +2114,11 @@ document.querySelector("#apply-widget-query").addEventListener("click", async ev
     widgetQueryResults.set(widget.id, { state: "ready", result });
     executedSqlByResult.set(`${widget.id}:widget`, { sql: result.sql, parameters: result.parameters });
     markDashboardChanged(true);
-    finalMessage = "Query applied. The live result is displayed on this widget.";
+    elements.widgetQueryStatus.textContent = "Query ran successfully. Saving the dashboard...";
+    await flushPendingSave();
+    finalMessage = "Query applied and saved. The live result is displayed on this widget.";
   } catch (error) {
-    finalMessage = error.message;
+    finalMessage = queryExecuted ? "Query ran, but the dashboard could not be saved. Your changes remain local; retry Apply query & run." : error.message;
   } finally {
     if (widgetQueryApplySession === applySession) widgetQueryApplySession = null;
     if (activeDashboard?.id === dashboardId && editedWidgetId === widgetId && widgetEditorGeneration === applySession.generation) {
