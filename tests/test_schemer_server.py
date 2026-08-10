@@ -52,7 +52,7 @@ class FakePostgresService:
         self.calls.append(("inspect_relation", profile_id, database, namespace, relation, expected_kind, expected_fingerprint))
         return {
             "profileId": profile_id, "database": database, "namespace": namespace, "relation": relation,
-            "kind": "table", "columns": [{"name": "id", "type": "bigint", "nullable": False, "ordinal": 1}],
+            "kind": "table", "columns": [{"name": "id", "type": "bigint", "nullable": False, "ordinal": 1, "suggestions": ["dimension", "identifier"]}],
             "fingerprint": "catalog-fingerprint",
         }
 
@@ -149,6 +149,7 @@ class SchemerServerTests(unittest.TestCase):
         status, body, _ = self.request(inspect_path, authorized=True)
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["columns"][0]["type"], "bigint")
+        self.assertEqual(json.loads(body)["columns"][0]["suggestions"], ["dimension", "identifier"])
         self.assertEqual(self.request("/api/postgres/profiles/shared/test", "POST", {}, True)[0], 200)
         self.assertIn(("list_namespaces", "shared"), self.service.calls)
         self.assertIn(("list_relations", "shared", "schemii", "bookstore"), self.service.calls)

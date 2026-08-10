@@ -206,8 +206,8 @@ class PostgresServiceTests(unittest.TestCase):
             "SELECT current_database() AS database": [{"database": "demo"}],
             "c.relkind AS catalog_kind": [{"catalog_kind": "v", "relation_kind": "view", "view_definition": "SELECT id, total FROM orders"}],
             "a.attname AS column_name": [
-                {"column_name": "id", "data_type": "bigint", "nullable": False, "ordinal": 1},
-                {"column_name": "total", "data_type": "numeric(12,2)", "nullable": True, "ordinal": 2},
+                {"column_name": "id", "data_type": "bigint", "nullable": False, "ordinal": 1, "type_category": "N", "type_name": "int8"},
+                {"column_name": "total", "data_type": "numeric(12,2)", "nullable": True, "ordinal": 2, "type_category": "N", "type_name": "numeric"},
             ],
         }
         service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: Connection(responses=responses))
@@ -215,15 +215,15 @@ class PostgresServiceTests(unittest.TestCase):
         second = service.inspect_relation("local", "demo", "reporting", "order_summary")
         self.assertEqual(first["kind"], "view")
         self.assertEqual(first["columns"], [
-            {"name": "id", "type": "bigint", "nullable": False, "ordinal": 1},
-            {"name": "total", "type": "numeric(12,2)", "nullable": True, "ordinal": 2},
+            {"name": "id", "type": "bigint", "nullable": False, "ordinal": 1, "suggestions": ["dimension", "identifier"]},
+            {"name": "total", "type": "numeric(12,2)", "nullable": True, "ordinal": 2, "suggestions": ["dimension", "measure"]},
         ])
         self.assertEqual(len(first["fingerprint"]), 64)
         self.assertEqual(first["fingerprint"], second["fingerprint"])
 
         changed = {**responses, "a.attname AS column_name": [
             responses["a.attname AS column_name"][0],
-            {"column_name": "total", "data_type": "numeric(12,2)", "nullable": False, "ordinal": 2},
+            {"column_name": "total", "data_type": "numeric(12,2)", "nullable": False, "ordinal": 2, "type_category": "N", "type_name": "numeric"},
         ]}
         changed_service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: Connection(responses=changed))
         self.assertNotEqual(first["fingerprint"], changed_service.inspect_relation("local", "demo", "reporting", "order_summary")["fingerprint"])
@@ -239,11 +239,35 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertEqual(error.exception.code, "not_found")
         self.assertFalse(any("a.attname AS column_name" in sql for sql, _ in connection.executed))
 
+    def test_relation_column_role_suggestions_are_advisory_and_not_fingerprinted(self):
+        rows = [
+            {"column_name": "customer_id", "data_type": "bigint", "nullable": False, "ordinal": 1, "type_category": "N", "type_name": "int8"},
+            {"column_name": "amount", "data_type": "numeric", "nullable": False, "ordinal": 2, "type_category": "N", "type_name": "numeric"},
+            {"column_name": "ordered_at", "data_type": "timestamp with time zone", "nullable": False, "ordinal": 3, "type_category": "D", "type_name": "timestamptz"},
+            {"column_name": "external_key", "data_type": "uuid", "nullable": False, "ordinal": 4, "type_category": "U", "type_name": "uuid"},
+            {"column_name": "status", "data_type": "text", "nullable": False, "ordinal": 5, "type_category": "S", "type_name": "text"},
+            {"column_name": "metadata", "data_type": "jsonb", "nullable": True, "ordinal": 6, "type_category": "U", "type_name": "jsonb"},
+        ]
+        base = {
+            "SELECT current_database() AS database": [{"database": "demo"}],
+            "c.relkind AS catalog_kind": [{"catalog_kind": "r", "relation_kind": "table", "view_definition": None}],
+            "a.attname AS column_name": rows,
+        }
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: Connection(responses=base))
+        result = service.inspect_relation("local", "demo", "public", "orders")
+        self.assertEqual([column["suggestions"] for column in result["columns"]], [
+            ["dimension", "identifier"], ["dimension", "measure"], ["dimension", "date"],
+            ["dimension", "identifier"], ["dimension"], [],
+        ])
+        changed_policy_input = {**base, "a.attname AS column_name": [{**row, "type_category": "S"} for row in rows]}
+        changed_service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: Connection(responses=changed_policy_input))
+        self.assertEqual(result["fingerprint"], changed_service.inspect_relation("local", "demo", "public", "orders")["fingerprint"])
+
     def test_relation_inspection_rejects_stale_kind_and_fingerprint(self):
         responses = {
             "SELECT current_database() AS database": [{"database": "demo"}],
             "c.relkind AS catalog_kind": [{"catalog_kind": "r", "relation_kind": "table", "view_definition": None}],
-            "a.attname AS column_name": [{"column_name": "id", "data_type": "bigint", "nullable": False, "ordinal": 1}],
+            "a.attname AS column_name": [{"column_name": "id", "data_type": "bigint", "nullable": False, "ordinal": 1, "type_category": "N", "type_name": "int8"}],
         }
         service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: Connection(responses=responses))
         current = service.inspect_relation("local", "demo", "public", "orders")

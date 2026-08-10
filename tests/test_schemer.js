@@ -16,7 +16,9 @@ assert.match(source, /postgres\.request\(`\/api\/postgres\/profiles\/\$\{encodeU
 assert.match(source, /postgres\.request\(`\/api\/postgres\/profiles\/\$\{encodeURIComponent\(catalog\.profileId\)\}\/relation\?database=[\s\S]*&relation=\$\{encodeURIComponent\(relation\.name\)\}`\)/, "relation selection must inspect one exact catalog identity");
 assert.match(source, /selectedRelationIdentity = \{[\s\S]*profileId: descriptor\.profileId,[\s\S]*database: descriptor\.database,[\s\S]*namespace: descriptor\.namespace,[\s\S]*relation: descriptor\.relation,[\s\S]*kind: descriptor\.kind,[\s\S]*fingerprint: descriptor\.fingerprint/, "inspected relation identity must retain its stable catalog fingerprint");
 assert.match(html, /class="relation-browser"[\s\S]*Tables, views, and materialized views/, "the data-source dialog needs a supported relation browser");
-assert.match(source, /for \(const label of \["#", "Column", "PostgreSQL type", "Nullability"\]\)/, "relation inspection must display ordered PostgreSQL column metadata");
+assert.match(source, /for \(const label of \["#", "Column", "PostgreSQL type", "Nullability", "Suggested roles"\]\)/, "relation inspection must display ordered PostgreSQL column metadata and advisory roles");
+assert.match(source, /for \(const suggestion of column\.suggestions\)[\s\S]*badge\.textContent = suggestion/, "column role suggestions must render as advisory labels");
+assert.doesNotMatch(source, /widget\.configuration\.(?:dimension|measure|date|identifier)|widget\.configuration\[["'](?:dimension|measure|date|identifier)/, "role suggestions must not silently change widget configuration");
 assert.match(html, /class="relation-detail" id="relation-detail"/, "the relation browser needs a catalog detail pane");
 assert.match(source, /widget\.configuration = \{ source: \{[\s\S]*profileId: descriptor\.profileId,[\s\S]*fingerprint: descriptor\.fingerprint[\s\S]*markDashboardChanged\(true\)/, "Edit mode must assign exactly one verified source identity to a widget");
 assert.match(source, /assign\.disabled = !editMode[\s\S]*widget\.configuration = \{\}/, "View mode must not assign sources and Edit mode must support clearing one");
@@ -75,6 +77,7 @@ assert.match(styles, /content: attr\(data-bar-value\)[\s\S]*content: attr\(data-
 assert.match(styles, /\.population-filter-row \{[^}]*display: grid/, "applied filters must be shown as distinct field/value rows");
 assert.match(styles, /\.executed-sql-dialog \{[^}]*width: min\(900px/, "executed SQL must open in a readable popup");
 assert.match(styles, /\.relation-assignment \{[^}]*display: grid/, "relation details need a clear widget assignment control");
+assert.match(styles, /\.column-suggestions \{[^}]*display: flex/, "advisory column roles need a distinct visual treatment");
 assert.match(styles, /\.dashboard-canvas \.widget\.source-invalid \{[^}]*cursor: not-allowed/, "stale or unavailable sources need a visible blocked state");
 assert.match(styles, /\.focused-widget-body \{[^}]*flex: 1;[^}]*justify-content: center;/, "expanded graphics must be centered in the available widget body");
 assert.match(styles, /\.widget-inspector \{[^}]*padding: 18px;[^}]*background-image:/, "the inspector must use the same floating workspace treatment as the widget");

@@ -235,7 +235,7 @@ function renderRelationDetail(descriptor) {
   table.className = "relation-columns";
   const head = document.createElement("thead");
   const headRow = document.createElement("tr");
-  for (const label of ["#", "Column", "PostgreSQL type", "Nullability"]) {
+  for (const label of ["#", "Column", "PostgreSQL type", "Nullability", "Suggested roles"]) {
     const cell = document.createElement("th");
     cell.textContent = label;
     headRow.append(cell);
@@ -249,6 +249,17 @@ function renderRelationDetail(descriptor) {
       cell.textContent = value;
       row.append(cell);
     }
+    const suggestionCell = document.createElement("td");
+    const suggestions = document.createElement("div");
+    suggestions.className = "column-suggestions";
+    for (const suggestion of column.suggestions) {
+      const badge = document.createElement("span");
+      badge.textContent = suggestion;
+      suggestions.append(badge);
+    }
+    if (!column.suggestions.length) suggestions.textContent = "None";
+    suggestionCell.append(suggestions);
+    row.append(suggestionCell);
     body.append(row);
   }
   table.append(head, body);

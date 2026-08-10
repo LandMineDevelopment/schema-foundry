@@ -729,15 +729,19 @@ class PostgresService:
                 SELECT a.attname AS column_name,
                        pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
                        NOT a.attnotnull AS nullable,
-                       a.attnum AS ordinal
+                       a.attnum AS ordinal,
+                       COALESCE(base_type.typcategory, attribute_type.typcategory) AS type_category,
+                       COALESCE(base_type.typname, attribute_type.typname) AS type_name
                 FROM pg_catalog.pg_class c
                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
                 JOIN pg_catalog.pg_attribute a
                   ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+                JOIN pg_catalog.pg_type attribute_type ON attribute_type.oid = a.atttypid
+                LEFT JOIN pg_catalog.pg_type base_type ON base_type.oid = attribute_type.typbasetype
                 WHERE n.nspname = %s AND c.relname = %s AND c.relkind IN ('r', 'p', 'v', 'm')
                 ORDER BY a.attnum
             """, (namespace, relation))
-            columns = [
+            fingerprint_columns = [
                 {
                     "name": row["column_name"],
                     "type": row["data_type"],
@@ -745,6 +749,15 @@ class PostgresService:
                     "ordinal": int(row["ordinal"]),
                 }
                 for row in column_rows
+            ]
+            columns = [
+                {
+                    **column,
+                    "suggestions": self._column_role_suggestions(
+                        column["name"], row.get("type_category"), row.get("type_name")
+                    ),
+                }
+                for column, row in zip(fingerprint_columns, column_rows)
             ]
             descriptor = {
                 "profileId": profile_id,
@@ -755,7 +768,7 @@ class PostgresService:
                 "columns": columns,
             }
             descriptor["fingerprint"] = canonical_fingerprint({
-                **descriptor,
+                **descriptor, "columns": fingerprint_columns,
                 "catalogKind": relation_row["catalog_kind"],
                 "viewDefinition": relation_row.get("view_definition"),
             })
@@ -907,6 +920,21 @@ class PostgresService:
             self._close(connection)
 
     # ---- introspection --------------------------------------------------
+
+    @staticmethod
+    def _column_role_suggestions(column_name: str, type_category: Any, type_name: Any) -> list[str]:
+        category = type_category if isinstance(type_category, str) else ""
+        name = column_name.lower()
+        identifier = type_name == "uuid" or name == "id" or name.endswith("_id")
+        if identifier and category in {"N", "S", "U"}:
+            return ["dimension", "identifier"]
+        if category == "D":
+            return ["dimension", "date"]
+        if category == "N":
+            return ["dimension", "measure"]
+        if category in {"B", "E", "S"}:
+            return ["dimension"]
+        return []
 
     @staticmethod
     def _validate_database(database: Any) -> str:

@@ -60,7 +60,7 @@ Approval required before implementation.
 - [x] Return relation kind, columns, PostgreSQL types, nullability, and stable catalog fingerprint.
 - [x] Enforce exactly one source relation per widget.
 - [x] Reject hidden joins, cross-relation column references, and stale relation fingerprints.
-- [ ] Suggest likely dimension, measure, date, and identifier columns from PostgreSQL types without silently choosing them.
+- [x] Suggest likely dimension, measure, date, and identifier columns from PostgreSQL types without silently choosing them.
 - [ ] Provide bounded read-only source-row preview.
 - [ ] Add catalog-change and missing-column handling.
 

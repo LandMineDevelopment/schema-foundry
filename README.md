@@ -113,6 +113,8 @@ In Edit mode, a verified relation can be assigned to one dashboard widget. Versi
 
 Schemer verifies every persisted widget source against live PostgreSQL when a dashboard opens and when the catalog is refreshed. Verification requires the saved relation kind and fingerprint; mismatches return `relation_changed` and block the widget rather than silently adopting new metadata. Missing or unreachable sources are also blocked. The strict singular source shape has no join or cross-relation column-reference fields, and the dashboard validator rejects attempts to add them.
 
+Relation columns include advisory role suggestions derived from PostgreSQL type categories. Numeric values are suggested as measures, temporal values as dates, text/enums/booleans as dimensions, and UUID or conservatively named `id`/`*_id` values as identifiers. Suggestions are displayed as labels only: they are not persisted, do not select a role, and are excluded from relation fingerprints.
+
 ```bash
 docker compose -f compose.yaml -f compose.postgres.yaml -f compose.schemer.yaml up --build -d
 ```
