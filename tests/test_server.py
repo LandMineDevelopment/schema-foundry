@@ -53,8 +53,8 @@ class FakePostgresService:
         self.calls.append(("list_relations", profile_id, database, namespace))
         return {"profileId": profile_id, "database": database, "namespace": namespace, "relations": []}
 
-    def inspect_relation(self, profile_id, database, namespace, relation):
-        self.calls.append(("inspect_relation", profile_id, database, namespace, relation))
+    def inspect_relation(self, profile_id, database, namespace, relation, expected_kind=None, expected_fingerprint=None):
+        self.calls.append(("inspect_relation", profile_id, database, namespace, relation, expected_kind, expected_fingerprint))
         return {"profileId": profile_id, "database": database, "namespace": namespace, "relation": relation, "kind": "table", "columns": [], "fingerprint": "live"}
 
     def catalog_status(self, profile_id, namespace):
@@ -297,7 +297,10 @@ class ServerTests(unittest.TestCase):
         inspect_path = "/api/postgres/profiles/local/relation?database=demo&namespace=public&relation=events"
         self.assertEqual(self.request(inspect_path)[0], 403)
         self.assertEqual(self.request(inspect_path, authorized=True)[0], 200)
-        self.assertIn(("inspect_relation", "local", "demo", "public", "events"), self.service.calls)
+        self.assertIn(("inspect_relation", "local", "demo", "public", "events", None, None), self.service.calls)
+        verify_path = inspect_path + "&expectedKind=table&expectedFingerprint=" + "a" * 64
+        self.assertEqual(self.request(verify_path, authorized=True)[0], 200)
+        self.assertIn(("inspect_relation", "local", "demo", "public", "events", "table", "a" * 64), self.service.calls)
 
     def test_test_introspect_preview_and_apply_routes_forward_contracts(self):
         schema = {"projectName": "demo.public", "tables": [], "relationships": [], "functions": []}

@@ -64,6 +64,8 @@ let draggedWidgetId = null;
 let dragCenterOffset = { x: 0, y: 0 };
 let dragOrderChanged = false;
 let lastSwapTargetId = null;
+let sourceVerificationGeneration = 0;
+const sourceVerification = new Map();
 const executedSqlByResult = new Map();
 const postgres = window.SchemiiShared.createPostgresClient({
   getToken: () => sessionToken,
@@ -290,6 +292,7 @@ function renderRelationDetail(descriptor) {
       kind: descriptor.kind,
       fingerprint: descriptor.fingerprint
     }};
+    sourceVerification.set(widget.id, { state: "verified" });
     assignmentStatus.textContent = `Assigned to ${widget.title}.`;
     markDashboardChanged(true);
     updateClearState();
@@ -298,6 +301,7 @@ function renderRelationDetail(descriptor) {
     const widget = activeDashboard?.dashboard.widgets.find(item => item.id === widgetSelect.value);
     if (!editMode || !widget?.configuration?.source) return;
     widget.configuration = {};
+    sourceVerification.delete(widget.id);
     assignmentStatus.textContent = `Cleared source from ${widget.title}.`;
     markDashboardChanged(true);
     updateClearState();
@@ -331,6 +335,33 @@ async function inspectSelectedRelation(catalog, relation) {
     if (generation !== relationInspectionGeneration) return;
     elements.relationStatus.textContent = error.message;
   }
+}
+
+function sourceVerificationPath(source) {
+  return `/api/postgres/profiles/${encodeURIComponent(source.profileId)}/relation?database=${encodeURIComponent(source.database)}&namespace=${encodeURIComponent(source.namespace)}&relation=${encodeURIComponent(source.relation)}&expectedKind=${encodeURIComponent(source.kind)}&expectedFingerprint=${encodeURIComponent(source.fingerprint)}`;
+}
+
+async function verifyDashboardSources() {
+  const dashboardId = activeDashboard?.id;
+  const generation = ++sourceVerificationGeneration;
+  sourceVerification.clear();
+  const sourcedWidgets = activeDashboard?.dashboard.widgets.filter(widget => widget.configuration?.source) ?? [];
+  if (!sourcedWidgets.length) return;
+  for (const widget of sourcedWidgets) sourceVerification.set(widget.id, { state: "checking" });
+  renderDashboard();
+  const uniqueSources = new Map(sourcedWidgets.map(widget => [JSON.stringify(widget.configuration.source), widget.configuration.source]));
+  const results = new Map();
+  await Promise.all(Array.from(uniqueSources, async ([key, source]) => {
+    try {
+      await postgres.request(sourceVerificationPath(source));
+      results.set(key, { state: "verified" });
+    } catch (error) {
+      results.set(key, { state: "error", code: error.code || "source_unavailable", message: error.message });
+    }
+  }));
+  if (generation !== sourceVerificationGeneration || activeDashboard?.id !== dashboardId) return;
+  for (const widget of sourcedWidgets) sourceVerification.set(widget.id, results.get(JSON.stringify(widget.configuration.source)));
+  renderDashboard();
 }
 
 async function loadRelations(profile, namespace) {
@@ -415,7 +446,14 @@ function dashboardWidgetElement(widget) {
     }
     const sourceLabel = document.createElement("small");
     sourceLabel.className = "widget-source-label";
-    sourceLabel.textContent = `${source.database}.${source.namespace}.${source.relation}`;
+    const verification = sourceVerification.get(widget.id);
+    const suffix = verification?.state === "checking" ? " · checking" : verification?.state === "error" ? verification.code === "relation_changed" ? " · source changed" : " · source unavailable" : "";
+    sourceLabel.textContent = `${source.database}.${source.namespace}.${source.relation}${suffix}`;
+    card.dataset.sourceState = verification?.state || "unverified";
+    if (verification?.state === "error") {
+      card.classList.add("source-invalid");
+      sourceLabel.title = verification.message;
+    }
     titleGroup.append(sourceLabel);
   }
   const oldMenu = card.querySelector("header > button");
@@ -529,6 +567,7 @@ function openDashboard(dashboardId) {
   renderDashboardList();
   renderDashboard();
   setSaveStatus(activeDashboard ? "Saved" : "No dashboard", activeDashboard ? "saved" : "");
+  verifyDashboardSources();
 }
 
 async function loadDashboards(preferredId = activeDashboard?.id) {
@@ -657,6 +696,7 @@ function duplicateWidget(widgetId) {
   duplicate.layout.desktop.y += 1;
   duplicate.layout.mobile.order = activeDashboard.dashboard.widgets.length;
   activeDashboard.dashboard.widgets.push(duplicate);
+  if (sourceVerification.has(source.id)) sourceVerification.set(duplicate.id, sourceVerification.get(source.id));
   markDashboardChanged(true);
 }
 
@@ -716,6 +756,7 @@ function deleteWidget(widgetId) {
   const widget = activeDashboard?.dashboard.widgets.find(item => item.id === widgetId);
   if (!widget || !editMode || !confirm(`Delete widget “${widget.title}”?`)) return;
   activeDashboard.dashboard.widgets = activeDashboard.dashboard.widgets.filter(item => item.id !== widgetId);
+  sourceVerification.delete(widgetId);
   activeDashboard.dashboard.widgets.forEach((item, index) => { item.layout.mobile.order = index; });
   markDashboardChanged(true);
 }
@@ -846,6 +887,11 @@ function populationTable(filters) {
 function openWidgetFocus(widgetId) {
   const widget = activeDashboard?.dashboard.widgets.find(item => item.id === widgetId);
   if (!widget) return;
+  const verification = sourceVerification.get(widget.id);
+  if (widget.configuration?.source && verification?.state !== "verified") {
+    elements.sourceDetail.textContent = verification?.message || "Verifying widget source before opening results";
+    return;
+  }
   if (editMode) setEditMode(false);
   const sourceCard = elements.canvas.querySelector(`[data-widget-id="${widget.id}"]`);
   focusedSourceRect = sourceCard?.getBoundingClientRect() ?? null;
@@ -1031,6 +1077,7 @@ document.querySelector("#refresh-button").addEventListener("click", async event 
   event.currentTarget.textContent = "Checking...";
   try {
     await postgres.request(`/api/postgres/profiles/${encodeURIComponent(selectedProfileId)}/fingerprint?namespace=${encodeURIComponent(elements.namespaceSelect.value)}`);
+    await verifyDashboardSources();
     elements.sourceDetail.textContent = `${profiles.find(profile => profile.id === selectedProfileId)?.dbname}.${elements.namespaceSelect.value} refreshed now`;
   } catch (error) {
     elements.sourceDetail.textContent = error.message;

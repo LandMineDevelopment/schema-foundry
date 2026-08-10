@@ -48,7 +48,8 @@ class PostgresHttpMixin:
                 query = parse_qs(parsed.query)
                 self._service_call(lambda: self.service.inspect_relation(
                     profile_match.group(1), query.get("database", [None])[0], query.get("namespace", [None])[0],
-                    query.get("relation", [None])[0]
+                    query.get("relation", [None])[0], query.get("expectedKind", [None])[0],
+                    query.get("expectedFingerprint", [None])[0]
                 ))
             else:
                 namespace = parse_qs(parsed.query).get("namespace", [None])[0]

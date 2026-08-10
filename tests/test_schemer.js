@@ -20,7 +20,10 @@ assert.match(source, /for \(const label of \["#", "Column", "PostgreSQL type", "
 assert.match(html, /class="relation-detail" id="relation-detail"/, "the relation browser needs a catalog detail pane");
 assert.match(source, /widget\.configuration = \{ source: \{[\s\S]*profileId: descriptor\.profileId,[\s\S]*fingerprint: descriptor\.fingerprint[\s\S]*markDashboardChanged\(true\)/, "Edit mode must assign exactly one verified source identity to a widget");
 assert.match(source, /assign\.disabled = !editMode[\s\S]*widget\.configuration = \{\}/, "View mode must not assign sources and Edit mode must support clearing one");
-assert.match(source, /sourceLabel\.textContent = `\$\{source\.database\}\.\$\{source\.namespace\}\.\$\{source\.relation\}`/, "sourced widgets must display their exact relation identity");
+assert.match(source, /sourceLabel\.textContent = `\$\{source\.database\}\.\$\{source\.namespace\}\.\$\{source\.relation\}\$\{suffix\}`/, "sourced widgets must display their exact relation identity and verification state");
+assert.match(source, /function sourceVerificationPath\(source\)[\s\S]*expectedKind=\$\{encodeURIComponent\(source\.kind\)\}[\s\S]*expectedFingerprint=\$\{encodeURIComponent\(source\.fingerprint\)\}/, "live source checks must require the saved relation kind and fingerprint");
+assert.match(source, /async function verifyDashboardSources\(\)[\s\S]*state: "checking"[\s\S]*code: error\.code[\s\S]*renderDashboard\(\)/, "dashboard loading must visibly verify every persisted source");
+assert.match(source, /widget\.configuration\?\.source && verification\?\.state !== "verified"[\s\S]*return;/, "unverified or stale widget sources must not open results");
 assert.match(source, /if \(profilesLoading\) return profilesLoading[\s\S]*generation !== relationCatalogGeneration/, "concurrent profile and relation loads must not clear newer catalog inspection state");
 assert.match(source, /connections-button[\s\S]*if \(!profiles\.length\) await loadProfiles\(\)/, "opening an already loaded source browser must not clear its inspected relation");
 assert.match(source, /replaceChildren/, "connection metadata must render through DOM APIs");
@@ -72,6 +75,7 @@ assert.match(styles, /content: attr\(data-bar-value\)[\s\S]*content: attr\(data-
 assert.match(styles, /\.population-filter-row \{[^}]*display: grid/, "applied filters must be shown as distinct field/value rows");
 assert.match(styles, /\.executed-sql-dialog \{[^}]*width: min\(900px/, "executed SQL must open in a readable popup");
 assert.match(styles, /\.relation-assignment \{[^}]*display: grid/, "relation details need a clear widget assignment control");
+assert.match(styles, /\.dashboard-canvas \.widget\.source-invalid \{[^}]*cursor: not-allowed/, "stale or unavailable sources need a visible blocked state");
 assert.match(styles, /\.focused-widget-body \{[^}]*flex: 1;[^}]*justify-content: center;/, "expanded graphics must be centered in the available widget body");
 assert.match(styles, /\.widget-inspector \{[^}]*padding: 18px;[^}]*background-image:/, "the inspector must use the same floating workspace treatment as the widget");
 assert.match(styles, /\.widget-inspector-body \{[^}]*border-radius: 0 0 8px 8px;[^}]*linear-gradient/, "the inspector header and table must form one floating card");

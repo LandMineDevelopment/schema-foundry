@@ -239,6 +239,24 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertEqual(error.exception.code, "not_found")
         self.assertFalse(any("a.attname AS column_name" in sql for sql, _ in connection.executed))
 
+    def test_relation_inspection_rejects_stale_kind_and_fingerprint(self):
+        responses = {
+            "SELECT current_database() AS database": [{"database": "demo"}],
+            "c.relkind AS catalog_kind": [{"catalog_kind": "r", "relation_kind": "table", "view_definition": None}],
+            "a.attname AS column_name": [{"column_name": "id", "data_type": "bigint", "nullable": False, "ordinal": 1}],
+        }
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: Connection(responses=responses))
+        current = service.inspect_relation("local", "demo", "public", "orders")
+        verified = service.inspect_relation("local", "demo", "public", "orders", "table", current["fingerprint"])
+        self.assertEqual(verified["fingerprint"], current["fingerprint"])
+        for kind, fingerprint in (("view", current["fingerprint"]), ("table", "0" * 64)):
+            with self.subTest(kind=kind, fingerprint=fingerprint), self.assertRaises(PostgresServiceError) as error:
+                service.inspect_relation("local", "demo", "public", "orders", kind, fingerprint)
+            self.assertEqual(error.exception.status, 409)
+            self.assertEqual(error.exception.code, "relation_changed")
+        with self.assertRaises(ValidationError):
+            service.inspect_relation("local", "demo", "public", "orders", "table", "invalid")
+
     def test_table_data_preview_validates_page_and_missing_table(self):
         with self.assertRaises(ValidationError):
             self.service.preview_table_data("local", "public", "events", limit=51)

@@ -85,7 +85,9 @@ class DashboardStoreTests(unittest.TestCase):
     def test_widget_source_rejects_multiple_sources_joins_sql_and_malformed_identity(self):
         invalid_configurations = [
             {"sources": [SOURCE]},
+            {"source": SOURCE, "columns": [{"relation": "customers", "column": "id"}]},
             {"source": {**SOURCE, "join": {"relation": "customers"}}},
+            {"source": {**SOURCE, "columnReference": "customers.id"}},
             {"source": {**SOURCE, "sql": "SELECT * FROM orders"}},
             {"source": [SOURCE]},
             {"source": {**SOURCE, "kind": "sequence"}},

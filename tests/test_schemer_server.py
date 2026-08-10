@@ -48,8 +48,8 @@ class FakePostgresService:
             "relations": [{"name": "orders", "kind": "table"}],
         }
 
-    def inspect_relation(self, profile_id, database, namespace, relation):
-        self.calls.append(("inspect_relation", profile_id, database, namespace, relation))
+    def inspect_relation(self, profile_id, database, namespace, relation, expected_kind=None, expected_fingerprint=None):
+        self.calls.append(("inspect_relation", profile_id, database, namespace, relation, expected_kind, expected_fingerprint))
         return {
             "profileId": profile_id, "database": database, "namespace": namespace, "relation": relation,
             "kind": "table", "columns": [{"name": "id", "type": "bigint", "nullable": False, "ordinal": 1}],
@@ -152,7 +152,7 @@ class SchemerServerTests(unittest.TestCase):
         self.assertEqual(self.request("/api/postgres/profiles/shared/test", "POST", {}, True)[0], 200)
         self.assertIn(("list_namespaces", "shared"), self.service.calls)
         self.assertIn(("list_relations", "shared", "schemii", "bookstore"), self.service.calls)
-        self.assertIn(("inspect_relation", "shared", "schemii", "bookstore", "orders"), self.service.calls)
+        self.assertIn(("inspect_relation", "shared", "schemii", "bookstore", "orders", None, None), self.service.calls)
         self.assertIn(("test_profile", "shared"), self.service.calls)
 
     def test_profile_writes_use_shared_router_and_redact_password(self):

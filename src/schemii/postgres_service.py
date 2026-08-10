@@ -30,6 +30,7 @@ except ImportError:  # pragma: no cover - direct Windows use has one process per
     fcntl = None
 
 PROFILE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
 NAME_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,128}$")
 SQL_IDENTIFIER_RE = r'(?:"(?:[^"]|"")*"|[A-Za-z_][A-Za-z0-9_$]*)'
 SQL_QUALIFIED_RE = rf'{SQL_IDENTIFIER_RE}(?:\s*\.\s*{SQL_IDENTIFIER_RE})?'
@@ -689,10 +690,22 @@ class PostgresService:
         finally:
             self._close(connection)
 
-    def inspect_relation(self, profile_id: str, database: str, namespace: str, relation: str) -> dict[str, Any]:
+    def inspect_relation(
+        self,
+        profile_id: str,
+        database: str,
+        namespace: str,
+        relation: str,
+        expected_kind: str | None = None,
+        expected_fingerprint: str | None = None,
+    ) -> dict[str, Any]:
         database = self._validate_database(database)
         namespace = self._validate_namespace(namespace)
         relation = self._validate_relation_name(relation)
+        if expected_kind is not None and expected_kind not in {"table", "view", "materialized_view"}:
+            raise ValidationError("expectedKind must be table, view, or materialized_view")
+        if expected_fingerprint is not None and (not isinstance(expected_fingerprint, str) or not FINGERPRINT_RE.fullmatch(expected_fingerprint)):
+            raise ValidationError("expectedFingerprint must be a 64-character lowercase hexadecimal fingerprint")
         connection = self._connect(profile_id)
         try:
             self._execute_statement(connection, "SET TRANSACTION READ ONLY")
@@ -746,6 +759,10 @@ class PostgresService:
                 "catalogKind": relation_row["catalog_kind"],
                 "viewDefinition": relation_row.get("view_definition"),
             })
+            if expected_kind is not None and descriptor["kind"] != expected_kind:
+                raise PostgresServiceError(409, "relation_changed", "The PostgreSQL relation kind changed; reselect the widget source")
+            if expected_fingerprint is not None and descriptor["fingerprint"] != expected_fingerprint:
+                raise PostgresServiceError(409, "relation_changed", "The PostgreSQL relation definition changed; reselect the widget source")
             return descriptor
         except PostgresServiceError:
             raise

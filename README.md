@@ -111,6 +111,8 @@ The Data sources dialog includes a read-only relation browser for tables, views,
 
 In Edit mode, a verified relation can be assigned to one dashboard widget. Version-1 dashboards remain compatible with empty widget configurations, while sourced widgets persist exactly one `source` object containing profile, database, namespace, relation, kind, and fingerprint. The validator rejects source arrays, joins, SQL, incomplete identities, unsupported kinds, malformed fingerprints, and unknown fields. Assignments can be cleared, and sourced tiles display their exact database, namespace, and relation.
 
+Schemer verifies every persisted widget source against live PostgreSQL when a dashboard opens and when the catalog is refreshed. Verification requires the saved relation kind and fingerprint; mismatches return `relation_changed` and block the widget rather than silently adopting new metadata. Missing or unreachable sources are also blocked. The strict singular source shape has no join or cross-relation column-reference fields, and the dashboard validator rejects attempts to add them.
+
 ```bash
 docker compose -f compose.yaml -f compose.postgres.yaml -f compose.schemer.yaml up --build -d
 ```
