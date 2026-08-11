@@ -1,41 +1,29 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
-const vm = require("node:vm");
 
 const source = fs.readFileSync("src/schemii/web/app.js", "utf8");
 const html = fs.readFileSync("src/schemii/web/index.html", "utf8");
-const css = fs.readFileSync("src/schemii/web/styles.css", "utf8");
+const appCss = fs.readFileSync("src/schemii/web/styles.css", "utf8");
+const sharedCss = fs.readFileSync("src/schemii/shared_web/onboarding.css", "utf8");
+const sharedUi = fs.readFileSync("src/schemii/shared_web/ui-components.js", "utf8");
+const css = `${sharedCss}\n${appCss}`;
 
-const storageStart = source.indexOf("function onboardingStorageValue");
-const storageEnd = source.indexOf("function rememberOnboardingPreference");
-assert.notEqual(storageStart, -1, "onboarding storage helpers are missing");
-assert.notEqual(storageEnd, -1, "onboarding storage helper end marker is missing");
+assert.match(appCss, /@import url\("\/shared\/onboarding\.css"\);/, "Schemii must load the shared onboarding shell");
+assert.match(sharedCss, /\.onboarding-head \.eyebrow \{[^}]*color: #88733f;[^}]*font-size: 7px;[^}]*letter-spacing: \.14em;/, "Schemii and Schemer must share Quick start typography and color");
+assert.match(sharedCss, /\.onboarding-opt-out \{[^}]*grid-column: auto;/, "Schemii's generic dialog label layout must not move the onboarding checkbox to its own row");
+assert.match(source, /createOnboardingController\([\s\S]*storagePrefix: "schemii"/, "Schemii must use shared restart and opt-out rules");
+assert.match(sharedUi, /const disabledKey = `\$\{storagePrefix\}\.onboarding\.disabled\.v1`[\s\S]*const serverKey = `\$\{storagePrefix\}\.onboarding\.server\.v1`/, "shared onboarding must own application-scoped storage keys");
 
-const values = new Map();
-const context = vm.createContext({
-  localStorage: {
-    getItem(key) { return values.has(key) ? values.get(key) : null; },
-    setItem(key, value) { values.set(key, String(value)); },
-    removeItem(key) { values.delete(key); }
-  }
-});
-vm.runInContext(`
-  const ONBOARDING_DISABLED_KEY = "schemii.onboarding.disabled.v1";
-  const ONBOARDING_SERVER_KEY = "schemii.onboarding.server.v1";
-  let onboardingSeenServerId = null;
-  ${source.slice(storageStart, storageEnd)}
-  globalThis.shouldShowOnboarding = shouldShowOnboarding;
-`, context);
-
-assert.equal(context.shouldShowOnboarding("start-one"), true, "a new server start should show onboarding");
-assert.equal(values.get("schemii.onboarding.server.v1"), "start-one");
-assert.equal(context.shouldShowOnboarding("start-one"), false, "refreshes during one server run must not reshow onboarding");
-assert.equal(context.shouldShowOnboarding("start-two"), true, "a later server start should show onboarding again");
-values.set("schemii.onboarding.disabled.v1", "1");
-assert.equal(context.shouldShowOnboarding("start-three"), false, "the persistent opt-out must suppress future onboarding");
-
-assert.equal((html.match(/data-onboarding-page=/g) || []).length, 4, "the introduction should have four pages");
-assert.equal((html.match(/class="onboarding-screenshot/g) || []).length, 4, "every introduction page needs a screenshot-style preview");
+assert.equal((html.match(/data-onboarding-page=/g) || []).length, 5, "the introduction should have five pages");
+assert.equal((html.match(/class="onboarding-screenshot/g) || []).length, 5, "every introduction page needs a screenshot-style preview");
+assert.equal((html.match(/class="onboarding-screenshot[^>]+aria-hidden="true"/g) || []).length, 5, "synthetic tutorial controls must stay out of the accessibility tree");
+assert.match(html, /data-onboarding-page="0"[\s\S]+Create tables and columns[\s\S]+data-onboarding-page="1"[\s\S]+Design on the canvas/, "table and column creation must be the first tutorial page");
+assert.match(html, /tour-add-table-tool[\s\S]+Create a table[\s\S]+data-onboarding-target="table-name"[\s\S]+data-onboarding-target="create"[\s\S]+tour-create-inspector[\s\S]+data-onboarding-target="add-column"/, "the first page must mirror the Add table dialog and inspector column flow");
+assert.match(html, /tour-create-email-editor[\s\S]+column_2[\s\S]+email[\s\S]+varchar\(255\)[\s\S]+tour-create-timestamp-editor[\s\S]+column_3[\s\S]+created_at[\s\S]+timestamptz/, "the table tutorial must show generated columns being configured with PostgreSQL types");
+assert.match(source, /TABLE_CREATION_DEMO_STATES[\s\S]+target: "tool"[\s\S]+target: "table-name"[\s\S]+target: "create"[\s\S]+target: "add-column"[\s\S]+target: "email-name"[\s\S]+target: "add-column"[\s\S]+target: "created-name"/, "the first demo must create the table before adding and configuring columns");
+assert.match(source, /demos: \[[\s\S]+tableCreationDemo,[\s\S]+start: startRelationshipDemo/, "the table creation demo must run before every existing tutorial");
+assert.match(appCss, /\.tour-table-creation-demo\.demo-created \.tour-create-inspector \{ visibility: visible; opacity: 1;/, "creating the synthetic table must reveal its inspector");
+assert.match(appCss, /@media \(max-width: 540px\)[\s\S]+\.tour-table-creation-demo \{ height: 280px; \}/, "the mobile table tutorial must leave enough height to show its generated columns");
 assert.match(html, /tour-foreign-column[^>]*>[\s\S]*aria-label="Foreign key"[\s\S]*owner_id/, "the relationship source must use the real foreign-key icon on projects.owner_id");
 assert.match(html, /tour-referenced-column[^>]*>[\s\S]*aria-label="Primary key"[\s\S]*id/, "the relationship target must use the real primary-key icon on users.id");
 assert.match(html, /tour-relationship-desktop" d="M59 64[^>]+41 42"/, "the desktop relationship must terminate on the exact table-row edges");
@@ -83,7 +71,7 @@ for (const target of ["maximize", "minimize", "data-toggle", "inspector-close"])
   assert.match(source, new RegExp(`target: "${target}", click: "Left click"`), `the demonstration must use the ${target} button`);
 }
 assert.match(source, /prefers-reduced-motion: reduce/, "the demonstration must respect reduced-motion preferences");
-assert.match(source, /top > demoBounds\.height \* \.7/, "lower controls must flip click tooltips above the cursor");
+assert.match(sharedUi, /top > rootBounds\.height \* \.7/, "lower controls must flip click tooltips above the cursor");
 assert.match(source, /target\.matches\("\.tour-inspector-head, \.tour-data-tools header, \.tour-sql-console"\)[^\n]+classList\.add\("demo-hover"\)/, "the scripted cursor must highlight selectable headers while hovering");
 assert.match(css, /\.tour-inspector-head:hover, \.tour-inspector-head\.demo-hover \{ background: #202833;[^}]+inset/, "the tutorial inspector header must use a clear hover highlight");
 assert.match(css, /\.tour-data-tools header:hover, \.tour-data-tools header\.demo-hover \{ background: #202833;[^}]+inset/, "the tutorial Table data header must use a clear hover highlight");
@@ -107,6 +95,7 @@ assert.match(css, /\.onboarding-dialog \{[^}]+height: min\(720px, calc\(100vh - 
 assert.match(css, /\.onboarding-panel \{[^}]+grid-template-rows: auto minmax\(0, 1fr\) auto;[^}]+height: 100%/, "the onboarding footer must stay anchored while page content scrolls");
 assert.match(css, /\.onboarding-next \{[^}]+width: 80px;/, "the Next and Finish states must not move the footer controls");
 assert.match(css, /@media \(max-width: 540px\)[\s\S]+\.onboarding-dialog/, "the introduction needs mobile layout rules");
+assert.doesNotMatch(sharedCss, /\.onboarding-skip\s*\{[^}]*display:\s*none/, "touch users must retain the explicit Skip action");
 
 const shutdownStart = source.indexOf("async function shutdownSchemii");
 const shutdownEnd = source.indexOf("function schemaForStorage");

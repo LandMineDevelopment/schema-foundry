@@ -4,8 +4,6 @@ const MAX_ZOOM = 1.7;
 const SAVE_DELAY_MS = 180;
 const LAYOUT_SAVE_DELAY_MS = 750;
 const WHEEL_ZOOM_IDLE_MS = 140;
-const ONBOARDING_DISABLED_KEY = "schemii.onboarding.disabled.v1";
-const ONBOARDING_SERVER_KEY = "schemii.onboarding.server.v1";
 
 function clampZoom(value, maximum = MAX_ZOOM) {
   return Math.min(maximum, Math.max(MIN_ZOOM, value));
@@ -194,6 +192,10 @@ const elements = {
   onboardingBack: document.querySelector("#onboarding-back"),
   onboardingNext: document.querySelector("#onboarding-next"),
   onboardingSkip: document.querySelector("#onboarding-skip"),
+  tableCreationDemo: document.querySelector(".tour-table-creation-demo"),
+  tableCreationDemoCursor: document.querySelector(".tour-table-creation-cursor"),
+  tableCreationDemoStatus: document.querySelector("#table-creation-demo-status"),
+  tableCreationDemoToggle: document.querySelector("#table-creation-demo-toggle"),
   relationshipDemo: document.querySelector(".tour-relationship-demo"),
   relationshipDemoCursor: document.querySelector(".tour-relationship-cursor"),
   relationshipDemoStatus: document.querySelector("#relationship-demo-status"),
@@ -245,8 +247,7 @@ let saveTimer = null;
 let saveQueue = Promise.resolve();
 let wheelZoomTimer = null;
 let toastTimer = null;
-let onboardingPage = 0;
-let onboardingSeenServerId = null;
+let onboardingController = null;
 let serverStopped = false;
 let relationshipDemoTimer = null;
 let relationshipDemoStep = 0;
@@ -330,31 +331,35 @@ let aiState = {
   oauth: null
 };
 
+const TABLE_CREATION_DEMO_STATES = ["dialog", "named", "created", "email", "email-named", "timestamp", "complete"];
+const tableCreationDemo = window.SchemiiShared.createOnboardingDemo({
+  root: elements.tableCreationDemo,
+  cursor: elements.tableCreationDemoCursor,
+  status: elements.tableCreationDemoStatus,
+  toggle: elements.tableCreationDemoToggle,
+  steps: [
+    { target: "tool", caption: "Select Add table from the left tool rail.", state: "dialog" },
+    { target: "table-name", caption: "Enter a unique, descriptive table name.", state: "named" },
+    { target: "create", caption: "Create the table and open its inspector.", state: "created" },
+    { target: "add-column", caption: "Add a column from the Columns section.", state: "email" },
+    { target: "email-name", caption: "Name the column and choose its PostgreSQL type.", state: "email-named" },
+    { target: "add-column", caption: "Add another column the same way.", state: "timestamp" },
+    { target: "created-name", caption: "Configure each generated column in the inspector.", state: "complete" },
+  ],
+  renderState(state) {
+    const activeIndex = TABLE_CREATION_DEMO_STATES.indexOf(state);
+    TABLE_CREATION_DEMO_STATES.forEach((name, index) => elements.tableCreationDemo.classList.toggle(`demo-${name}`, index <= activeIndex));
+  },
+  isActive: () => onboardingController?.page === 0 && elements.onboardingDialog.open,
+  idleText: "Watch a table and its columns take shape.",
+  staticText: "The customers table has an id key and two configured columns.",
+  completeText: "Table configured. Replaying without changing the saved schema...",
+  staticState: "complete",
+  stepDelay: 800,
+});
+
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
-}
-
-function onboardingStorageValue(key) {
-  try { return localStorage.getItem(key); } catch { return null; }
-}
-
-function onboardingDisabled() {
-  return onboardingStorageValue(ONBOARDING_DISABLED_KEY) === "1";
-}
-
-function shouldShowOnboarding(serverId) {
-  if (!serverId || onboardingDisabled()) return false;
-  if (onboardingSeenServerId === serverId || onboardingStorageValue(ONBOARDING_SERVER_KEY) === serverId) return false;
-  onboardingSeenServerId = serverId;
-  try { localStorage.setItem(ONBOARDING_SERVER_KEY, serverId); } catch { /* In-memory state still prevents repeats on this page. */ }
-  return true;
-}
-
-function rememberOnboardingPreference() {
-  try {
-    if (elements.onboardingDontShow.checked) localStorage.setItem(ONBOARDING_DISABLED_KEY, "1");
-    else localStorage.removeItem(ONBOARDING_DISABLED_KEY);
-  } catch { /* Onboarding remains usable when browser storage is unavailable. */ }
 }
 
 const RELATIONSHIP_DEMO_STEPS = [
@@ -387,7 +392,7 @@ function queueRelationshipDemo(callback, delay) {
 }
 
 function runRelationshipDemoStep() {
-  if (relationshipDemoPaused || onboardingPage !== 0 || !elements.onboardingDialog.open) return;
+  if (relationshipDemoPaused || onboardingController?.page !== 1 || !elements.onboardingDialog.open) return;
   if (relationshipDemoStep >= RELATIONSHIP_DEMO_STEPS.length) {
     elements.relationshipDemoStatus.textContent = "Relationship created. Replaying...";
     return queueRelationshipDemo(() => {
@@ -401,17 +406,8 @@ function runRelationshipDemoStep() {
     relationshipDemoStep += 1;
     return runRelationshipDemoStep();
   }
-  const demoBounds = elements.relationshipDemo.getBoundingClientRect();
-  const targetBounds = target.getBoundingClientRect();
-  const left = targetBounds.left - demoBounds.left + targetBounds.width / 2 - 3;
-  const top = targetBounds.top - demoBounds.top + targetBounds.height / 2 - 2;
   const cursor = elements.relationshipDemoCursor;
-  cursor.classList.remove("clicking", "tooltip-left", "tooltip-above");
-  cursor.classList.toggle("tooltip-left", left > demoBounds.width * .7);
-  cursor.classList.toggle("tooltip-above", top > demoBounds.height * .7);
-  cursor.style.left = `${left}px`;
-  cursor.style.top = `${top}px`;
-  cursor.classList.add("visible");
+  window.SchemiiShared.positionOnboardingCursor(elements.relationshipDemo, cursor, target);
   elements.relationshipDemoStatus.textContent = `Next: ${step.caption}`;
   queueRelationshipDemo(() => {
     cursor.classList.add("clicking");
@@ -482,7 +478,7 @@ function queueAssistantDemo(callback, delay) {
 }
 
 function typeAssistantDemoPrompt(index = 0) {
-  if (assistantDemoPaused || onboardingPage !== 3 || !elements.onboardingDialog.open) return;
+  if (assistantDemoPaused || onboardingController?.page !== 4 || !elements.onboardingDialog.open) return;
   elements.assistantDemoPrompt.textContent = ASSISTANT_DEMO_PROMPT.slice(0, index);
   if (index <= ASSISTANT_DEMO_PROMPT.length) return queueAssistantDemo(() => typeAssistantDemoPrompt(index + 1), 42);
   elements.assistantDemoStatus.textContent = "Message ready to send.";
@@ -491,7 +487,7 @@ function typeAssistantDemoPrompt(index = 0) {
 }
 
 function runAssistantDemoStep() {
-  if (assistantDemoPaused || onboardingPage !== 3 || !elements.onboardingDialog.open) return;
+  if (assistantDemoPaused || onboardingController?.page !== 4 || !elements.onboardingDialog.open) return;
   if (assistantDemoStep >= ASSISTANT_DEMO_STEPS.length) {
     elements.assistantDemoStatus.textContent = "Conversation complete. Replaying...";
     return queueAssistantDemo(() => {
@@ -511,17 +507,8 @@ function runAssistantDemoStep() {
     assistantDemoStep += 1;
     return runAssistantDemoStep();
   }
-  const demoBounds = elements.assistantDemo.getBoundingClientRect();
-  const targetBounds = target.getBoundingClientRect();
-  const left = targetBounds.left - demoBounds.left + targetBounds.width / 2 - 3;
-  const top = targetBounds.top - demoBounds.top + targetBounds.height / 2 - 2;
   const cursor = elements.assistantDemoCursor;
-  cursor.classList.remove("clicking", "tooltip-left", "tooltip-above");
-  cursor.classList.toggle("tooltip-left", left > demoBounds.width * .7);
-  cursor.classList.toggle("tooltip-above", top > demoBounds.height * .7);
-  cursor.style.left = `${left}px`;
-  cursor.style.top = `${top}px`;
-  cursor.classList.add("visible");
+  window.SchemiiShared.positionOnboardingCursor(elements.assistantDemo, cursor, target);
   elements.assistantDemoStatus.textContent = `Next: ${step.caption}`;
   queueAssistantDemo(() => {
     cursor.classList.add("clicking");
@@ -590,7 +577,7 @@ function queuePostgresDemo(callback, delay) {
 }
 
 function runPostgresDemoStep() {
-  if (postgresDemoPaused || onboardingPage !== 2 || !elements.onboardingDialog.open) return;
+  if (postgresDemoPaused || onboardingController?.page !== 3 || !elements.onboardingDialog.open) return;
   if (postgresDemoStep >= POSTGRES_DEMO_STEPS.length) {
     elements.postgresDemoStatus.textContent = "Preview complete. Replaying without applying changes...";
     return queuePostgresDemo(() => {
@@ -604,17 +591,8 @@ function runPostgresDemoStep() {
     postgresDemoStep += 1;
     return runPostgresDemoStep();
   }
-  const demoBounds = elements.postgresDemo.getBoundingClientRect();
-  const targetBounds = target.getBoundingClientRect();
-  const left = targetBounds.left - demoBounds.left + targetBounds.width / 2 - 3;
-  const top = targetBounds.top - demoBounds.top + targetBounds.height / 2 - 2;
   const cursor = elements.postgresDemoCursor;
-  cursor.classList.remove("clicking", "tooltip-left", "tooltip-above");
-  cursor.classList.toggle("tooltip-left", left > demoBounds.width * .7);
-  cursor.classList.toggle("tooltip-above", top > demoBounds.height * .7);
-  cursor.style.left = `${left}px`;
-  cursor.style.top = `${top}px`;
-  cursor.classList.add("visible");
+  window.SchemiiShared.positionOnboardingCursor(elements.postgresDemo, cursor, target);
   elements.postgresDemoStatus.textContent = `Next: ${step.caption}`;
   queuePostgresDemo(() => {
     cursor.classList.add("clicking");
@@ -709,7 +687,7 @@ function queueInspectorDemo(callback, delay) {
 }
 
 function runInspectorDemoStep() {
-  if (inspectorDemoPaused || onboardingPage !== 1 || !elements.onboardingDialog.open) return;
+  if (inspectorDemoPaused || onboardingController?.page !== 2 || !elements.onboardingDialog.open) return;
   if (inspectorDemoStep >= INSPECTOR_DEMO_STEPS.length) {
     elements.inspectorDemoStatus.textContent = "Demo complete. Replaying from table selection...";
     return queueInspectorDemo(() => {
@@ -723,20 +701,10 @@ function runInspectorDemoStep() {
     inspectorDemoStep += 1;
     return runInspectorDemoStep();
   }
-  const demoBounds = elements.inspectorDemo.getBoundingClientRect();
-  const targetBounds = target.getBoundingClientRect();
-  const left = targetBounds.left - demoBounds.left + targetBounds.width / 2 - 3;
-  const top = targetBounds.top - demoBounds.top + targetBounds.height / 2 - 2;
   const cursor = elements.inspectorDemoCursor;
   elements.inspectorDemo.querySelectorAll(".demo-hover").forEach((hovered) => hovered.classList.remove("demo-hover"));
   if (target.matches(".tour-inspector-head, .tour-data-tools header, .tour-sql-console")) target.classList.add("demo-hover");
-  cursor.classList.remove("clicking", "right-click", "tooltip-left", "tooltip-above");
-  cursor.classList.toggle("tooltip-left", left > demoBounds.width * .7);
-  cursor.classList.toggle("tooltip-above", top > demoBounds.height * .7);
-  cursor.querySelector("span").textContent = step.click;
-  cursor.style.left = `${left}px`;
-  cursor.style.top = `${top}px`;
-  cursor.classList.add("visible");
+  window.SchemiiShared.positionOnboardingCursor(elements.inspectorDemo, cursor, target, step.click);
   elements.inspectorDemoStatus.textContent = `Next: ${step.caption}`;
   queueInspectorDemo(() => {
     cursor.classList.toggle("right-click", step.click === "Right click");
@@ -777,30 +745,24 @@ function toggleInspectorDemo() {
   }
 }
 
-function renderOnboardingPage() {
-  const pages = [...elements.onboardingDialog.querySelectorAll("[data-onboarding-page]")];
-  onboardingPage = Math.max(0, Math.min(pages.length - 1, onboardingPage));
-  pages.forEach((page, index) => { page.hidden = index !== onboardingPage; });
-  elements.onboardingStepLabel.textContent = `${onboardingPage + 1} of ${pages.length}`;
-  elements.onboardingProgress.innerHTML = pages.map((_, index) => `<i class="${index === onboardingPage ? "active" : ""}"></i>`).join("");
-  elements.onboardingBack.disabled = onboardingPage === 0;
-  elements.onboardingNext.querySelector("span").textContent = onboardingPage === pages.length - 1 ? "Finish" : "Next";
-  if (onboardingPage === 0) startRelationshipDemo(); else stopRelationshipDemo();
-  if (onboardingPage === 1) startInspectorDemo(); else stopInspectorDemo();
-  if (onboardingPage === 2) startPostgresDemo(); else stopPostgresDemo();
-  if (onboardingPage === 3) startAssistantDemo(); else stopAssistantDemo();
-}
-
-function openOnboarding() {
-  onboardingPage = 0;
-  elements.onboardingDontShow.checked = onboardingDisabled();
-  renderOnboardingPage();
-  if (!elements.onboardingDialog.open) elements.onboardingDialog.showModal();
-}
-
-function closeOnboarding() {
-  rememberOnboardingPreference();
-  elements.onboardingDialog.close();
+function createSchemiiOnboardingController() {
+  return window.SchemiiShared.createOnboardingController({
+    dialog: elements.onboardingDialog,
+    stepLabel: elements.onboardingStepLabel,
+    progress: elements.onboardingProgress,
+    backButton: elements.onboardingBack,
+    nextButton: elements.onboardingNext,
+    skipButton: elements.onboardingSkip,
+    optOut: elements.onboardingDontShow,
+    storagePrefix: "schemii",
+    demos: [
+      tableCreationDemo,
+      { start: startRelationshipDemo, stop: stopRelationshipDemo },
+      { start: startInspectorDemo, stop: stopInspectorDemo },
+      { start: startPostgresDemo, stop: stopPostgresDemo },
+      { start: startAssistantDemo, stop: stopAssistantDemo },
+    ],
+  });
 }
 
 async function initializeOnboarding() {
@@ -809,7 +771,7 @@ async function initializeOnboarding() {
     const session = await response.json().catch(() => ({}));
     if (!response.ok || !session.token) return;
     postgresState.token = session.token;
-    if (shouldShowOnboarding(session.serverId)) openOnboarding();
+    onboardingController.initialize(session.serverId);
   } catch { /* Startup remains usable if the local session endpoint is unavailable. */ }
 }
 
@@ -5429,37 +5391,20 @@ elements.sqlFileInput.addEventListener("change", () => {
 });
 document.querySelector("#save-schema-button").addEventListener("click", () => saveSchemaNow(true));
 document.querySelector("#new-design-button").addEventListener("click", createNewSchema);
+onboardingController = createSchemiiOnboardingController();
 document.querySelector("#show-onboarding-button").addEventListener("click", () => {
   appMenu.removeAttribute("open");
-  openOnboarding();
+  onboardingController.open();
 });
 document.querySelector("#restore-examples-button").addEventListener("click", () => restoreExamples());
 document.querySelector("#shutdown-button").addEventListener("click", () => {
   appMenu.removeAttribute("open");
   openShutdownDialog();
 });
-elements.onboardingBack.addEventListener("click", () => {
-  onboardingPage -= 1;
-  renderOnboardingPage();
-});
-elements.onboardingNext.addEventListener("click", () => {
-  const pageCount = elements.onboardingDialog.querySelectorAll("[data-onboarding-page]").length;
-  if (onboardingPage >= pageCount - 1) return closeOnboarding();
-  onboardingPage += 1;
-  renderOnboardingPage();
-});
-elements.onboardingSkip.addEventListener("click", closeOnboarding);
 elements.relationshipDemoToggle.addEventListener("click", toggleRelationshipDemo);
 elements.inspectorDemoToggle.addEventListener("click", toggleInspectorDemo);
 elements.postgresDemoToggle.addEventListener("click", togglePostgresDemo);
 elements.assistantDemoToggle.addEventListener("click", toggleAssistantDemo);
-elements.onboardingDialog.addEventListener("close", () => {
-  stopRelationshipDemo();
-  stopInspectorDemo();
-  stopPostgresDemo();
-  stopAssistantDemo();
-  rememberOnboardingPreference();
-});
 document.querySelector("#cancel-shutdown").addEventListener("click", () => elements.shutdownDialog.close());
 elements.confirmShutdown.addEventListener("click", shutdownSchemii);
 elements.shutdownDialog.addEventListener("cancel", event => { if (serverStopped) event.preventDefault(); });

@@ -252,10 +252,183 @@
     } });
   }
 
+  function positionOnboardingCursor(root, cursor, target, clickLabel = "Left click") {
+    const rootBounds = root.getBoundingClientRect();
+    const targetBounds = target.getBoundingClientRect();
+    const left = targetBounds.left - rootBounds.left + targetBounds.width / 2 - 3;
+    const top = targetBounds.top - rootBounds.top + targetBounds.height / 2 - 2;
+    cursor.classList.remove("clicking", "right-click", "tooltip-left", "tooltip-above");
+    cursor.classList.toggle("tooltip-left", left > rootBounds.width * .7);
+    cursor.classList.toggle("tooltip-above", top > rootBounds.height * .7);
+    cursor.classList.toggle("right-click", clickLabel === "Right click");
+    const label = cursor.querySelector("span");
+    if (label) label.textContent = clickLabel;
+    cursor.style.left = `${left}px`;
+    cursor.style.top = `${top}px`;
+    cursor.classList.add("visible");
+  }
+
+  function createOnboardingDemo({
+    root, cursor, status, toggle, steps, renderState, isActive = () => true,
+    idleText, staticText, completeText = "Demo complete. Replaying...", staticState = null,
+    initialDelay = 500, moveDelay = 650, clickDelay = 700, stepDelay = 900, replayDelay = 1500,
+  }) {
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    let timer = null;
+    let stepIndex = 0;
+    let paused = false;
+    const queue = (callback, delay) => {
+      clearTimeout(timer);
+      timer = setTimeout(callback, delay);
+    };
+    const hideCursor = () => cursor.classList.remove("visible", "clicking", "right-click");
+    const reset = (showStatic = false) => {
+      clearTimeout(timer);
+      timer = null;
+      stepIndex = 0;
+      renderState(showStatic ? staticState : null);
+      cursor.classList.remove("visible", "clicking", "right-click", "tooltip-left", "tooltip-above");
+      status.textContent = showStatic ? staticText : idleText;
+    };
+    const run = () => {
+      if (paused || !isActive()) return;
+      if (stepIndex >= steps.length) {
+        status.textContent = completeText;
+        return queue(() => { reset(); run(); }, replayDelay);
+      }
+      const step = steps[stepIndex];
+      if (!step.target) {
+        renderState(step.state);
+        status.textContent = step.caption;
+        stepIndex += 1;
+        return queue(run, step.delay ?? stepDelay);
+      }
+      const target = root.querySelector(`[data-onboarding-target="${step.target}"]`);
+      if (!target) {
+        stepIndex += 1;
+        return run();
+      }
+      positionOnboardingCursor(root, cursor, target, step.click ?? "Left click");
+      status.textContent = `Next: ${step.caption}`;
+      queue(() => {
+        cursor.classList.add("clicking");
+        queue(() => {
+          renderState(step.state);
+          status.textContent = step.caption;
+          cursor.classList.remove("clicking");
+          stepIndex += 1;
+          queue(run, step.delay ?? stepDelay);
+        }, step.clickDelay ?? clickDelay);
+      }, step.moveDelay ?? moveDelay);
+    };
+    const start = (forceMotion = false) => {
+      const reducedMotion = !forceMotion && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+      paused = reducedMotion;
+      reset(reducedMotion);
+      toggle.textContent = reducedMotion ? "Play demo" : "Pause demo";
+      if (!reducedMotion) queue(run, initialDelay);
+    };
+    const stop = () => {
+      clearTimeout(timer);
+      timer = null;
+      hideCursor();
+    };
+    const togglePlayback = () => {
+      paused = !paused;
+      toggle.textContent = paused ? "Play demo" : "Pause demo";
+      if (paused) {
+        stop();
+        status.textContent = "Demo paused.";
+      } else {
+        run();
+      }
+    };
+    toggle.addEventListener("click", togglePlayback);
+    return Object.freeze({ start, stop, reset, toggle: togglePlayback, destroy() { stop(); toggle.removeEventListener("click", togglePlayback); } });
+  }
+
+  function createOnboardingController({
+    dialog, stepLabel, progress, backButton, nextButton, skipButton, optOut,
+    storagePrefix, demos = [], pageSelector = "[data-onboarding-page]",
+  }) {
+    const pages = [...dialog.querySelectorAll(pageSelector)];
+    const disabledKey = `${storagePrefix}.onboarding.disabled.v1`;
+    const serverKey = `${storagePrefix}.onboarding.server.v1`;
+    let pageIndex = 0;
+    let seenServerId = null;
+    const storageValue = key => { try { return localStorage.getItem(key); } catch { return null; } };
+    const disabled = () => storageValue(disabledKey) === "1";
+    const rememberPreference = () => {
+      try {
+        if (optOut.checked) localStorage.setItem(disabledKey, "1");
+        else localStorage.removeItem(disabledKey);
+      } catch { /* The tutorial remains usable when browser storage is unavailable. */ }
+    };
+    const shouldShow = serverId => {
+      if (!serverId || disabled()) return false;
+      if (seenServerId === serverId || storageValue(serverKey) === serverId) return false;
+      seenServerId = serverId;
+      try { localStorage.setItem(serverKey, serverId); } catch { /* In-memory state still prevents repeats on this page. */ }
+      return true;
+    };
+    const stopDemos = () => demos.forEach(demo => demo?.stop());
+    const render = () => {
+      pageIndex = Math.max(0, Math.min(pages.length - 1, pageIndex));
+      pages.forEach((page, index) => { page.hidden = index !== pageIndex; });
+      stepLabel.textContent = `${pageIndex + 1} of ${pages.length}`;
+      progress.replaceChildren(...pages.map((_, index) => {
+        const marker = document.createElement("i");
+        marker.classList.toggle("active", index === pageIndex);
+        marker.setAttribute("aria-hidden", "true");
+        return marker;
+      }));
+      backButton.disabled = pageIndex === 0;
+      const nextLabel = nextButton.querySelector("[data-onboarding-next-label], span");
+      if (nextLabel) nextLabel.textContent = pageIndex === pages.length - 1 ? "Finish" : "Next";
+      stopDemos();
+      demos[pageIndex]?.start();
+    };
+    const open = () => {
+      pageIndex = 0;
+      optOut.checked = disabled();
+      if (!dialog.open) dialog.showModal();
+      render();
+    };
+    const close = () => {
+      rememberPreference();
+      if (dialog.open) dialog.close();
+    };
+    const previous = () => { pageIndex -= 1; render(); };
+    const next = () => {
+      if (pageIndex >= pages.length - 1) close();
+      else { pageIndex += 1; render(); }
+    };
+    const onClose = () => { rememberPreference(); stopDemos(); };
+    backButton.addEventListener("click", previous);
+    nextButton.addEventListener("click", next);
+    skipButton.addEventListener("click", close);
+    dialog.addEventListener("close", onClose);
+    return Object.freeze({
+      open, close, next, previous, render, shouldShow,
+      initialize(serverId) { if (shouldShow(serverId)) open(); },
+      get page() { return pageIndex; },
+      get disabled() { return disabled(); },
+      destroy() {
+        stopDemos();
+        backButton.removeEventListener("click", previous);
+        nextButton.removeEventListener("click", next);
+        skipButton.removeEventListener("click", close);
+        dialog.removeEventListener("close", onClose);
+      }
+    });
+  }
+
   window.SchemiiShared = Object.freeze({
     ...(window.SchemiiShared || {}),
     ICONS, decorateIconControl, createIconButton, createTooltipController,
     elementHasTruncatedText, automaticTooltipText, findTooltipTarget, installTooltipDelegation,
     setControlStatus, setControlLoading, withLoadingControl, installDetailsMenu,
+    positionOnboardingCursor, createOnboardingDemo, createOnboardingController,
   });
 })();

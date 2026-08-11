@@ -49,8 +49,7 @@ const elements = {
   sqlTitle: document.querySelector("#executed-sql-title"),
   sqlStatus: document.querySelector("#executed-sql-status"),
   sqlCode: document.querySelector("#executed-sql-code"),
-  sqlParameters: document.querySelector("#executed-sql-parameters"),
-  sqlParameterCode: document.querySelector("#executed-sql-parameter-code"),
+  copySql: document.querySelector("#copy-executed-sql"),
   lineageDialog: document.querySelector("#lineage-dialog"),
   lineageTitle: document.querySelector("#lineage-title"),
   lineageBody: document.querySelector("#lineage-body"),
@@ -64,6 +63,13 @@ const elements = {
   detailPage: document.querySelector("#detail-page"),
   detailPrevious: document.querySelector("#detail-previous"),
   detailNext: document.querySelector("#detail-next"),
+  onboardingDialog: document.querySelector("#onboarding-dialog"),
+  onboardingStepLabel: document.querySelector("#onboarding-step-label"),
+  onboardingProgress: document.querySelector("#onboarding-progress"),
+  onboardingDontShow: document.querySelector("#onboarding-dont-show"),
+  onboardingBack: document.querySelector("#onboarding-back"),
+  onboardingNext: document.querySelector("#onboarding-next"),
+  onboardingSkip: document.querySelector("#onboarding-skip"),
   tooltip: document.querySelector("#app-tooltip")
 };
 
@@ -114,6 +120,7 @@ let detailContext = null;
 let detailReturnFocus = null;
 let detailSearchTimer = null;
 let lineageReturnFocus = null;
+let onboardingController = null;
 const sessionClient = window.SchemiiShared.createSessionClient({
   getToken: () => sessionToken,
   setToken: token => { sessionToken = token; }
@@ -135,6 +142,125 @@ const profileForm = window.SchemiiShared.createProfileForm({
   defaults: { name: "Analytics database" }
 });
 const tooltipController = window.SchemiiShared.createTooltipController({ element: elements.tooltip });
+
+function tutorialElements(name) {
+  const root = document.querySelector(`.schemer-tour-${name}`);
+  return {
+    root,
+    cursor: root.querySelector(".tour-demo-cursor"),
+    status: document.querySelector(`#${name}-demo-status`),
+    toggle: document.querySelector(`#${name}-demo-toggle`),
+  };
+}
+
+function tutorialStateRenderer(root, states) {
+  return state => {
+    const activeIndex = state ? states.indexOf(state) : -1;
+    states.forEach((name, index) => root.classList.toggle(`demo-${name}`, index <= activeIndex));
+  };
+}
+
+for (const control of elements.onboardingDialog.querySelectorAll("[data-onboarding-icon]")) {
+  window.SchemiiShared.decorateIconControl(control, {
+    icon: control.dataset.onboardingIcon,
+    label: control.dataset.onboardingIconLabel,
+    tooltip: "",
+    className: "schemer-tour-icon",
+  });
+}
+
+const dashboardTutorialElements = tutorialElements("dashboard");
+const dashboardTutorial = window.SchemiiShared.createOnboardingDemo({
+  ...dashboardTutorialElements,
+  steps: [
+    { target: "new-dashboard", caption: "Create a new dashboard from the dashboard list.", state: "form" },
+    { target: "dashboard-name", caption: "Give the dashboard a clear name.", state: "named" },
+    { target: "create-dashboard", caption: "Continue to the new empty dashboard.", state: "created" },
+  ],
+  renderState: tutorialStateRenderer(dashboardTutorialElements.root, ["form", "named", "created"]),
+  isActive: () => onboardingController?.page === 0 && elements.onboardingDialog.open,
+  idleText: "Watch a new dashboard take shape.",
+  staticText: "The new Publishing overview dashboard is ready.",
+  completeText: "Dashboard created. Replaying without changing your saved dashboards...",
+  staticState: "created",
+});
+
+const editTutorialElements = tutorialElements("edit");
+const editTutorial = window.SchemiiShared.createOnboardingDemo({
+  ...editTutorialElements,
+  steps: [
+    { target: "edit-mode", caption: "Enter Edit mode to reveal dashboard tools.", state: "edit" },
+    { target: "add-widget", caption: "Add a blank widget to the dashboard.", state: "widget" },
+  ],
+  renderState: tutorialStateRenderer(editTutorialElements.root, ["edit", "widget"]),
+  isActive: () => onboardingController?.page === 1 && elements.onboardingDialog.open,
+  idleText: "Watch Edit mode reveal dashboard tools.",
+  staticText: "Edit mode is active and a blank widget is ready.",
+  completeText: "Widget added. Replaying without editing the real dashboard...",
+  staticState: "widget",
+});
+
+const widgetTutorialElements = tutorialElements("widget");
+const widgetTutorial = window.SchemiiShared.createOnboardingDemo({
+  ...widgetTutorialElements,
+  steps: [
+    { target: "edit-widget", caption: "Open this widget's editor.", state: "editor" },
+    { target: "widget-name", caption: "Give the widget a descriptive name.", state: "named" },
+    { target: "relation", caption: "Select one verified PostgreSQL relation.", state: "relation" },
+    { target: "assign-source", caption: "Assign the verified relation to this widget.", state: "source" },
+    { target: "visualization", caption: "Open the Visualization tab.", state: "visual" },
+    { target: "view", caption: "Change the view from Aggregate table to Grouped bar.", state: "chart" },
+    { target: "grouping", caption: "Choose status as the grouping dimension.", state: "grouped" },
+    { target: "apply-widget", caption: "Validate and run the query, then save its visualization settings.", state: "applied" },
+  ],
+  renderState: tutorialStateRenderer(widgetTutorialElements.root, ["editor", "named", "relation", "source", "visual", "chart", "grouped", "applied"]),
+  isActive: () => onboardingController?.page === 2 && elements.onboardingDialog.open,
+  idleText: "Watch a widget receive a source and simple chart.",
+  staticText: "The verified grouped-bar widget is applied and saved.",
+  completeText: "Widget configured. Replaying without querying PostgreSQL...",
+  staticState: "applied",
+  stepDelay: 800,
+});
+
+const viewTutorialElements = tutorialElements("view");
+const viewTutorial = window.SchemiiShared.createOnboardingDemo({
+  ...viewTutorialElements,
+  steps: [
+    { target: "open-widget", caption: "Click the widget to open its focused view.", state: "focus" },
+    { target: "chart-mark", caption: "Select a chart mark to open matching detail rows.", state: "detail" },
+    { target: "detail-header", caption: "Click the detail report header to return to the focused widget.", state: "widget-pane" },
+    { target: "widget-header", caption: "Click the focused widget header to expand the detail report again.", state: "detail-pane" },
+  ],
+  renderState: tutorialStateRenderer(viewTutorialElements.root, ["focus", "detail", "widget-pane", "detail-pane"]),
+  isActive: () => onboardingController?.page === 3 && elements.onboardingDialog.open,
+  idleText: "Watch a chart expand and reveal matching rows.",
+  staticText: "The full detail report is open; either pane header switches views.",
+  completeText: "Pane switching complete. Replaying without reading live data...",
+  staticState: "detail-pane",
+  replayDelay: 1800,
+});
+
+onboardingController = window.SchemiiShared.createOnboardingController({
+  dialog: elements.onboardingDialog,
+  stepLabel: elements.onboardingStepLabel,
+  progress: elements.onboardingProgress,
+  backButton: elements.onboardingBack,
+  nextButton: elements.onboardingNext,
+  skipButton: elements.onboardingSkip,
+  optOut: elements.onboardingDontShow,
+  storagePrefix: "schemer",
+  demos: [dashboardTutorial, editTutorial, widgetTutorial, viewTutorial],
+});
+
+async function initializeOnboarding() {
+  try {
+    const response = await fetch("/api/session");
+    const session = await response.json().catch(() => ({}));
+    if (!response.ok || !session.token) return;
+    if (!sessionToken) sessionToken = session.token;
+    onboardingController.initialize(session.serverId);
+  } catch { /* Dashboard startup remains usable if the local session endpoint is unavailable. */ }
+}
 
 function sharedIconButton(options) {
   return window.SchemiiShared.createIconButton(options);
@@ -3301,14 +3427,37 @@ function closeDetailReport(restoreFocus = true) {
   detailReturnFocus = null;
 }
 
+function sqlLiteral(value) {
+  if (value === null || value === undefined) return "NULL";
+  if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
+  if (typeof value === "number") return Number.isFinite(value) ? String(value) : `'${String(value)}'`;
+  if (Array.isArray(value)) return `ARRAY[${value.map(sqlLiteral).join(", ")}]`;
+  const text = typeof value === "object" ? JSON.stringify(value) : String(value);
+  return `'${text.replaceAll("'", "''")}'`;
+}
+
+function readableExecutedSql(sql, parameters) {
+  const aliases = new Map();
+  let readable = String(sql || "").replace(/^(\s*)(.+?)\s+AS\s+"(__schemer_[a-z_]+\d*)"(,?)$/gim, (_match, indent, expression, alias, comma) => {
+    aliases.set(alias, expression.trim());
+    return `${indent}${expression.trim()}${comma}`;
+  });
+  for (const [alias, expression] of aliases) readable = readable.replaceAll(`"${alias}"`, expression);
+  const values = Array.isArray(parameters)
+    ? parameters
+    : parameters && typeof parameters === "object"
+      ? [...(parameters.manifest ?? []), ...(parameters.windows?.[0]?.parameters ?? [])]
+      : [];
+  let parameterIndex = 0;
+  return readable.replace(/%s/g, () => parameterIndex < values.length ? sqlLiteral(values[parameterIndex++]) : "%s");
+}
+
 function openDetailSql() {
   if (!detailContext?.result) return;
   elements.sqlContext.textContent = "Detail report";
   elements.sqlTitle.textContent = `${detailContext.widgetTitle} SQL`;
-  elements.sqlStatus.textContent = "The parameterized statement used for the currently displayed detail page.";
-  elements.sqlCode.textContent = detailContext.result.sql || "";
-  elements.sqlParameters.hidden = detailContext.result.parameters === undefined;
-  elements.sqlParameterCode.textContent = detailContext.result.parameters === undefined ? "" : JSON.stringify(detailContext.result.parameters, null, 2);
+  elements.sqlStatus.textContent = "Readable SQL for the displayed detail page. Execution remains safely parameterized.";
+  elements.sqlCode.textContent = readableExecutedSql(detailContext.result.sql, detailContext.result.parameters);
   elements.sqlDialog.showModal();
 }
 
@@ -3322,11 +3471,9 @@ function openExecutedSql(widget, population = false) {
   elements.sqlContext.textContent = population ? "Population result" : "Widget result";
   elements.sqlTitle.textContent = `${widget.title} SQL`;
   elements.sqlStatus.textContent = execution?.temporalSeries
-    ? "The manifest statement and repeated window statement used by the cached proportional timeline. Bound parameters are listed per loaded window."
-    : execution ? "The parameterized statement used for the currently displayed result." : "No live SQL has run for this widget.";
-  elements.sqlCode.textContent = execution?.sql || "-- No database query has run for this widget.";
-  elements.sqlParameters.hidden = !execution || execution.parameters === undefined;
-  elements.sqlParameterCode.textContent = execution?.parameters === undefined ? "" : JSON.stringify(execution.parameters, null, 2);
+    ? "Readable manifest and window SQL for the cached proportional timeline. Execution remains safely parameterized."
+    : execution ? "Readable SQL for the displayed result. Execution remains safely parameterized." : "No live SQL has run for this widget.";
+  elements.sqlCode.textContent = execution ? readableExecutedSql(execution.sql, execution.parameters) : "-- No database query has run for this widget.";
   elements.sqlDialog.showModal();
 }
 
@@ -4033,6 +4180,10 @@ elements.editModeButton.addEventListener("click", () => setEditMode(!editMode));
 elements.addWidgetButton.addEventListener("click", addWidget);
 document.querySelector("#new-dashboard").addEventListener("click", () => openDashboardForm("create"));
 document.querySelector("#mobile-new-dashboard").addEventListener("click", () => openDashboardForm("create"));
+document.querySelector("#show-onboarding-button").addEventListener("click", () => {
+  document.querySelector("#dashboard-menu").removeAttribute("open");
+  onboardingController.open();
+});
 elements.mobileDashboardSelect.addEventListener("change", async () => {
   const dashboardId = elements.mobileDashboardSelect.value;
   try {
@@ -4245,6 +4396,14 @@ elements.canvas.addEventListener("keydown", event => {
 });
 document.querySelector("#close-widget-inspector").addEventListener("click", closeWidgetInspector);
 document.querySelector("#view-inspector-sql").addEventListener("click", () => openExecutedSql(activeDashboard?.dashboard.widgets.find(widget => widget.id === focusedWidgetId), true));
+elements.copySql.addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(elements.sqlCode.textContent);
+    elements.sqlStatus.textContent = "SQL copied to the clipboard.";
+  } catch (_error) {
+    elements.sqlStatus.textContent = "SQL could not be copied.";
+  }
+});
 document.querySelector("#close-executed-sql").addEventListener("click", () => elements.sqlDialog.close());
 document.querySelector("#close-lineage").addEventListener("click", closeDataLineage);
 elements.lineageDialog.addEventListener("close", () => {
@@ -4319,3 +4478,4 @@ window.SchemiiShared.installTooltipDelegation({ controller: tooltipController })
 window.addEventListener("beforeunload", () => { if (saveTimer) persistDashboard(); });
 
 Promise.all([loadDashboards(), loadProfiles()]);
+requestAnimationFrame(() => requestAnimationFrame(initializeOnboarding));

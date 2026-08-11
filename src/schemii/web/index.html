@@ -224,12 +224,34 @@
             <span class="eyebrow">Quick start</span>
             <h2 id="onboarding-title">Welcome to Schemii</h2>
           </div>
-          <span id="onboarding-step-label" aria-live="polite">1 of 4</span>
+          <span id="onboarding-step-label" aria-live="polite">1 of 5</span>
         </header>
         <div class="onboarding-pages">
           <section class="onboarding-page" data-onboarding-page="0">
+            <div class="tour-demo-playback"><span class="tour-demo-status" id="table-creation-demo-status">Watch a table and its columns take shape.</span><button class="tour-demo-toggle" id="table-creation-demo-toggle" type="button">Pause demo</button></div>
+            <div class="onboarding-screenshot canvas-tour-shot tour-table-creation-demo" aria-hidden="true">
+              <div class="tour-shot-bar"><i></i><span>product_workspace</span><b>Saved</b></div>
+              <div class="tour-shot-rail"><i></i><span class="tour-add-table-tool" data-onboarding-target="tool"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M4 10h16M9 10v9M15 10v9"/></svg></span><i></i><i></i></div>
+              <section class="tour-create-table-dialog">
+                <header><small>NEW ENTITY</small><strong>Create a table</strong><span>Give the table a unique, descriptive name.</span></header>
+                <label>Table name <i data-onboarding-target="table-name"><b>e.g. invoices</b><em>customers</em></i></label>
+                <footer><button type="button" tabindex="-1">Cancel</button><button data-onboarding-target="create" type="button" tabindex="-1">Create table</button></footer>
+              </section>
+              <section class="tour-created-table"><strong>customers</strong><span><i class="tour-key-badge primary"><svg viewBox="0 0 16 16" aria-label="Primary key"><circle cx="5" cy="7" r="3"/><path d="m7.5 8.5 5 4M10 10.5l1.5-1.5"/></svg></i>id <em>uuid</em></span><span class="tour-created-email"><i class="tour-key-badge">·</i>email <em>varchar(255)</em></span><span class="tour-created-timestamp"><i class="tour-key-badge">·</i>created_at <em>timestamptz</em></span></section>
+              <section class="tour-create-inspector">
+                <header><small>TABLE PROPERTIES</small><strong>customers</strong></header>
+                <div><label>Table name <i>customers</i></label><h4>Columns <span>1</span></h4><article><b>⠿</b><i>id</i><em>uuid</em><small>PRIMARY · UNIQUE</small></article><article class="tour-create-email-editor"><b>⠿</b><i data-onboarding-target="email-name"><span>column_2</span><strong>email</strong></i><em>varchar(255)</em><small>NULLABLE</small></article><article class="tour-create-timestamp-editor"><b>⠿</b><i data-onboarding-target="created-name"><span>column_3</span><strong>created_at</strong></i><em>timestamptz</em><small>NULLABLE</small></article><button data-onboarding-target="add-column" type="button" tabindex="-1">+ Add column</button></div>
+              </section>
+              <div class="tour-demo-cursor tour-table-creation-cursor" aria-hidden="true"><svg viewBox="0 0 24 28"><path d="M3 2v20l5-5 4 9 4-2-4-8h7Z"/></svg><span>Left click</span></div>
+            </div>
+            <div class="onboarding-copy">
+              <span class="onboarding-number">01</span>
+              <div><h3>Create tables and columns</h3><p>Choose <strong>Add table</strong> from the left tool rail, enter a unique table name, and create it. Schemii opens the new table's inspector with an <strong>id</strong> primary key. Use <strong>+ Add column</strong> for each additional field, then edit its name, PostgreSQL type, nullability, uniqueness, default, or primary-key setting.</p></div>
+            </div>
+          </section>
+          <section class="onboarding-page" data-onboarding-page="1" hidden>
             <div class="tour-demo-playback"><span class="tour-demo-status" id="relationship-demo-status">Watch how a foreign-key connection is created.</span><button class="tour-demo-toggle" id="relationship-demo-toggle" type="button">Pause demo</button></div>
-            <div class="onboarding-screenshot canvas-tour-shot tour-relationship-demo" role="group" aria-label="Animated demonstration of creating a PostgreSQL foreign-key relationship">
+            <div class="onboarding-screenshot canvas-tour-shot tour-relationship-demo" aria-hidden="true">
               <div class="tour-shot-bar"><i></i><span>product_workspace</span><b>Saved</b></div>
               <div class="tour-shot-rail"><i></i><i></i><span class="tour-relationship-tool" data-relationship-demo-target="tool" aria-label="Add relationship tool"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="7" r="2.5"/><circle cx="18" cy="17" r="2.5"/><path d="M8.5 7h3a3 3 0 0 1 3 3v4a3 3 0 0 0 3 3"/></svg></span><i></i></div>
               <div class="tour-table tour-users"><strong>users</strong><span class="tour-referenced-column" data-relationship-demo-target="target"><i class="tour-key-badge primary"><svg viewBox="0 0 16 16" aria-label="Primary key"><circle cx="5" cy="7" r="3"/><path d="m7.5 8.5 5 4M10 10.5l1.5-1.5"/></svg></i>id <em>uuid</em></span><span><i class="tour-key-badge">·</i>email <em>varchar</em></span></div>
@@ -253,13 +275,13 @@
               <div class="tour-demo-cursor tour-relationship-cursor" aria-hidden="true"><svg viewBox="0 0 24 28"><path d="M3 2v20l5-5 4 9 4-2-4-8h7Z"/></svg><span>Left click</span></div>
             </div>
             <div class="onboarding-copy">
-              <span class="onboarding-number">01</span>
+              <span class="onboarding-number">02</span>
               <div><h3>Design on the canvas</h3><p>Tables are cards, columns are rows, and connecting lines are foreign keys. To create one, choose the highlighted linked-circle <strong>Add relationship</strong> tool, click the foreign-key column first, then click the referenced primary or unique key. Drag tables to arrange them, use the mouse wheel to zoom, and select a card to edit it.</p></div>
             </div>
           </section>
-          <section class="onboarding-page" data-onboarding-page="1" hidden>
+          <section class="onboarding-page" data-onboarding-page="2" hidden>
             <div class="tour-demo-playback"><span class="tour-demo-status" id="tour-demo-status">Watch the table, headers, and pane controls.</span><button class="tour-demo-toggle" id="tour-demo-toggle" type="button">Pause demo</button></div>
-            <div class="onboarding-screenshot inspector-tour-shot tour-inspector-demo" role="group" aria-label="Animated demonstration of table, inspector, Table data, and SQL console controls">
+            <div class="onboarding-screenshot inspector-tour-shot tour-inspector-demo" aria-hidden="true">
               <div class="tour-table tour-focused" data-demo-target="table"><strong>orders</strong><span><i class="tour-key-badge primary"><svg viewBox="0 0 16 16" aria-label="Primary key"><circle cx="5" cy="7" r="3"/><path d="m7.5 8.5 5 4M10 10.5l1.5-1.5"/></svg></i>id <em>uuid</em></span><span><i class="tour-key-badge">·</i>status <em>text</em></span><span><i class="tour-key-badge">·</i>created_at <em>timestamp</em></span></div>
               <div class="tour-data-tools">
                 <section class="tour-data-pane">
@@ -295,13 +317,13 @@
               <div class="tour-demo-cursor" aria-hidden="true"><svg viewBox="0 0 24 28"><path d="M3 2v20l5-5 4 9 4-2-4-8h7Z"/></svg><span>Left click</span></div>
             </div>
             <div class="onboarding-copy">
-              <span class="onboarding-number">02</span>
+              <span class="onboarding-number">03</span>
               <div><h3>Inspect tables and live data</h3><p><strong>Click any table to open its inspector on the right.</strong> Edit columns, keys, checks, indexes, and triggers there. For a table imported from PostgreSQL, click the data-tools icon in the inspector header to open <strong>Table data</strong> and the read-only <strong>SQL console</strong> beside it. Click either pane header to switch views, use maximize to temporarily cover the inspector, use minimize to close data tools, or close the inspector to close all three panes.</p></div>
             </div>
           </section>
-          <section class="onboarding-page" data-onboarding-page="2" hidden>
+          <section class="onboarding-page" data-onboarding-page="3" hidden>
             <div class="tour-demo-playback"><span class="tour-demo-status" id="postgres-demo-status">Watch the safe PostgreSQL import and preview workflow.</span><button class="tour-demo-toggle" id="postgres-demo-toggle" type="button">Pause demo</button></div>
-            <div class="onboarding-screenshot postgres-tour-shot tour-postgres-demo" role="group" aria-label="Animated PostgreSQL import and migration preview workflow">
+            <div class="onboarding-screenshot postgres-tour-shot tour-postgres-demo" aria-hidden="true">
               <div class="tour-postgres-rail"><i></i><i></i><span class="tour-postgres-tool" data-postgres-demo-target="tool"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg></span></div>
               <div class="tour-db-card">
                 <header><span><small>LIVE DATABASE</small><strong>PostgreSQL</strong></span><b>×</b></header>
@@ -323,13 +345,13 @@ ALTER TABLE "public"."books"
               <div class="tour-demo-cursor tour-postgres-cursor" aria-hidden="true"><svg viewBox="0 0 24 28"><path d="M3 2v20l5-5 4 9 4-2-4-8h7Z"/></svg><span>Left click</span></div>
             </div>
             <div class="onboarding-copy">
-              <span class="onboarding-number">03</span>
+              <span class="onboarding-number">04</span>
               <div><h3>PostgreSQL stays authoritative</h3><p>Connect to an exact database and namespace, import its live structure, then preview differences. Schemii never applies a migration until you review the SQL and confirm it.</p></div>
             </div>
           </section>
-          <section class="onboarding-page" data-onboarding-page="3" hidden>
+          <section class="onboarding-page" data-onboarding-page="4" hidden>
             <div class="tour-demo-playback"><span class="tour-demo-status" id="assistant-demo-status">Watch a quick conversation with the schema assistant.</span><button class="tour-demo-toggle" id="assistant-demo-toggle" type="button">Pause demo</button></div>
-            <div class="onboarding-screenshot assistant-tour-shot tour-assistant-demo" role="group" aria-label="Animated conversation with the AI schema assistant">
+            <div class="onboarding-screenshot assistant-tour-shot tour-assistant-demo" aria-hidden="true">
               <div class="tour-assistant-rail"><i></i><i></i><i></i><span class="tour-assistant-tool" data-assistant-demo-target="tool"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5.5h12v10H9l-3 3v-13Z"/><path d="M9 9h6M9 12h4"/></svg><b></b></span></div>
               <div class="tour-assistant-canvas"><span>authors</span><span>books</span><span>loans</span></div>
               <section class="tour-assistant-panel">
@@ -346,7 +368,7 @@ ALTER TABLE "public"."books"
               <div class="tour-demo-cursor tour-assistant-cursor" aria-hidden="true"><svg viewBox="0 0 24 28"><path d="M3 2v20l5-5 4 9 4-2-4-8h7Z"/></svg><span>Left click</span></div>
             </div>
             <div class="onboarding-copy">
-              <span class="onboarding-number">04</span>
+              <span class="onboarding-number">05</span>
               <div><h3>Ask, review, stay in control</h3><p>The optional assistant can explain or propose schema changes, but every action waits for your confirmation. Use the <strong>?</strong> menu anytime to reopen this guide or shut down the app.</p></div>
             </div>
           </section>
@@ -355,7 +377,7 @@ ALTER TABLE "public"."books"
           <label class="onboarding-opt-out"><input id="onboarding-dont-show" type="checkbox" /> Do not show on future server starts</label>
           <div class="onboarding-progress" id="onboarding-progress" aria-label="Introduction progress"></div>
           <div class="onboarding-actions">
-            <button class="button button-ghost" id="onboarding-skip" type="button">Skip</button>
+            <button class="button button-ghost onboarding-skip" id="onboarding-skip" type="button">Skip</button>
             <button class="button button-ghost onboarding-arrow" id="onboarding-back" type="button" aria-label="Previous introduction page" disabled><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m12.5 5-5 5 5 5"/></svg></button>
             <button class="button button-primary onboarding-next" id="onboarding-next" type="button"><span>Next</span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7.5 5 5 5-5 5"/></svg></button>
           </div>
