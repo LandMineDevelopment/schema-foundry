@@ -105,7 +105,11 @@ Deleting an example remains respected across restarts. Use **? > Restore example
 
 ### Schemer Dashboard Workspace
 
+Schemer is not currently included in `start.sh` or `start.ps1`. Enable it with the complete advanced Compose file set shown below; direct Compose uses fixed loopback ports and does not perform the launchers' free-port selection.
+
 Schemer is an analytics workspace served separately from Schemii while reusing the same Python `PostgresService`, capability-scoped PostgreSQL HTTP router, authenticated browser session client, PostgreSQL browser client, profile form/repository contracts, profile store, visual tokens, SVG icon registry, icon-button factory, delegated tooltip behavior, status controls, loading controls, and menu behavior. Common actions such as Close are instantiated from the same shared component rather than copied between apps. The bundled Mercury dashboard contains six functioning widgets backed by the live `bookstore.order_summary` view; it does not embed preview values or rows. **Restore Mercury demo** rebuilds those definitions from the verified included profile while preserving existing widget layouts, viewport, and unrelated custom widgets. Dashboard widgets render as uniform responsive tiles. Clicking a tile expands it from its dashboard position into an app-wide detail view using the widget's own header. Activating a KPI, chart mark, or table row opens its live detail report with the matching filters. `View SQL` shows the exact executed statement and separately bound parameters. Edit mode supports persisted, animated drag-and-drop swaps when the dragged widget center overlaps another widget, keyboard-accessible earlier/later movement, widget creation, duplication, and deletion without freeform positioning or resizing.
+
+Dashboard management includes create, open/switch, rename, duplicate, archive/unarchive, active/archived filtering, and delete workflows. Dashboard and widget edits autosave with revision checks; navigation stops when pending persistence fails instead of discarding local work. A dashboard is limited to 100 widgets. New manual widgets, and AI-created widgets only when explicitly requested, may begin as unconfigured placeholders and gain live data only after a verified source and structured query are applied. The visible date-range control is disabled because dashboard slicers and date-range filtering remain deferred.
 
 The Data sources dialog manages shared PostgreSQL connection profiles only. In dashboard Edit mode, each tile has an **Edit** action that opens that widget's configuration editor, where its name can be edited independently of source or query setup. Names and source assignments save automatically; query drafts remain local until **Apply query & run** succeeds. Connected keyboard-navigable tabs provide separate Source, Visualization, Filters, Sort & Limit, and Detail Report views inside one scrolling content pane. The Source view browses tables, views, and materialized views for that widget alone. Schemer sends the exact profile, configured database, and namespace to the shared PostgreSQL catalog route; the server verifies `current_database()` before returning relation identities and rejects mismatches with `database_changed`. Selecting a relation loads its normalized kind, ordered columns, PostgreSQL display types, nullability, and full deterministic catalog fingerprint. Fingerprints include semantic relation metadata and view definitions while excluding transient OIDs and timestamps. The Sort & Limit view accepts multiple result fields and preserves their top-to-bottom priority in the generated `ORDER BY` clause. Query controls use the shared Schemii inspector geometry and compact working widths rather than stretching across the editor. Narrow layouts retain dashboard switching and creation controls, and reduced-motion preferences suppress workspace transitions.
 
@@ -129,7 +133,21 @@ The relation detail pane can request a 20-row source preview. The dedicated prev
 
 New source assignments also persist a semantic column snapshot containing only name, PostgreSQL type, nullability, and ordinal; older identity-only sources remain valid. Live verification compares that snapshot with PostgreSQL and reports missing relations plus named missing, added, and changed columns in the widget editor. Changed sources stay blocked until the user explicitly reselects the live relation; Schemer never rewrites the saved fingerprint or snapshot automatically.
 
-Aggregate execution uses a dedicated endpoint that accepts only the saved single-relation source and structured query model. The server quotes all identifiers, binds every filter and limit value, verifies the saved profile database, acquires an access-share lock before taking the catalog snapshot, revalidates the connected database and live columns, and executes in a repeatable-read, read-only transaction with a statement timeout and a 500-row maximum. Generated SQL is formatted across clauses and grouped predicates so `View SQL` mirrors the AND/OR structure. Responses include a bounded generic result table, truncation state, exact generated SQL, bound parameters, and dimension/measure/filter-group lineage. The temporal-series companion route accepts only strict manifest or aligned-window requests for one verified date/timestamp dimension and up to eight measures. Schemer requires the request to name the exact saved line widget and verifies its source plus server-reconstructed visualization projection while holding the dashboard revision guard. It interprets PostgreSQL `date` and timestamp-without-time-zone values as UTC, preserves timestamp-with-time-zone instants, applies the saved filter groups to both manifest and windows, forces chronological bucket order, and rejects expired HMAC-signed manifests, stale refresh generations, misaligned ranges, unknown fields, or windows denser than one row per server-derived bucket. Each request remains independently read-only and repeatable-read; cached windows are refresh-coherent but are not claimed to share one long-lived PostgreSQL snapshot. Schemer does not accept joins or caller-authored SQL through these endpoints.
+Aggregate execution uses a dedicated endpoint that accepts one complete verified relation snapshot and a validated single-relation structured query model, including unsaved drafts that must run successfully before persistence. Schemer browser requests include dashboard ID/revision context so stale-dashboard execution is rejected; the endpoint also supports the base source/query request without dashboard context, so that guard is not a universal API boundary. Relation identity, kind, fingerprint, columns, profile database, and query fields are revalidated by the service, but standard aggregate and detail requests do not claim server reconstruction from a saved widget ID. The server quotes all identifiers, binds every filter and limit value, acquires an access-share lock before taking the catalog snapshot, and executes in a repeatable-read, read-only transaction with a statement timeout and a 500-row maximum. Generated SQL is formatted across clauses and grouped predicates so `View SQL` mirrors the AND/OR structure. Responses include a bounded generic result table, truncation state, exact generated SQL, bound parameters, and dimension/measure/filter-group lineage. The temporal-series companion route has the stronger saved-widget contract: it accepts only strict manifest or aligned-window requests for one verified date/timestamp dimension and up to eight measures, requires the exact saved line widget ID, and verifies its source plus server-reconstructed visualization projection while holding the dashboard revision guard. It interprets PostgreSQL `date` and timestamp-without-time-zone values as UTC, preserves timestamp-with-time-zone instants, applies saved filter groups to both manifest and windows, forces chronological bucket order, and rejects expired HMAC-signed manifests, stale refresh generations, misaligned ranges, unknown fields, or windows denser than one row per server-derived bucket. Each request remains independently read-only and repeatable-read; cached windows are refresh-coherent but are not claimed to share one long-lived PostgreSQL snapshot. Schemer does not accept joins or caller-authored SQL through these endpoints.
+
+Set a stable direct-Compose instance and collision-free ports before running either command. In a POSIX shell:
+
+```bash
+export SCHEMII_INSTANCE=my-schemii SCHEMII_HOST_PORT=18080 SCHEMER_HOST_PORT=18081
+```
+
+In PowerShell:
+
+```powershell
+$env:SCHEMII_INSTANCE = "my-schemii"
+$env:SCHEMII_HOST_PORT = "18080"
+$env:SCHEMER_HOST_PORT = "18081"
+```
 
 ```bash
 docker compose -f compose.yaml -f compose.postgres.yaml -f compose.schemer.yaml up --build -d
@@ -141,7 +159,7 @@ To run both applications with one shared OpenCode service, set `SCHEMII_OPENCODE
 docker compose -f compose.yaml -f compose.postgres.yaml -f compose.ai.yaml -f compose.schemer.yaml -f compose.schemer.ai.yaml up --build -d
 ```
 
-Open Schemii at `http://127.0.0.1:8080/` and Schemer at `http://127.0.0.1:8081/`. Saved PostgreSQL profiles are shared through the existing `schemii-config` volume; passwords remain server-side and are never returned to either browser. Versioned dashboard records are stored separately in the owner-only `schemer-dashboards` volume and survive container replacement or restart. Deleting that volume permanently deletes the saved dashboards. Direct launches use `SCHEMER_DASHBOARD_DIR`, which defaults to `~/.local/share/schemer/dashboards`.
+With the example overrides above, open Schemii at `http://127.0.0.1:18080/` and Schemer at `http://127.0.0.1:18081/`; without overrides, direct Compose defaults to ports 8080 and 8081. Saved PostgreSQL profiles are shared through the same instance-scoped `schemii-config` volume; passwords remain server-side and are never returned to either browser. Versioned dashboard records are stored separately in the owner-only `schemer-dashboards` volume and survive container replacement or restart. Deleting that volume permanently deletes the saved dashboards. Direct native launches use `SCHEMER_DASHBOARD_DIR`, which defaults to `~/.local/share/schemer/dashboards`.
 
 Schemer saves edits automatically using revision checks. If another browser tab saves the same dashboard first, the stale tab is blocked rather than overwriting the newer record and must reload the current dashboard.
 
@@ -193,6 +211,7 @@ The default stack stores data in instance-scoped Docker volumes:
 - `schemii-opencode-data`: provider credentials and chat sessions
 - `schemii-opencode-config` and `schemii-opencode-state`: OpenCode configuration and state
 - `schemii-opencode-cache`: recreatable cache
+- `schemer-dashboards`: saved Schemer dashboards, widget configuration, layout, and viewport state when Schemer is enabled
 
 List the exact volumes for the launcher-printed instance:
 
@@ -200,7 +219,7 @@ List the exact volumes for the launcher-printed instance:
 docker volume ls --filter "label=com.docker.compose.project=<instance>"
 ```
 
-Back up the config, schemas, PostgreSQL database, and non-cache OpenCode volumes before upgrades or migration work. Use `pg_dump` for important PostgreSQL data.
+Back up the config, schemas, Schemer dashboards, PostgreSQL database, and non-cache OpenCode volumes before upgrades or migration work. Use `pg_dump` for important PostgreSQL data.
 
 Database backup on Linux/macOS, using the printed instance:
 
@@ -216,7 +235,7 @@ $postgresId = docker ps -q --filter "label=com.docker.compose.project=<instance>
 docker exec $postgresId pg_dump -U schemii -d schemii > schemii-postgres.sql
 ```
 
-If `.env` changes the user or database, substitute those values. To archive a stopped named volume, repeat this command for `<instance>_schemii-config`, `<instance>_schemii-schemas`, `<instance>_schemii-opencode-data`, `<instance>_schemii-opencode-config`, and `<instance>_schemii-opencode-state`:
+If `.env` changes the user or database, substitute those values. To archive a stopped named volume, repeat this command for `<instance>_schemii-config`, `<instance>_schemii-schemas`, `<instance>_schemer-dashboards` when present, `<instance>_schemii-opencode-data`, `<instance>_schemii-opencode-config`, and `<instance>_schemii-opencode-state`:
 
 ```bash
 docker run --rm -v <volume-name>:/source:ro -v "$PWD":/backup alpine:3.20 tar -czf /backup/<volume-name>.tgz -C /source .
@@ -224,13 +243,15 @@ docker run --rm -v <volume-name>:/source:ro -v "$PWD":/backup alpine:3.20 tar -c
 
 On PowerShell, replace `"$PWD"` with an absolute directory accepted by Docker Desktop. Keep backups outside the installation directory before replacing source files.
 
-Never run `docker compose down --volumes` or remove project volumes unless permanent deletion is intended. Doing so deletes saved designs, profiles and passwords, migration history, PostgreSQL data, provider credentials, chats, and AI state.
+Never run `docker compose down --volumes` or remove project volumes unless permanent deletion is intended. Doing so can delete saved designs, Schemer dashboards and widget layouts, profiles and passwords, migration history, PostgreSQL data, provider credentials, chats, and AI state.
 
 To remove only the included PostgreSQL database, stop the instance, remove only `<instance>_schemii-postgres`, and use explicit `ui` or `ai` mode afterward. The default launcher recreates and reseeds a missing included database.
 
 ## Uninstall Schemii
 
-Back up anything important first. The uninstaller permanently removes **all Schemii instances owned by the current Docker user**, including their containers, networks, saved designs, layouts, profiles and passwords, migration history, PostgreSQL data, provider credentials, chats, state volumes, and Schemii-built images. It then removes the repository containing the uninstall script.
+Back up anything important first. The uninstaller permanently removes detected Schemii instances owned by the current Docker user, including their containers, networks, Schemii designs and layouts, profiles and passwords, migration history, PostgreSQL data, provider credentials, chats, state volumes, and Schemii-built images. It then removes the repository containing the uninstall script.
+
+Current uninstall scripts predate Schemer resource cleanup: they do not discover or remove a standalone `schemer-dashboards` volume or the `schemer:local` image. Back up and remove those resources separately only when permanent Schemer dashboard deletion is intended. Do not assume repository removal deleted that dashboard volume.
 
 It does not uninstall Docker and does not use broad Docker prune commands or remove unrelated Docker projects.
 
@@ -335,15 +356,17 @@ Most users do not need configuration. These launcher and Compose variables are t
 | --- | --- |
 | `SCHEMII_INSTANCE` | Stable lowercase instance name; keep unique between installations |
 | `SCHEMII_HOST_PORT` | Fixed loopback browser port instead of automatic selection |
+| `SCHEMER_HOST_PORT` | Fixed Schemer loopback port for advanced Compose; default `8081` |
+| `SCHEMER_IMAGE` | Schemer image name for advanced Compose; default `schemer:local` |
 | `SCHEMII_NO_OPEN` | Set to `1` to suppress browser opening on Linux/macOS |
 | `SCHEMII_POSTGRES_DB` | Included PostgreSQL database name |
 | `SCHEMII_POSTGRES_USER` | Included PostgreSQL user |
 | `SCHEMII_POSTGRES_PASSWORD` | Included PostgreSQL password |
 | `SCHEMII_OPENCODE_TIMEOUT` | AI request timeout, default `120` seconds; accepted range `1`–`300` |
 
-Native application variables include `SCHEMII_HOST`, `SCHEMII_PORT`, `SCHEMII_CONFIG_DIR`, `SCHEMII_SCHEMA_DIR`, and `SCHEMII_BEHIND_LOOPBACK_PROXY`. Container launchers set these automatically.
+Native Schemii variables include `SCHEMII_HOST`, `SCHEMII_PORT`, `SCHEMII_CONFIG_DIR`, `SCHEMII_SCHEMA_DIR`, and `SCHEMII_BEHIND_LOOPBACK_PROXY`. Native Schemer variables include `SCHEMER_HOST`, `SCHEMER_PORT`, `SCHEMER_CONFIG_DIR`, `SCHEMER_DASHBOARD_DIR`, `SCHEMER_BEHIND_LOOPBACK_PROXY`, `SCHEMER_OPENCODE_URL`, `SCHEMER_OPENCODE_USERNAME`, `SCHEMER_OPENCODE_PASSWORD`, and `SCHEMER_OPENCODE_TIMEOUT`. `SCHEMER_DASHBOARD_DIR` defaults to `~/.local/share/schemer/dashboards`; the AI timeout defaults to 120 seconds and accepts `1`–`300`. `compose.schemer.ai.yaml` intentionally maps Schemer's OpenCode connection and timeout from the shared `SCHEMII_OPENCODE_*` Compose values.
 
-Direct Compose operation is advanced. It does not derive an instance or free port. Always set stable, unique `SCHEMII_INSTANCE` and `SCHEMII_HOST_PORT` values and include the complete file set for the intended mode. AI Compose also requires a strong, stable `SCHEMII_OPENCODE_PASSWORD`. Prefer the launchers for routine installation, updates, and mode changes.
+Direct Compose operation is advanced. It does not derive an instance or free port. Always set a stable, unique `SCHEMII_INSTANCE`, choose collision-free `SCHEMII_HOST_PORT` and `SCHEMER_HOST_PORT` values for enabled applications, and include the complete file set for the intended mode. Set distinct image names with `SCHEMII_IMAGE` and `SCHEMER_IMAGE` when projects should not share build tags. AI Compose also requires a strong, stable `SCHEMII_OPENCODE_PASSWORD`. Prefer the launchers for routine Schemii installation, updates, and mode changes.
 
 ## Migration Safety
 
@@ -374,6 +397,7 @@ Run the checks:
 python3 -m unittest discover -s tests
 python3 -m compileall -q src
 node --check src/schemii/web/app.js
+node --check src/schemii/schemer_web/app.js
 for test_file in tests/test_*.js; do node "$test_file" || exit 1; done
 git diff --check
 ```
@@ -387,6 +411,7 @@ python -m pip install -e .
 python -m unittest discover -s tests
 python -m compileall -q src
 node --check src/schemii/web/app.js
+node --check src/schemii/schemer_web/app.js
 Get-ChildItem tests/test_*.js | ForEach-Object { node $_.FullName; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
 git diff --check
 ```
@@ -395,9 +420,11 @@ The opt-in live model contract test is documented in [`docs/AI_ASSISTANT.md`](do
 
 ## API
 
-The browser uses same-origin local APIs for saved designs, PostgreSQL, examples, AI, and shutdown. PostgreSQL, AI, example-restoration, and shutdown routes require a local origin plus the `X-Schemii-Token` returned by `/api/session`. The shared session client acquires this token lazily and retries one expired session once. Schemii mounts profile, catalog, schema-design, and read-SQL capabilities; Schemer mounts profile, catalog, relation-query, and the separate read-SQL capability without exposing schema introspection, preview, or migration surfaces. Schemer's SQL request is exactly `{database, namespace, sql}`, rejects unknown fields and `EXPLAIN`, and returns at most 100 rows, 50 columns, and 256 KiB of complete JSON values. Schemii temporarily accepts its legacy `{namespace, sql}` request as well as the exact-database form. Schema writes additionally use revision and layout-token checks.
+The browser uses same-origin local APIs for saved designs, dashboards, PostgreSQL, examples, AI, and shutdown. PostgreSQL, AI, example-restoration, and shutdown routes require a local origin plus the `X-Schemii-Token` returned by `/api/session`. The shared session client acquires this token lazily and retries one expired session once. Schemii mounts profile, catalog, schema-design, generic table-preview, and read-SQL capabilities. Schemer mounts profile, catalog, verified relation-preview, relation-query/detail/temporal-series, and a separate read-SQL capability without exposing Schemii's schema introspection, generic table-data, migration-planning, or apply surfaces.
 
-See `src/schemii/server.py` and the focused server tests for the current route contract. Do not expose these APIs beyond the loopback-only application boundary.
+Schemer dashboard routes are `GET/POST /api/dashboards`, `GET/PUT/DELETE /api/dashboards/{id}`, and revision-bound `POST /api/examples/mercury/reset`. Aggregate and detail execution accept complete verified source snapshots plus validated structured saved or draft queries. Schemer browser calls include dashboard ID/revision context and receive stale-dashboard protection; the base API request shape omits that optional contextual guard. Temporal-series requests require the exact saved widget and are checked against the server-reconstructed line projection. Schemer's separately confirmed analytic SQL request is exactly `{database, namespace, sql, profileFingerprint, dashboardId, expectedRevision}`, rejects unknown fields and `EXPLAIN`, and returns at most 100 rows, 50 columns, and 256 KiB of complete JSON values. Schemii temporarily accepts its legacy `{namespace, sql}` request as well as the exact-database form. Schema writes additionally use revision and layout-token checks.
+
+See `src/schemii/server.py`, `src/schemii/schemer_server.py`, `src/schemii/postgres_http.py`, and the focused server/HTTP contract tests for current routes. Do not expose these APIs beyond the loopback-only application boundary.
 
 ## Agent Instructions
 

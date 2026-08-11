@@ -1,6 +1,6 @@
 # Schemer Implementation Checklist
 
-This file is the durable implementation sequence for Schemer. Use it after a lost connection, context compaction, or a new chat.
+This file records Schemer's implemented phases and remaining roadmap. Checked items describe implemented behavior; unchecked items remain deferred and must not be presented as available.
 
 ## Shared Embedded AI
 
@@ -12,6 +12,7 @@ This file is the durable implementation sequence for Schemer. Use it after a los
 - [x] Keep rows and SQL outside metadata/dashboard disclosure; allow only separately confirmed, bounded read-only analytic SQL in data mode. Keep hosts/users/passwords, schema tools, migrations, shell, filesystem, web, tasks, and MCP outside the Schemer agent boundary.
 - [x] Create complete widgets from bounded live-verified catalog descriptors, execute revision-guarded structured queries before mutation, generate IDs/layout/presentation in Schemer, persist once, and reconcile ambiguous saves.
 - [x] Replace Mercury preview values with six resettable live widgets backed by the included `bookstore.order_summary` view while preserving saved layouts and unrelated custom widgets.
+- [x] Add proportional UTC line timelines with signed manifests, lazy aligned windows, browser caching, selectable points, and half-open range drill-through.
 
 ## Approval Protocol
 
@@ -29,8 +30,8 @@ This file is the durable implementation sequence for Schemer. Use it after a los
 - PostgreSQL is authoritative for relation definitions and live data.
 - A widget query supports zero or more dimensions and one or more measures.
 - Aggregate reports support any number of group-by columns and metric columns.
-- Dashboard slicers affect only widgets with explicit, type-compatible bindings.
-- Drill-through details use the same source relation, slicers, widget filters, clicked dimensions, and measure-specific filters as the aggregate.
+- Planned dashboard slicers will affect only widgets with explicit, type-compatible bindings.
+- Drill-through details use the same source relation, widget filters, clicked dimensions or temporal ranges, and measure-specific filters as the aggregate. Dashboard slicers will join this contract when Phase 6 is implemented.
 - Generated aggregation SQL, parameters, source definitions, and detail SQL remain inspectable.
 - Visualization changes must not silently discard dimensions, measures, filters, formatting, or detail configuration.
 - Sources, groupings, measures, and filters are managed from the specific widget's editor in dashboard Edit mode, never from a global dashboard source picker.
@@ -53,12 +54,12 @@ This file is the durable implementation sequence for Schemer. Use it after a los
 Approval required before implementation.
 
 - [x] Define a versioned dashboard record with stable dashboard and widget IDs.
-- [x] Store dashboard title, source references, slicers, widgets, layout, and viewport independently from PostgreSQL profiles.
+- [x] Store dashboard title, source references, widgets, layout, and viewport independently from PostgreSQL profiles; reserve a validated empty slicer collection for Phase 6.
 - [x] Add atomic, owner-only dashboard file persistence and validation.
 - [x] Add dashboard create, open, rename, duplicate, archive, and delete workflows.
 - [x] Add explicit View and Edit modes.
 - [x] Render widgets as uniform responsive tiles; reserve create, animated center-overlap swap, keyboard reorder, duplicate, and delete actions for Edit mode.
-- [x] Expand tiles from their dashboard position using their own header; split 50/50 into a filtered population table only after metric-level selection.
+- [x] Expand tiles from their dashboard position into a focused widget workspace; open the nearly full-width detail pane only after a drillable mark, value, row, or metric is selected.
 - [x] Add stale-write protection for concurrent browser tabs.
 - [x] Add persistence, malformed-record, stale-write, and layout-preservation tests.
 
@@ -117,17 +118,19 @@ Acceptance criteria: users can build and persist a grouped table such as publish
 
 Approval required before implementation.
 
-- [x] Add compact in-widget controls for KPI, bar, line, donut, and aggregate table modes.
-- [x] Add quick selectors for dimensions, visible measures, aggregation, and sort.
-- [x] Keep deeper source, filter, formatting, interaction, and detail settings in an editor drawer.
+- [x] Add table, KPI, grouped-bar, line, and donut selection inside the widget editor; keep dashboard tiles result-only.
+- [x] Place visualization roles beside the connected dimension and measure draft controls, with filters, sorting, formatting, and detail settings in their dedicated editor tabs.
+- [x] Keep visualization/query edits in the draft until **Apply query & run** executes successfully; render the resulting local widget state while autosave confirms persistence or reports that it remains unsaved.
 - [x] Support multiple measures in KPI groups, grouped bars, lines, and aggregate tables.
 - [x] Require one selected measure for donut charts while retaining unshown measures.
 - [x] Offer explicit compatibility guidance when a visualization lacks required roles.
 - [x] Apply smart suggestions without silently rewriting query configuration.
 - [x] Restore all prior dimensions and measures when switching back to a compatible visualization.
-- [x] Add hot-swap round-trip tests proving no configuration loss.
+- [x] Add visualization round-trip tests proving no configuration loss.
+- [x] Add readable compact and focused legends, axes, ticks, units, values, empty states, and responsive table projections.
+- [x] Add lazy proportional temporal lines whose fixed UTC window cache avoids database requests when scrolling back.
 
-Acceptance criteria: compatible visualizations switch immediately, and incompatible switches explain the missing role without deleting configuration.
+Acceptance criteria: compatible role selections carry into the draft immediately; the live visualization changes only after successful execution, and persistence failure remains visible without discarding the local result. Incompatible modes explain the missing role without deleting configuration.
 
 ## Phase 6: Dashboard Slicers
 
@@ -152,8 +155,9 @@ Approval required before implementation.
 
 Core approved and implemented. Dashboard slicer integration remains deferred with Phase 6, so the full acceptance criterion remains open.
 
-- [x] Add a right-side detail drawer that does not destroy dashboard context.
-- [ ] Combine dashboard slicers, widget filters, clicked dimensions, clicked series, and measure-specific filters.
+- [x] Add a bottom/vertical, nearly full-width detail workspace that preserves dashboard and originating-widget context.
+- [x] Combine widget filters, clicked dimensions or temporal ranges, clicked series, and measure-specific filters.
+- [ ] Add dashboard slicer lineage to the combined drill-through filters after Phase 6 is implemented.
 - [x] Define reusable detail reports tied to the same source relation as their widgets.
 - [x] Configure detail columns, labels, formats, default sort, and row identifier.
 - [x] Add bounded pagination, sorting, searching, and column visibility.
@@ -163,7 +167,7 @@ Core approved and implemented. Dashboard slicer integration remains deferred wit
 - [x] Keep widget and detail results in one header-switchable vertical workspace without losing originating filters.
 - [x] Defer export and individual record panels unless separately approved.
 
-Acceptance criteria: clicking a chart mark or aggregate cell opens the logically matching underlying rows with complete filter lineage.
+Acceptance criteria for implemented scope: clicking a chart mark or aggregate cell opens the logically matching underlying rows with widget filters, clicked dimensions or half-open temporal ranges, measure lineage, detail sort, and column-search lineage. Dashboard slicer lineage remains deferred with Phase 6.
 
 ## Phase 8: Query And Source Transparency
 
@@ -176,7 +180,7 @@ Core approved and implemented. Read-only `EXPLAIN` remains separately deferred.
 - [x] Show the PostgreSQL table/view/materialized-view definition when permitted.
 - [x] Show generated aggregation SQL separately from bound parameter values.
 - [x] Show generated detail SQL and its parameter values.
-- [x] Show active slicers, widget filters, query duration, result row count, truncation, and refresh time.
+- [x] Show deferred slicer status, widget filters, query duration, result row count, truncation, and refresh time.
 - [x] Add copy-query controls that do not include credentials.
 - [ ] Add optional read-only `EXPLAIN` later only after separate approval.
 - [x] Add redaction and untrusted-definition rendering tests.
@@ -202,7 +206,8 @@ Acceptance criteria: users can build join-backed analytics views in Schemii, saf
 
 Approval required before each separately scoped capability.
 
-- [ ] Query-result caching and refresh policies.
+- [x] Cache lazy temporal-line windows by dashboard revision, source, and projected query; clear them on refresh, navigation, source/query changes, and revision changes.
+- [ ] General query-result caching and configurable refresh policies for non-temporal results.
 - [ ] Point-in-time consistency strategy for aggregates and details.
 - [ ] Materialized-view refresh controls.
 - [ ] Pivot tables, subtotals, and grand totals.
@@ -213,7 +218,9 @@ Approval required before each separately scoped capability.
 - [ ] Scheduling and delivery.
 - [ ] Performance budgets, cancellation, concurrency limits, and observability.
 
-## Required Verification For Every Phase
+## Feature-Branch Verification
+
+Recorded for the completed branch on 2026-08-11. These checks describe the final local verification performed for the implemented phases; they do not imply every item is enforced by CI or that deferred phases are complete.
 
 - [x] Focused Python and JavaScript tests for changed behavior.
 - [x] Complete Python test suite.
@@ -221,6 +228,6 @@ Approval required before each separately scoped capability.
 - [x] Python compile check and both application JavaScript syntax checks.
 - [x] Compose configuration validation for affected service combinations.
 - [x] Local Schemii and Schemer server smoke tests for `/`, `/api/session`, and affected routes.
-- [x] Desktop and mobile render checks for frontend changes.
+- [x] Static responsive contracts plus live Chromium desktop/mobile render checks for affected frontend behavior.
 - [x] Disposable PostgreSQL verification for catalog, query, view, or migration changes.
 - [x] `git diff --check`.

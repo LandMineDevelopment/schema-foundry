@@ -12,15 +12,16 @@ Use this order when behavior differs:
 
 1. The user's explicit request.
 2. The live PostgreSQL catalog for current database state.
-3. The saved schema record selected for that exact profile, database, and namespace.
-4. Application code and tests.
-5. `README.md` for operating guidance.
+3. For Schemii, the saved schema record selected for that exact profile, database, and namespace.
+4. For Schemer, the saved dashboard revision and each widget's exact source fingerprint, column snapshot, structured query, and visualization projection.
+5. Application code and tests.
+6. `README.md` for operating guidance.
 
-Never preview or apply a saved schema against an unverified database or namespace.
+Never preview or apply a saved schema against an unverified database or namespace. Never execute or refresh a Schemer widget against an inferred profile, database, namespace, relation, or dashboard revision.
 
 ## Working Method
 
-1. Inspect the relevant source, tests, saved schema, and `git status` before proposing changes.
+1. Inspect the relevant source, tests, saved schema or dashboard record, and `git status` before proposing changes.
 2. State the smallest correct implementation and identify data, compatibility, locking, permission, and destructive-operation risks.
 3. Ask before making a destructive schema or data change when intent is not explicit.
 4. Implement the approved scope without modifying unrelated user changes.
@@ -46,6 +47,16 @@ Canvas positions, colors, and viewport state are user-owned data. Introspection 
 For any generated schema JSON write or introspection synchronization, load and follow `.opencode/skills/preserve-schemii-layout/SKILL.md`. Resolve the schema directory from `SCHEMII_SCHEMA_DIR`, falling back to `~/.local/share/schemii/schemas`; do not assume schemas live inside the repository.
 
 Treat `layout_conflict` as a hard-refresh requirement. Never bypass the layout token guard or use a stale browser tab to overwrite a current layout.
+
+## Schemer Dashboard Safety
+
+- Dashboard records, widget order, layout metadata, viewport state, source/query configuration, and unrelated custom widgets are user-owned data.
+- Treat `dashboard_conflict`, `dashboard_changed`, and stale temporal-series errors as refresh requirements. Never bypass dashboard revision guards.
+- Never rewrite a stale relation fingerprint or semantic column snapshot automatically. Require explicit source reselection after catalog changes.
+- For Schemer dashboard work, send aggregate and detail execution with the exact dashboard ID/revision and complete verified profile, database, namespace, relation kind, fingerprint, source-column, and structured-query request. Draft queries may execute before they are saved. The base aggregate/detail API also accepts requests without dashboard context, so do not describe its revision guard as universal. Temporal execution additionally requires the exact saved widget ID and server-reconstructed line projection; never imply that stronger anti-tamper boundary exists on standard aggregate or detail requests.
+- Keep persisted widgets single-relation and caller-SQL-free. Separately confirmed data-mode analytic SQL may join relations but must remain profile/database/namespace/revision-bound and must not mutate widget configuration.
+- Mercury restoration may replace reserved default definitions only. Preserve established layout, viewport, and unrelated widgets.
+- Temporal line windows are separate read-only PostgreSQL snapshots. Cache them only within one refresh generation and never claim cross-window point-in-time consistency.
 
 ## Safe Migrations
 

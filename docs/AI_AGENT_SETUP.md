@@ -16,7 +16,7 @@ PowerShell:
 powershell -ExecutionPolicy Bypass -File .\start.ps1
 ```
 
-The default `ai-docker-db` mode includes Schemii, private PostgreSQL, private OpenCode, the linked Mercury Books tutorial, and the local Event Studio design. The launcher prints the instance name and loopback URL. Do not assume port 8080.
+The default `ai-docker-db` mode includes Schemii, private PostgreSQL, private OpenCode, the linked Mercury Books tutorial, and the local Event Studio design. The launcher prints the instance name and loopback URL. Do not assume port 8080. The current launchers do not start Schemer; use the explicit advanced Compose combinations below when the user requests the dashboard application.
 
 ## Help A User Install Docker
 
@@ -75,6 +75,40 @@ If the launcher finds legacy config and schema volumes without a legacy containe
 
 Base Compose does not add a Linux `host.docker.internal` mapping. Use a Linux host-network mode for PostgreSQL bound to host loopback. Existing Docker PostgreSQL requires an explicit shared private network override and its service name or network alias.
 
+## Schemer-Enabled Compose
+
+Schemer currently uses advanced Compose rather than `start.sh` or `start.ps1`. It must join the same project, profile volume, and included PostgreSQL network as Schemii.
+
+Without AI:
+
+Set a stable instance and collision-free ports first. In a POSIX shell:
+
+```bash
+export SCHEMII_INSTANCE=my-schemii SCHEMII_HOST_PORT=18080 SCHEMER_HOST_PORT=18081
+```
+
+In PowerShell:
+
+```powershell
+$env:SCHEMII_INSTANCE = "my-schemii"
+$env:SCHEMII_HOST_PORT = "18080"
+$env:SCHEMER_HOST_PORT = "18081"
+```
+
+Then run in either shell:
+
+```text
+docker compose -f compose.yaml -f compose.postgres.yaml -f compose.schemer.yaml up --build -d
+```
+
+With one shared private OpenCode service, first set a strong `SCHEMII_OPENCODE_PASSWORD`, then run:
+
+```bash
+docker compose -f compose.yaml -f compose.postgres.yaml -f compose.ai.yaml -f compose.schemer.yaml -f compose.schemer.ai.yaml up --build -d
+```
+
+The examples use instance `my-schemii` and loopback ports 18080/18081. Direct Compose defaults to project `schemii` and ports 8080/8081 when those variables are omitted; it does not choose free identities or ports. Replace the example values with one stable project identity and collision-free ports. When adding Schemer to an existing direct-Compose project, use that project's exact `SCHEMII_INSTANCE` so both applications share `schemii-config`, PostgreSQL networking, and one `opencode` service; Schemer keeps dashboards in its separate `schemer-dashboards` volume.
+
 ## Verify Startup
 
 Use the instance and URL printed by the launcher.
@@ -83,6 +117,14 @@ Use the instance and URL printed by the launcher.
 2. Confirm `example-seed` exited with status 0.
 3. Open the printed URL in a browser.
 4. Verify the affected UI or API behavior.
+
+When Schemer is enabled:
+
+1. Confirm `schemer` is healthy and `example-seed` still exited with status 0.
+2. Fetch Schemer `/` and `/api/session` at its exact loopback port without printing the session response body.
+3. Confirm Schemii and Schemer list the same saved profile identities.
+4. Confirm the Mercury dashboard becomes live only after `schemii_example_postgres`, the exact database, and `bookstore.order_summary` are verified.
+5. If AI is enabled, confirm one `opencode` service is running and both `/workspace` and `/workspace-schemer` are mounted read-only.
 
 Instance-aware Docker status:
 
@@ -98,7 +140,7 @@ docker logs <container-name>
 
 Do not use unqualified `docker compose ps` or `docker compose logs` for a launcher-created instance. Those commands can target the legacy project instead.
 
-HTTP clients are optional host tools. Never print or persist the body from `/api/session`; it contains a secret token. If API verification is necessary, keep the token in memory, send it only to the matching loopback Schemii API, and redact it from all output.
+HTTP clients are optional host tools. Never print or persist the body from `/api/session`; it contains a secret token. If API verification is necessary, keep each token in memory, send it only to the matching loopback application origin that issued it, and redact it from all output. Schemii and Schemer issue independent session tokens; never reuse one application's token against the other.
 
 ## Data Safety
 
@@ -118,11 +160,11 @@ List the exact volumes with:
 docker volume ls --filter "label=com.docker.compose.project=<instance>"
 ```
 
-Never run `docker compose down --volumes`, `docker volume rm`, or equivalent destructive commands without explicit approval. Disclose that volume deletion can remove designs, layouts, profiles/passwords, migration history, PostgreSQL data, provider credentials, chat history, and AI state.
+Never run `docker compose down --volumes`, `docker volume rm`, or equivalent destructive commands without explicit approval. Disclose that volume deletion can remove designs, Schemer dashboards, widget configuration, dashboard and canvas layouts, viewport state, profiles/passwords, migration history, PostgreSQL data, provider credentials, chat history, and AI state.
 
 Schemer AI must join the exact same Compose project and OpenCode service as Schemii. Use `compose.schemer.yaml` with `compose.schemer.ai.yaml`; do not start a second OpenCode service or copy provider credentials. Provider authentication is shared globally, while `/workspace` and `/workspace-schemer` keep application chats, skills, and proposal tools separate.
 
-For a complete user-requested uninstall, use `uninstall.sh` or `uninstall.ps1`. The scripts inventory and remove all detected Schemii projects for the current Docker user and then remove their own repository. They require typing `UNINSTALL` unless the user explicitly requests unattended `--yes`/`-Yes` operation. Never run an uninstaller merely to troubleshoot startup, and back up requested data first.
+For a user-requested Schemii uninstall, use `uninstall.sh` or `uninstall.ps1`. The scripts inventory and remove detected Schemii projects for the current Docker user and then remove their own repository. They require typing `UNINSTALL` unless the user explicitly requests unattended `--yes`/`-Yes` operation. Current scripts do not discover or remove a standalone `schemer-dashboards` volume or `schemer:local` image; disclose and inventory those separately before claiming a complete Schemer uninstall. Never run an uninstaller merely to troubleshoot startup, and back up requested data first.
 
 The browser shutdown action saves pending design edits and stops only Schemii. Sidecars can remain running. To stop all project containers without deleting volumes, use Docker Desktop or stop containers selected by the exact project label.
 
@@ -145,11 +187,11 @@ Do not preview or apply against an inferred target.
 
 ## Embedded AI Boundary
 
-Read `docs/AI_ASSISTANT.md` before changing AI behavior. Keep OpenCode pinned, private, Basic-authenticated, and restricted to its read-only workspace, six allowlisted skills, and explicit proposal tools.
+Read `docs/AI_ASSISTANT.md` before changing AI behavior. Keep OpenCode pinned, private, and Basic-authenticated. Schemii sessions are restricted to read-only `/workspace` with six Schemii skills; Schemer sessions are restricted to read-only `/workspace-schemer` with four Schemer skills. The applications share provider credentials but retain separate sessions, tools, instructions, and action policies.
 
 Never expose or mount host OpenCode files, the Docker socket, raw OpenCode endpoints, shell, filesystem writes, PTY, dynamic MCP, sharing, tasks, LSP, or formatter access.
 
-Provider credentials flow browser -> local Schemii API -> private OpenCode. Never return, print, commit, or put them in browser storage. Model interaction remains user-initiated. Do not send prompts, connect a paid provider, or widen model disclosure without the user's request.
+Provider credentials flow browser -> the active application's local API -> private OpenCode. Never return, print, commit, or put them in browser storage. Model interaction remains user-initiated. Do not send prompts, connect a paid provider, or widen model disclosure without the user's request.
 
 ## Troubleshooting Order
 
