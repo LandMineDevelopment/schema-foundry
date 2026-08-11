@@ -1620,7 +1620,7 @@ function commitWidgetEditorName() {
 function formatQueryValue(value, format = { style: "auto" }) {
   if (value === null) return "NULL";
   if (format.style === "auto") return typeof value === "object" ? JSON.stringify(value) : String(value);
-  if (typeof value === "string" && value.replace(/[^0-9]/g, "").replace(/^0+/, "").length > 15) return value;
+  if (format.style === "integer" && typeof value === "string" && value.replace(/[^0-9]/g, "").replace(/^0+/, "").length > 15) return value;
   const numericValue = typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value)) ? Number(value) : null;
   if (numericValue === null) return typeof value === "object" ? JSON.stringify(value) : String(value);
   const digits = format.fractionDigits;
@@ -1696,6 +1696,44 @@ function selectedResultColumns(result, ids) {
   }).filter(Boolean);
 }
 
+function chartLegend(measures) {
+  const legend = document.createElement("div");
+  legend.className = "live-chart-legend";
+  legend.setAttribute("aria-label", "Chart legend");
+  measures.forEach((measure, seriesIndex) => {
+    const item = document.createElement("span");
+    item.style.setProperty("--series", seriesIndex);
+    const swatch = document.createElement("i");
+    const label = document.createElement("span");
+    label.textContent = measure.label;
+    item.append(swatch, label);
+    legend.append(item);
+  });
+  return legend;
+}
+
+function chartHeading(dimension, measures) {
+  const heading = document.createElement("div");
+  heading.className = "live-chart-heading";
+  const description = document.createElement("strong");
+  description.textContent = `${measures.map(item => item.label).join(" and ")} by ${dimension.label}`;
+  heading.append(description, chartLegend(measures));
+  return heading;
+}
+
+function axisTickIndexes(length, count = 5) {
+  if (length <= 0) return [];
+  if (length === 1) return [0];
+  return [...new Set(Array.from({ length: Math.min(count, length) }, (_item, index) => Math.round(index * (length - 1) / (Math.min(count, length) - 1))))];
+}
+
+function formatAxisDimension(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}(?:T|$)/.test(value)) return formatQueryValue(value);
+  const parsed = new Date(value.length === 10 ? `${value}T00:00:00Z` : value);
+  if (!Number.isFinite(parsed.getTime())) return value;
+  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "2-digit", timeZone: "UTC" }).format(parsed);
+}
+
 function renderKpiVisualization(container, widget, execution, visualization) {
   if (execution.result.columns.some(column => column.kind === "dimension")) {
     container.append(visualizationGuidance("KPI groups require an ungrouped result."));
@@ -1726,7 +1764,10 @@ function renderKpiVisualization(container, widget, execution, visualization) {
     metric.append(label, value);
     group.append(metric);
   }
-  container.append(group, visualizationDataTable(widget, columns, [values]));
+  const context = document.createElement("p");
+  context.className = "live-kpi-context";
+  context.textContent = "Current aggregate across the full query result";
+  container.append(group, context, visualizationDataTable(widget, columns, [values]));
 }
 
 function renderBarVisualization(container, widget, execution, visualization) {
@@ -1743,7 +1784,21 @@ function renderBarVisualization(container, widget, execution, visualization) {
     container.append(visualizationGuidance("Grouped bars require at least one non-negative numeric measure. Negative or non-numeric aggregates remain in the query and table view."));
     return;
   }
+  if (!execution.result.rows.length) {
+    container.append(visualizationGuidance("No rows matched this query, so there are no categories to compare."));
+    return;
+  }
   const maximum = Math.max(1, ...execution.result.rows.flatMap(row => measures.map(measure => numericResultValue(row[measure.index]) ?? 0)));
+  const frame = document.createElement("div");
+  frame.className = "live-chart-frame live-bar-frame";
+  frame.append(chartHeading(dimension, measures));
+  const scale = document.createElement("div");
+  scale.className = "live-bar-scale";
+  const scaleStart = document.createElement("span");
+  scaleStart.textContent = "0";
+  const scaleEnd = document.createElement("span");
+  scaleEnd.textContent = formatQueryValue(maximum, measures[0].numberFormat);
+  scale.append(scaleStart, scaleEnd);
   const chart = document.createElement("div");
   chart.className = "live-bar-chart";
   chart.setAttribute("role", "group");
@@ -1765,14 +1820,19 @@ function renderBarVisualization(container, widget, execution, visualization) {
       bar.classList.toggle("no-value", numericValue === null);
       bar.dataset.inspectMetric = measure.label;
       bar.dataset.drillLineage = JSON.stringify(visualizationLineage(execution.result, values, measure));
-      bar.textContent = `${measure.label}: ${formatQueryValue(values[measure.index], measure.numberFormat)}`;
-      bar.setAttribute("aria-label", `${formatQueryValue(values[dimension.index])}, ${bar.textContent}`);
-      bars.append(bar);
+      const formattedValue = formatQueryValue(values[measure.index], measure.numberFormat);
+      bar.setAttribute("aria-label", `${formatQueryValue(values[dimension.index])}, ${measure.label}: ${formattedValue}`);
+      bar.title = `${measure.label}: ${formattedValue}`;
+      const value = document.createElement("span");
+      value.className = "live-bar-value";
+      value.textContent = formattedValue;
+      bars.append(bar, value);
     });
     row.append(category, bars);
     chart.append(row);
   }
-  container.append(chart, visualizationDataTable(widget, [dimension, ...measures], execution.result.rows));
+  frame.append(scale, chart);
+  container.append(frame, visualizationDataTable(widget, [dimension, ...measures], execution.result.rows));
 }
 
 function renderLineVisualization(container, widget, execution, visualization) {
@@ -1789,6 +1849,10 @@ function renderLineVisualization(container, widget, execution, visualization) {
     return;
   }
   const values = execution.result.rows.flatMap(row => measures.map(measure => numericResultValue(row[measure.index])).filter(value => value !== null));
+  if (!execution.result.rows.length || !values.length) {
+    container.append(visualizationGuidance("No numeric points matched this query, so there is no trend to draw."));
+    return;
+  }
   const minimum = Math.min(...values, 0);
   const maximum = Math.max(...values, 1);
   const range = maximum - minimum || 1;
@@ -1797,6 +1861,7 @@ function renderLineVisualization(container, widget, execution, visualization) {
   svg.setAttribute("viewBox", "0 0 700 260");
   svg.setAttribute("role", "img");
   svg.setAttribute("aria-label", `${widget.title}: ${measures.map(item => item.label).join(", ")} by ${dimension.label}`);
+  const pointIndexes = new Set(axisTickIndexes(execution.result.rows.length, 7));
   measures.forEach((measure, seriesIndex) => {
     let segment = [];
     const appendSegment = () => {
@@ -1817,21 +1882,52 @@ function renderLineVisualization(container, widget, execution, visualization) {
       const x = execution.result.rows.length <= 1 ? 350 : 24 + index / (execution.result.rows.length - 1) * 652;
       const y = 230 - (numericValue - minimum) / range * 200;
       segment.push(`${x},${y}`);
-      const point = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-      point.setAttribute("cx", String(x));
-      point.setAttribute("cy", String(y));
-      point.setAttribute("r", "4");
-      point.setAttribute("tabindex", "0");
-      point.setAttribute("role", "button");
-      point.setAttribute("aria-label", `${measure.label}: ${formatQueryValue(row[measure.index], measure.numberFormat)} for ${formatQueryValue(row[dimension.index])}`);
-      point.style.setProperty("--series", seriesIndex);
-      point.dataset.inspectMetric = measure.label;
-      point.dataset.drillLineage = JSON.stringify(visualizationLineage(execution.result, row, measure));
-      svg.append(point);
+      if (execution.result.rows.length <= 32 || pointIndexes.has(index)) {
+        const point = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+        point.setAttribute("cx", String(x));
+        point.setAttribute("cy", String(y));
+        point.setAttribute("r", "4");
+        point.setAttribute("tabindex", "0");
+        point.setAttribute("role", "button");
+        point.setAttribute("aria-label", `${measure.label}: ${formatQueryValue(row[measure.index], measure.numberFormat)} for ${formatQueryValue(row[dimension.index])}`);
+        point.style.setProperty("--series", seriesIndex);
+        point.dataset.inspectMetric = measure.label;
+        point.dataset.drillLineage = JSON.stringify(visualizationLineage(execution.result, row, measure));
+        svg.append(point);
+      }
     });
     appendSegment();
   });
-  container.append(svg, visualizationDataTable(widget, [dimension, ...measures], execution.result.rows));
+  const frame = document.createElement("div");
+  frame.className = "live-chart-frame live-line-frame";
+  frame.append(chartHeading(dimension, measures));
+  const plot = document.createElement("div");
+  plot.className = "live-line-plot";
+  const yAxis = document.createElement("div");
+  yAxis.className = "live-chart-y-axis";
+  for (let index = 4; index >= 0; index -= 1) {
+    const tick = document.createElement("span");
+    tick.textContent = formatQueryValue(minimum + range * index / 4, measures[0].numberFormat);
+    yAxis.append(tick);
+  }
+  plot.append(yAxis, svg);
+  const xAxis = document.createElement("div");
+  xAxis.className = "live-chart-x-axis";
+  const tickIndexes = axisTickIndexes(execution.result.rows.length);
+  tickIndexes.forEach(index => {
+    const tick = document.createElement("span");
+    tick.textContent = formatAxisDimension(execution.result.rows[index][dimension.index]);
+    xAxis.append(tick);
+  });
+  const axisTitles = document.createElement("div");
+  axisTitles.className = "live-chart-axis-titles";
+  const measureTitle = document.createElement("span");
+  measureTitle.textContent = measures.map(item => item.label).join(" / ");
+  const dimensionTitle = document.createElement("span");
+  dimensionTitle.textContent = dimension.label;
+  axisTitles.append(measureTitle, dimensionTitle);
+  frame.append(plot, xAxis, axisTitles);
+  container.append(frame, visualizationDataTable(widget, [dimension, ...measures], execution.result.rows));
 }
 
 function renderDonutVisualization(container, widget, execution, visualization) {
@@ -1875,7 +1971,13 @@ function renderDonutVisualization(container, widget, execution, visualization) {
     item.style.borderLeftColor = `var(--series-${index % 6})`;
     item.dataset.inspectMetric = measure.label;
     item.dataset.drillLineage = JSON.stringify(visualizationLineage(execution.result, row, measure));
-    item.textContent = `${formatQueryValue(row[dimension.index])} ${formatQueryValue(row[measure.index], measure.numberFormat)}`;
+    const label = document.createElement("span");
+    label.textContent = formatQueryValue(row[dimension.index]);
+    const value = document.createElement("strong");
+    value.textContent = formatQueryValue(row[measure.index], measure.numberFormat);
+    const percent = document.createElement("small");
+    percent.textContent = formatQueryValue(values[index] / total, { style: "percent", fractionDigits: 1 });
+    item.append(label, value, percent);
     legend.append(item);
   });
   layout.append(donut, legend);
@@ -1892,10 +1994,16 @@ function renderQueryResult(card, widget) {
   if (widget.kind === "aggregate_report") card.classList.add("aggregate-report-widget");
   const visualization = reconcileVisualization(widget.configuration.query, widget.configuration.visualization);
   card.dataset.visualizationMode = visualization.mode;
+  for (const mode of ["table", "kpi", "bar", "line", "donut"]) card.classList.toggle(`visualization-${mode}-widget`, visualization.mode === mode);
+  card.classList.toggle("table-widget", visualization.mode === "table");
+  card.classList.toggle("metric-widget", visualization.mode === "kpi");
+  card.classList.toggle("chart-widget", ["bar", "line"].includes(visualization.mode));
+  card.classList.toggle("status-widget", visualization.mode === "donut");
   const execution = widgetQueryResults.get(widget.id);
   if (!execution || execution.state !== "ready") {
     const status = document.createElement("p");
     status.className = `query-result-status${execution?.state === "error" ? " error" : ""}`;
+    status.setAttribute("role", "status");
     status.textContent = execution?.message || "Waiting for source verification...";
     container.append(status);
     return;
@@ -1914,6 +2022,10 @@ function renderQueryResult(card, widget) {
     container.append(status);
     return;
   }
+  const compact = !focusedBody;
+  const displayColumns = compact && visibleColumns.length > 4
+    ? [...visibleColumns.filter(item => item.column.kind === "dimension").slice(0, 3), ...visibleColumns.filter(item => item.column.kind === "measure").slice(-1)]
+    : visibleColumns;
   const pageSize = presentation.pageSize;
   const pageCount = Math.max(1, Math.ceil(execution.result.rows.length / pageSize));
   const page = Math.min(widgetTablePages.get(widget.id) ?? 0, pageCount - 1);
@@ -1927,23 +2039,23 @@ function renderQueryResult(card, widget) {
   const table = document.createElement("table");
   table.className = "aggregate-report-table";
   const colgroup = document.createElement("colgroup");
-  for (const item of visibleColumns) {
+  for (const item of displayColumns) {
     const col = document.createElement("col");
-    col.style.width = `${item.presentation.width}px`;
+    if (!compact) col.style.width = `${item.presentation.width}px`;
     colgroup.append(col);
   }
   const head = document.createElement("thead");
   const headRow = document.createElement("tr");
   let pinnedOffset = 0;
   const pinnedOffsets = new Map();
-  for (const { presentation: item, column } of visibleColumns) {
+  for (const { presentation: item, column } of displayColumns) {
     const cell = document.createElement("th");
     cell.textContent = item.label;
     cell.dataset.resultFieldId = column.id;
     cell.dataset.resultFieldKind = column.kind;
     cell.dataset.sourceColumn = column.sourceColumn ?? "";
-    cell.style.width = `${item.width}px`;
-    if (item.pinned) {
+    if (!compact) cell.style.width = `${item.width}px`;
+    if (!compact && item.pinned) {
       pinnedOffsets.set(column.id, pinnedOffset);
       cell.classList.add("pinned");
       cell.style.left = `${pinnedOffset}px`;
@@ -1965,15 +2077,15 @@ function renderQueryResult(card, widget) {
     row.tabIndex = 0;
     row.setAttribute("role", "button");
     row.setAttribute("aria-label", "Open detail rows for this aggregate row");
-    for (const { presentation: item, column, index } of visibleColumns) {
+    for (const { presentation: item, column, index } of displayColumns) {
       const value = values[index];
       const cell = document.createElement("td");
       cell.textContent = formatQueryValue(value, column.numberFormat);
       cell.dataset.resultFieldId = column.id;
       cell.dataset.resultFieldKind = column.kind;
       cell.dataset.sourceColumn = column.sourceColumn ?? "";
-      cell.style.width = `${item.width}px`;
-      if (item.pinned) {
+      if (!compact) cell.style.width = `${item.width}px`;
+      if (!compact && item.pinned) {
         cell.classList.add("pinned");
         cell.style.left = `${pinnedOffsets.get(column.id)}px`;
       }
@@ -1991,7 +2103,7 @@ function renderQueryResult(card, widget) {
   if (!rows.length) {
     const row = document.createElement("tr");
     const cell = document.createElement("td");
-    cell.colSpan = visibleColumns.length;
+    cell.colSpan = displayColumns.length;
     cell.textContent = "No rows matched this query.";
     row.append(cell);
     body.append(row);
@@ -2001,7 +2113,7 @@ function renderQueryResult(card, widget) {
   const summary = document.createElement("div");
   summary.className = "query-result-summary";
   const count = document.createElement("span");
-  count.textContent = `${execution.result.rowCount} result row${execution.result.rowCount === 1 ? "" : "s"}${execution.result.truncated ? ` · limited to ${execution.result.limit}` : ""}`;
+  count.textContent = `${execution.result.rowCount} result row${execution.result.rowCount === 1 ? "" : "s"}${compact && displayColumns.length < visibleColumns.length ? ` · ${displayColumns.length} of ${visibleColumns.length} columns` : ""}${execution.result.truncated ? ` · limited to ${execution.result.limit}` : ""}`;
   const pagination = document.createElement("div");
   pagination.className = "query-result-pagination";
   const previous = document.createElement("button");
@@ -2492,6 +2604,7 @@ function openWidgetFocus(widgetId) {
   body.className = "focused-widget-body";
   while (header?.nextSibling) body.append(header.nextSibling);
   card.append(body);
+  renderQueryResult(card, widget);
   elements.widgetFocusContent.replaceChildren(card);
   elements.widgetInspector.classList.add("dismissed");
   elements.widgetInspector.inert = true;

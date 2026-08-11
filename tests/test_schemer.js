@@ -1,5 +1,6 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
+const vm = require("node:vm");
 
 const source = fs.readFileSync("src/schemii/schemer_web/app.js", "utf8");
 const html = fs.readFileSync("src/schemii/schemer_web/index.html", "utf8");
@@ -122,6 +123,16 @@ assert.match(source, /renderKpiVisualization[\s\S]*renderBarVisualization[\s\S]*
 assert.match(source, /KPI groups require an ungrouped result[\s\S]*Grouped bars require one grouping dimension[\s\S]*Lines require one ordered grouping dimension[\s\S]*Donut charts require exactly one non-negative numeric measure/, "incompatible visualizations must explain missing or invalid roles without deleting query fields");
 assert.match(source, /const savedVisualization = sameSource \? widget\.configuration\?\.visualization : null[\s\S]*savedVisualization \? \{ visualization: savedVisualization \}/, "reassigning the unchanged source must retain visualization state");
 assert.match(source, /numericValue === null \? "auto"[\s\S]*classList\.toggle\("no-value"[\s\S]*const appendSegment[\s\S]*numericValue === null[\s\S]*appendSegment\(\)/, "bar and line charts must preserve SQL NULL gaps instead of drawing invented zero or minimum values");
+const formatSource = source.slice(source.indexOf("function formatQueryValue"), source.indexOf("function visualizationDataTable"));
+const [formattedCurrency, exactIdentifier] = vm.runInNewContext(`(() => { ${formatSource}; return [formatQueryValue("207.5881400000000000", { style: "currency", currency: "USD", fractionDigits: 2 }), formatQueryValue("12345678901234567890", { style: "integer" })]; })()`);
+assert.match(formattedCurrency, /207\.59/, "explicit currency formats must apply to PostgreSQL numeric strings");
+assert.equal(exactIdentifier, "12345678901234567890", "large integer identifiers must not lose precision");
+assert.match(source, /function chartHeading[\s\S]*live-chart-heading[\s\S]*chartLegend[\s\S]*live-chart-y-axis[\s\S]*live-chart-x-axis[\s\S]*live-chart-axis-titles/, "line and bar charts need visible measure, dimension, legend, scale, and axis context");
+assert.match(source, /pointIndexes = new Set\(axisTickIndexes[\s\S]*rows\.length <= 32 \|\| pointIndexes\.has\(index\)/, "dense line charts must retain representative interactive points without drawing hundreds of overlapping marks");
+assert.match(source, /live-donut-legend[\s\S]*values\[index\] \/ total[\s\S]*style: "percent"/, "donut legends must pair category totals with their share of the whole");
+assert.match(source, /classList\.toggle\(`visualization-\$\{mode\}-widget`[\s\S]*classList\.toggle\("table-widget", visualization\.mode === "table"\)/, "configured cards must receive visualization-specific classes instead of retaining table layout behavior");
+assert.match(source, /const compact = !focusedBody[\s\S]*displayColumns = compact[\s\S]*slice\(0, 3\)[\s\S]*slice\(-1\)[\s\S]*\$\{displayColumns\.length\} of \$\{visibleColumns\.length\} columns/, "compact tables must prioritize identifying dimensions and a measure while reporting omitted columns");
+assert.match(source, /function openWidgetFocus[\s\S]*body\.className = "focused-widget-body"[\s\S]*card\.append\(body\);[\s\S]*renderQueryResult\(card, widget\)/, "expanded widgets must re-render after their focus body exists so full table columns and focused presentation are used");
 assert.match(source, /if \(item\.numberFormat\.style === "currency"\) measureControls\.push\(queryLabel\("Currency"[\s\S]*if \(\["decimal", "currency", "percent"\]\.includes\(item\.numberFormat\.style\)\) measureControls\.push\(queryLabel\("Decimal places"/, "currency and decimal controls must render only for number formats that use them");
 assert.match(source, /function visualizationDataTable[\s\S]*View chart data[\s\S]*aria-label[\s\S]*chart data/, "every chart needs an accessible bounded data-table representation");
 assert.match(source, /dataset\.drillLineage = JSON\.stringify\(visualizationLineage/g, "live visualization marks must retain drill-through lineage hooks");
@@ -193,6 +204,9 @@ assert.match(styles, /\.visualization-sample \{[^}]*grid-template-columns: minma
 assert.match(styles, /\.query-editor-group\.visualization-role-linked \{[^}]*border-color:[^}]*box-shadow:[\s\S]*\.query-editor-group\.visualization-role-required \{[^}]*border-color:[^}]*box-shadow:/, "visualization-linked and required query roles need visible highlighting");
 assert.match(styles, /\.live-kpi-group \{[^}]*grid-template-columns: repeat\(auto-fit/, "KPI mode must support multiple measures responsively");
 assert.match(styles, /\.live-bar-chart \{[^}]*overflow: auto[\s\S]*\.live-line-chart \{[^}]*flex: 1[\s\S]*\.live-donut-layout \{[^}]*grid-template-columns:/, "bar, line, and donut results need bounded responsive layouts");
+assert.match(styles, /\.live-chart-legend[\s\S]*\.live-chart-y-axis[\s\S]*\.live-chart-x-axis[\s\S]*\.live-chart-axis-titles/, "live charts need styled legends, value ticks, category ticks, and axis titles");
+assert.match(styles, /\.dashboard-canvas \.live-chart-x-axis span:not\(:first-child\):not\(:last-child\)[^}]*display: none;[\s\S]*\.focused-widget-card \.live-chart-x-axis/, "compact line charts must show endpoint context while expanded charts expose denser ticks");
+assert.match(styles, /\.dashboard-canvas \.aggregate-report-table \{[^}]*width: 100% !important;[^}]*table-layout: fixed;[\s\S]*\.dashboard-canvas \.query-result-pagination \{ display: none;/, "compact tables must fit the card and reserve full pagination controls for expanded mode");
 assert.match(styles, /@media \(prefers-reduced-motion: reduce\)[\s\S]*transition-duration: \.01ms !important/, "Schemer must respect reduced-motion preferences");
 assert.match(widgetEditor, /data-editor-section="detail">Detail Report</, "detail reports need a dedicated editor tab");
 assert.match(html, /id="detail-drawer"[\s\S]*id="expand-detail-report"[\s\S]*id="view-detail-sql"/, "detail reports need a header-switchable pane with their own View SQL action");
