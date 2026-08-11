@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -17,7 +18,7 @@ import secrets
 import threading
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -37,8 +38,11 @@ from .widget_query import (
     QueryValidationError,
     compile_detail_query,
     compile_query,
+    compile_temporal_series_manifest,
+    compile_temporal_series_window,
     normalize_detail_request,
     normalize_query,
+    normalize_temporal_series,
 )
 
 try:
@@ -88,6 +92,43 @@ def _semantic_id(kind: str, *parts: Any) -> str:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+SERIES_BUCKET_SECONDS = (60, 300, 900, 3600, 21600, 86400, 604800, 2419200, 31536000)
+SERIES_WINDOW_BUCKETS = 48
+SERIES_MAX_TIMELINE_BUCKETS = 5000
+
+
+def _series_datetime(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValidationError("temporal series timestamp is invalid") from exc
+        if parsed.tzinfo is None:
+            raise ValidationError("temporal series timestamps must include a UTC offset")
+        return parsed.astimezone(timezone.utc)
+    raise ValidationError("temporal series timestamp is invalid")
+
+
+def _series_iso(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _series_key(secret: bytes, profile_id: str, profile: dict[str, Any], source: dict[str, Any], query: dict[str, Any], refresh_generation: str, descriptor: dict[str, Any]) -> str:
+    payload = [
+        _profile_context_fingerprint(profile_id, profile),
+        source,
+        query,
+        refresh_generation,
+        descriptor,
+    ]
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+    return hmac.new(secret, encoded.encode(), hashlib.sha256).hexdigest()
 
 
 def _top_level_semicolons(value: str) -> list[int]:
@@ -325,6 +366,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         self._lock_timeout_ms = lock_timeout_ms
         self._statement_timeout_ms = statement_timeout_ms
         self._clock = clock
+        self._temporal_series_secret = secrets.token_bytes(32)
         self._lock = threading.RLock()
         self._plans: dict[str, dict[str, Any]] = {}
         self._ensure_config_dir()
@@ -681,6 +723,226 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             except Exception:
                 pass
             raise PostgresServiceError(422, "aggregate_query_failed", "Aggregate query failed") from exc
+        finally:
+            self._close(connection)
+
+    def execute_temporal_series(
+        self, profile_id: str, source: Any, query: Any, action: Any, refresh_generation: Any,
+        series: Any = None, window_start: Any = None,
+    ) -> dict[str, Any]:
+        database, namespace, relation, kind, fingerprint, source_columns = self._validate_relation_source(profile_id, source)
+        if source_columns is None:
+            raise ValidationError("temporal series requires a current source column snapshot")
+        if action not in {"manifest", "window"}:
+            raise ValidationError("temporal series action is invalid")
+        if not isinstance(refresh_generation, str) or not 1 <= len(refresh_generation) <= 128:
+            raise ValidationError("temporal series refresh generation is invalid")
+        try:
+            normalized_query = normalize_temporal_series(query, source_columns)
+        except QueryValidationError as exc:
+            raise ValidationError(str(exc)) from exc
+        profile = self._profile(profile_id)
+        if profile["dbname"] != database:
+            raise PostgresServiceError(409, "database_changed", "The saved profile database does not match the widget source")
+        connection = self._connect_profile(profile)
+        started = time.perf_counter()
+        try:
+            self._execute_statement(connection, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            self._execute_statement(connection, "SET LOCAL TIME ZONE 'UTC'")
+            self._execute_statement(connection, f"SET LOCAL statement_timeout = '{self._statement_timeout_ms}ms'")
+            relation_sql = f"{quote_identifier(namespace)}.{quote_identifier(relation)}"
+            self._execute_statement(connection, f"LOCK TABLE {relation_sql} IN ACCESS SHARE MODE")
+            current_database = self._execute_rows(connection, "SELECT current_database() AS database")[0]["database"]
+            if current_database != database:
+                raise PostgresServiceError(409, "database_changed", "The connected PostgreSQL database does not match the requested database")
+            descriptor = self._inspect_relation_connection(
+                connection, profile_id, database, namespace, relation, kind, fingerprint
+            )
+            try:
+                normalized_query = normalize_temporal_series(query, descriptor["columns"])
+            except QueryValidationError as exc:
+                raise ValidationError(str(exc)) from exc
+
+            if action == "manifest":
+                if series is not None or window_start is not None:
+                    raise ValidationError("temporal series manifest fields are invalid")
+                compiled = compile_temporal_series_manifest(source, normalized_query, quote_identifier)
+                rows = self._execute_rows(connection, compiled["sql"], tuple(compiled["parameters"]))
+                bounds = rows[0] if rows else {"__schemer_min": None, "__schemer_max": None}
+                minimum_raw = bounds.get("__schemer_min")
+                maximum_raw = bounds.get("__schemer_max")
+                point_count = int(bounds.get("__schemer_points") or 0)
+                if minimum_raw is None or maximum_raw is None:
+                    temporal = {
+                        "dimensionId": normalized_query["dimensions"][0]["id"],
+                        "sourceType": normalized_query["temporalSourceType"],
+                        "interpretation": "utc",
+                        "bucketSeconds": SERIES_BUCKET_SECONDS[0],
+                        "windowBucketCount": min(SERIES_WINDOW_BUCKETS, normalized_query["limit"]),
+                        "pointLimit": normalized_query["limit"],
+                        "refreshGeneration": refresh_generation,
+                        "expiresAtEpoch": math.ceil(self._clock() + self._plan_ttl),
+                        "alignedStart": None,
+                        "alignedEndExclusive": None,
+                    }
+                    series_identity = {**temporal}
+                    series_identity["key"] = _series_key(self._temporal_series_secret, profile_id, profile, source, normalized_query, refresh_generation, temporal)
+                    result_columns = compile_temporal_series_window(
+                        source, normalized_query, quote_identifier, SERIES_BUCKET_SECONDS[0],
+                        datetime.now(timezone.utc), datetime.now(timezone.utc) + timedelta(seconds=SERIES_BUCKET_SECONDS[0]),
+                        SERIES_WINDOW_BUCKETS,
+                    )["columns"]
+                    empty = True
+                    domain = {"min": None, "max": None}
+                else:
+                    minimum = _series_datetime(minimum_raw)
+                    maximum = _series_datetime(maximum_raw)
+                    minimum_epoch = minimum.timestamp()
+                    maximum_epoch = maximum.timestamp()
+
+                    def aligned_bucket_count(bucket: int) -> int:
+                        return math.floor(maximum_epoch / bucket) - math.floor(minimum_epoch / bucket) + 1
+
+                    minimum_bucket = 86400 if normalized_query["temporalSourceType"].lower() == "date" else 60
+                    bucket_limit = SERIES_MAX_TIMELINE_BUCKETS if point_count <= normalized_query["limit"] else normalized_query["limit"]
+                    bucket_seconds = next((item for item in SERIES_BUCKET_SECONDS if item >= minimum_bucket and aligned_bucket_count(item) <= bucket_limit), None)
+                    if bucket_seconds is None:
+                        raw_bucket = max(minimum_bucket, math.ceil((maximum_epoch - minimum_epoch + 1) / max(1, bucket_limit)))
+                        bucket_seconds = math.ceil(raw_bucket / minimum_bucket) * minimum_bucket if minimum_bucket == 86400 else raw_bucket
+                        increment = minimum_bucket if minimum_bucket == 86400 else 1
+                        while aligned_bucket_count(bucket_seconds) > bucket_limit:
+                            bucket_seconds += increment
+                    aligned_start = datetime.fromtimestamp(math.floor(minimum_epoch / bucket_seconds) * bucket_seconds, timezone.utc)
+                    aligned_end = datetime.fromtimestamp((math.floor(maximum_epoch / bucket_seconds) + 1) * bucket_seconds, timezone.utc)
+                    temporal = {
+                        "dimensionId": normalized_query["dimensions"][0]["id"],
+                        "sourceType": normalized_query["temporalSourceType"],
+                        "interpretation": "utc",
+                        "bucketSeconds": bucket_seconds,
+                        "windowBucketCount": min(SERIES_WINDOW_BUCKETS, normalized_query["limit"]),
+                        "pointLimit": normalized_query["limit"],
+                        "refreshGeneration": refresh_generation,
+                        "expiresAtEpoch": math.ceil(self._clock() + self._plan_ttl),
+                        "alignedStart": _series_iso(aligned_start),
+                        "alignedEndExclusive": _series_iso(aligned_end),
+                    }
+                    series_identity = {**temporal}
+                    series_identity["key"] = _series_key(self._temporal_series_secret, profile_id, profile, source, normalized_query, refresh_generation, temporal)
+                    result_columns = compile_temporal_series_window(
+                        source, normalized_query, quote_identifier, bucket_seconds, aligned_start,
+                        min(aligned_end, aligned_start + timedelta(seconds=bucket_seconds * temporal["windowBucketCount"])),
+                        temporal["windowBucketCount"],
+                    )["columns"]
+                    empty = False
+                    domain = {"min": _series_iso(minimum), "max": _series_iso(maximum)}
+                connection.rollback()
+                return {
+                    "seriesVersion": 1,
+                    "series": series_identity,
+                    "domain": domain,
+                    "empty": empty,
+                    "columns": result_columns,
+                    "refreshGeneration": refresh_generation,
+                    "sql": compiled["sql"],
+                    "parameters": [self._json_cell(value) for value in compiled["parameters"]],
+                    "queryDurationMs": max(0, round((time.perf_counter() - started) * 1000)),
+                    "queriedAt": _utc_now(),
+                    "provenance": self._query_provenance(profile_id, profile, descriptor),
+                    "lineage": {
+                        "dimensions": [{"id": item["id"], "sourceColumn": item["column"]} for item in normalized_query["dimensions"]],
+                        "measures": [{"id": item["id"], "sourceColumn": item["column"], "aggregation": item["aggregation"], "distinct": item["distinct"]} for item in normalized_query["measures"]],
+                        "filterGroups": [{
+                            "id": group["id"],
+                            "conditions": [{"id": item["id"], "sourceColumn": item["column"], "operator": item["operator"]} for item in group["conditions"]],
+                        } for group in normalized_query["filters"]],
+                    },
+                }
+
+            required_series_fields = {
+                "key", "dimensionId", "sourceType", "interpretation", "bucketSeconds",
+                "windowBucketCount", "pointLimit", "refreshGeneration", "expiresAtEpoch", "alignedStart", "alignedEndExclusive",
+            }
+            if not isinstance(series, dict) or set(series) != required_series_fields:
+                raise ValidationError("temporal series window descriptor is invalid")
+            if series.get("dimensionId") != normalized_query["dimensions"][0]["id"] or series.get("sourceType") != normalized_query["temporalSourceType"] or series.get("interpretation") != "utc":
+                raise ValidationError("temporal series window descriptor does not match the query")
+            bucket_seconds = series.get("bucketSeconds")
+            window_bucket_count = series.get("windowBucketCount")
+            if isinstance(bucket_seconds, bool) or not isinstance(bucket_seconds, int) or bucket_seconds < 60:
+                raise ValidationError("temporal series bucket is invalid")
+            if isinstance(window_bucket_count, bool) or not isinstance(window_bucket_count, int) or not 1 <= window_bucket_count <= SERIES_WINDOW_BUCKETS:
+                raise ValidationError("temporal series window size is invalid")
+            if series.get("pointLimit") != normalized_query["limit"]:
+                raise ValidationError("temporal series point limit does not match the query")
+            if series.get("refreshGeneration") != refresh_generation:
+                raise ValidationError("temporal series refresh generation is stale")
+            expires_at = series.get("expiresAtEpoch")
+            if isinstance(expires_at, bool) or not isinstance(expires_at, int) or expires_at < self._clock():
+                raise PostgresServiceError(409, "temporal_series_expired", "The temporal series manifest expired; refresh the widget")
+            aligned_start = _series_datetime(series.get("alignedStart"))
+            aligned_end = _series_datetime(series.get("alignedEndExclusive"))
+            if aligned_end <= aligned_start:
+                raise ValidationError("temporal series domain is invalid")
+            bucket_count = round((aligned_end - aligned_start).total_seconds() / bucket_seconds)
+            if bucket_count < 1 or bucket_count > SERIES_MAX_TIMELINE_BUCKETS or aligned_start + timedelta(seconds=bucket_count * bucket_seconds) != aligned_end:
+                raise ValidationError("temporal series domain is invalid or too large")
+            temporal = {key: series[key] for key in required_series_fields if key != "key"}
+            if not hmac.compare_digest(str(series.get("key")), _series_key(self._temporal_series_secret, profile_id, profile, source, normalized_query, refresh_generation, temporal)):
+                raise PostgresServiceError(409, "temporal_series_stale", "The temporal series manifest is stale; refresh the widget")
+            requested_start = _series_datetime(window_start)
+            window_seconds = bucket_seconds * window_bucket_count
+            elapsed = (requested_start - aligned_start).total_seconds()
+            if requested_start < aligned_start or requested_start >= aligned_end or elapsed % window_seconds != 0:
+                raise ValidationError("temporal series window is outside or misaligned with its domain")
+            requested_end = min(aligned_end, requested_start + timedelta(seconds=window_seconds))
+            maximum_rows = math.ceil((requested_end - requested_start).total_seconds() / bucket_seconds)
+            compiled = compile_temporal_series_window(
+                source, normalized_query, quote_identifier, bucket_seconds, requested_start, requested_end, maximum_rows
+            )
+            rows = self._execute_rows(connection, compiled["sql"], tuple(compiled["parameters"]))
+            if len(rows) > maximum_rows:
+                raise PostgresServiceError(422, "temporal_window_too_dense", "The temporal series window returned more than one row per bucket")
+            result_rows = [
+                [_series_iso(_series_datetime(row.get(compiled["aliases"][0]))), *[
+                    self._json_cell(row.get(alias)) for alias in compiled["aliases"][1:]
+                ]]
+                for row in rows
+            ]
+            connection.rollback()
+            return {
+                "seriesVersion": 1,
+                "seriesKey": series["key"],
+                "range": {"start": _series_iso(requested_start), "endExclusive": _series_iso(requested_end)},
+                "columns": compiled["columns"],
+                "rows": result_rows,
+                "rowCount": len(result_rows),
+                "refreshGeneration": refresh_generation,
+                "sql": compiled["sql"],
+                "parameters": [self._json_cell(value) for value in compiled["parameters"]],
+                "queryDurationMs": max(0, round((time.perf_counter() - started) * 1000)),
+                "queriedAt": _utc_now(),
+                "provenance": self._query_provenance(profile_id, profile, descriptor),
+                "lineage": {
+                    "dimensions": [{"id": item["id"], "sourceColumn": item["column"]} for item in normalized_query["dimensions"]],
+                    "measures": [{"id": item["id"], "sourceColumn": item["column"], "aggregation": item["aggregation"], "distinct": item["distinct"]} for item in normalized_query["measures"]],
+                    "filterGroups": [{
+                        "id": group["id"],
+                        "conditions": [{"id": item["id"], "sourceColumn": item["column"], "operator": item["operator"]} for item in group["conditions"]],
+                    } for group in normalized_query["filters"]],
+                },
+            }
+        except PostgresServiceError:
+            try:
+                connection.rollback()
+            except Exception:
+                pass
+            raise
+        except Exception as exc:
+            try:
+                connection.rollback()
+            except Exception:
+                pass
+            raise PostgresServiceError(422, "temporal_series_failed", "Temporal series query failed") from exc
         finally:
             self._close(connection)
 

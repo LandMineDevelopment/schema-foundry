@@ -20,6 +20,7 @@ BOOLEAN_FILTER_OPERATORS = {"eq", "neq"} | NULL_FILTER_OPERATORS
 TEXT_TYPE_RE = re.compile(r"^(?:text|character varying(?:\([^)]*\))?|character(?:\([^)]*\))?|varchar(?:\([^)]*\))?|char(?:\([^)]*\))?|citext|name)$", re.I)
 BOOLEAN_TYPE_RE = re.compile(r"^boolean$", re.I)
 TEMPORAL_TYPE_RE = re.compile(r"^(?:date|time(?:stamp)?(?: with(?:out)? time zone)?|interval)$", re.I)
+SERIES_TEMPORAL_TYPE_RE = re.compile(r"^(?:date|timestamp(?:\(\d+\))?(?: with(?:out)? time zone)?|timestamptz)$", re.I)
 
 
 class QueryValidationError(ValueError):
@@ -251,18 +252,26 @@ def normalize_detail_request(
     selected_values = {}
     seen_dimensions = set()
     for item in selected_dimensions:
-        if not isinstance(item, dict) or set(item) != {"targetId", "value"}:
+        if not isinstance(item, dict) or set(item) not in ({"targetId", "value"}, {"targetId", "operator", "values"}):
             raise QueryValidationError("selected dimension fields are invalid")
         target_id = item.get("targetId")
         value = item.get("value")
-        if target_id not in dimensions_by_id or target_id in seen_dimensions or isinstance(value, (dict, list)) or isinstance(value, float) and not math.isfinite(value):
+        values = item.get("values")
+        selected_dimension = dimensions_by_id.get(target_id)
+        selected_source = columns_by_name.get(selected_dimension["column"]) if selected_dimension else None
+        range_selection = item.get("operator") == "gte_lt" and selected_source is not None and SERIES_TEMPORAL_TYPE_RE.fullmatch(str(selected_source["type"])) is not None and isinstance(values, list) and len(values) == 2 and all(
+            selected is not None and not isinstance(selected, (dict, list)) and (not isinstance(selected, float) or math.isfinite(selected))
+            for selected in values
+        )
+        exact_selection = set(item) == {"targetId", "value"} and not isinstance(value, (dict, list)) and not (isinstance(value, float) and not math.isfinite(value))
+        if target_id not in dimensions_by_id or target_id in seen_dimensions or not (exact_selection or range_selection):
             raise QueryValidationError("selected dimension is invalid or duplicated")
         seen_dimensions.add(target_id)
-        selected_values[target_id] = value
+        selected_values[target_id] = {"targetId": target_id, "operator": "gte_lt", "values": values} if range_selection else {"targetId": target_id, "value": value}
     if seen_dimensions != set(dimensions_by_id):
         raise QueryValidationError("selection must contain every executed dimension exactly once")
     normalized_selection = [
-        {"targetId": target_id, "value": selected_values[target_id]}
+        selected_values[target_id]
         for target_id in dimensions_by_id
     ]
     measure_id = selection.get("measureId")
@@ -320,6 +329,101 @@ def normalize_detail_request(
     }
 
 
+def _measure_expression(item: dict[str, Any], quote: Callable[[str], str]) -> str:
+    aggregation_sql = {"count": "count", "sum": "sum", "average": "avg", "minimum": "min", "maximum": "max"}
+    if item["aggregation"] == "count_rows":
+        expression = "pg_catalog.count(*)"
+    else:
+        distinct = "DISTINCT " if item["distinct"] else ""
+        expression = f'pg_catalog.{aggregation_sql[item["aggregation"]]}({distinct}{quote(item["column"])})'
+    return f"COALESCE({expression}, 0)" if item["nullBehavior"] == "zero" else expression
+
+
+def _measure_output(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": item["id"], "kind": "measure", "label": item["label"], "sourceColumn": item["column"],
+        "aggregation": item["aggregation"], "distinct": item["distinct"],
+        "nullBehavior": item["nullBehavior"], "numberFormat": item["numberFormat"],
+    }
+
+
+def _temporal_expression(column: str, source_type: str, quote: Callable[[str], str]) -> str:
+    value = quote(column)
+    normalized_type = source_type.lower()
+    if normalized_type == "date":
+        return f"({value}::timestamp AT TIME ZONE 'UTC')"
+    if "with time zone" in normalized_type or normalized_type == "timestamptz":
+        return value
+    return f"({value} AT TIME ZONE 'UTC')"
+
+
+def normalize_temporal_series(query: Any, source_columns: list[dict[str, Any]]) -> dict[str, Any]:
+    normalized = normalize_query(query, source_columns)
+    if len(normalized["dimensions"]) != 1:
+        raise QueryValidationError("temporal series requires exactly one dimension")
+    if not 1 <= len(normalized["measures"]) <= 8:
+        raise QueryValidationError("temporal series requires from 1 to 8 measures")
+    dimension = normalized["dimensions"][0]
+    source_column = next((item for item in source_columns if item["name"] == dimension["column"]), None)
+    source_type = str(source_column["type"]) if source_column else ""
+    if not SERIES_TEMPORAL_TYPE_RE.fullmatch(source_type):
+        raise QueryValidationError("temporal series dimension must use a date or timestamp column")
+    return {**normalized, "temporalSourceType": source_type}
+
+
+def compile_temporal_series_manifest(source: dict[str, Any], series: dict[str, Any], quote: Callable[[str], str]) -> dict[str, Any]:
+    dimension = series["dimensions"][0]
+    temporal = _temporal_expression(dimension["column"], series["temporalSourceType"], quote)
+    predicate_groups, parameters = _compile_filter_groups(series["filters"], quote)
+    predicates = []
+    if predicate_groups:
+        formatted_groups = ["(\n        " + "\n        AND ".join(group) + "\n    )" for group in predicate_groups]
+        predicates.append("(\n    " + "\n    OR ".join(formatted_groups) + "\n)")
+    predicates.append(f"{temporal} IS NOT NULL")
+    relation = f'{quote(source["namespace"])}.{quote(source["relation"])}'
+    sql = (
+        f'SELECT\n    pg_catalog.min({temporal}) AS "__schemer_min",\n'
+        f'    pg_catalog.max({temporal}) AS "__schemer_max",\n'
+        f'    pg_catalog.count(DISTINCT {temporal}) AS "__schemer_points"\nFROM {relation}\nWHERE\n    '
+        + "\n    AND ".join(predicates)
+    )
+    return {"sql": sql, "parameters": parameters, "dimension": dimension}
+
+
+def compile_temporal_series_window(
+    source: dict[str, Any], series: dict[str, Any], quote: Callable[[str], str],
+    bucket_seconds: int, window_start: Any, window_end: Any, maximum_rows: int,
+) -> dict[str, Any]:
+    dimension = series["dimensions"][0]
+    temporal = _temporal_expression(dimension["column"], series["temporalSourceType"], quote)
+    bucket = f"pg_catalog.to_timestamp(pg_catalog.floor(extract(epoch FROM {temporal}) / %s) * %s)"
+    select = [f'{bucket} AS "__schemer_t0"']
+    output = [{
+        "id": dimension["id"], "kind": "dimension", "label": dimension["label"],
+        "sourceColumn": dimension["column"], "type": series["temporalSourceType"], "temporal": True,
+    }]
+    aliases = ["__schemer_t0"]
+    for index, item in enumerate(series["measures"]):
+        alias = f"__schemer_m{index}"
+        select.append(f'{_measure_expression(item, quote)} AS {quote(alias)}')
+        output.append(_measure_output(item))
+        aliases.append(alias)
+    predicate_groups, filter_parameters = _compile_filter_groups(series["filters"], quote)
+    predicates = []
+    if predicate_groups:
+        formatted_groups = ["(\n        " + "\n        AND ".join(group) + "\n    )" for group in predicate_groups]
+        predicates.append("(\n    " + "\n    OR ".join(formatted_groups) + "\n)")
+    predicates.extend((f"{temporal} >= %s", f"{temporal} < %s"))
+    relation = f'{quote(source["namespace"])}.{quote(source["relation"])}'
+    sql = (
+        "SELECT\n    " + ",\n    ".join(select) + f"\nFROM {relation}\nWHERE\n    "
+        + "\n    AND ".join(predicates)
+        + '\nGROUP BY\n    1\nORDER BY\n    "__schemer_t0" ASC NULLS LAST\nLIMIT %s'
+    )
+    parameters = [bucket_seconds, bucket_seconds, *filter_parameters, window_start, window_end, maximum_rows + 1]
+    return {"sql": sql, "parameters": parameters, "columns": output, "aliases": aliases}
+
+
 def compile_query(source: dict[str, Any], query: dict[str, Any], quote: Callable[[str], str]) -> dict[str, Any]:
     dimensions = query["dimensions"]
     measures = query["measures"]
@@ -331,23 +435,12 @@ def compile_query(source: dict[str, Any], query: dict[str, Any], quote: Callable
         aliases[item["id"]] = alias
         select.append(f'{quote(item["column"])} AS {quote(alias)}')
         output.append({"id": item["id"], "kind": "dimension", "label": item["label"], "sourceColumn": item["column"]})
-    aggregation_sql = {"count": "count", "sum": "sum", "average": "avg", "minimum": "min", "maximum": "max"}
     for index, item in enumerate(measures):
         alias = f"__schemer_m{index}"
         aliases[item["id"]] = alias
-        if item["aggregation"] == "count_rows":
-            expression = "pg_catalog.count(*)"
-        else:
-            distinct = "DISTINCT " if item["distinct"] else ""
-            expression = f'pg_catalog.{aggregation_sql[item["aggregation"]]}({distinct}{quote(item["column"])})'
-        if item["nullBehavior"] == "zero":
-            expression = f"COALESCE({expression}, 0)"
+        expression = _measure_expression(item, quote)
         select.append(f"{expression} AS {quote(alias)}")
-        output.append({
-            "id": item["id"], "kind": "measure", "label": item["label"], "sourceColumn": item["column"],
-            "aggregation": item["aggregation"], "distinct": item["distinct"],
-            "nullBehavior": item["nullBehavior"], "numberFormat": item["numberFormat"],
-        })
+        output.append(_measure_output(item))
     predicate_groups, parameters = _compile_filter_groups(query["filters"], quote)
     relation = f'{quote(source["namespace"])}.{quote(source["relation"])}'
     sql = "SELECT\n    " + ",\n    ".join(select) + f"\nFROM {relation}"
@@ -387,8 +480,13 @@ def compile_detail_query(
         formatted_groups = ["(\n        " + "\n        AND ".join(group) + "\n    )" for group in predicate_groups]
         predicates.append("(\n    " + "\n    OR ".join(formatted_groups) + "\n)")
     for selected in request["selection"]["dimensions"]:
-        column = quote(dimensions_by_id[selected["targetId"]]["column"])
-        if selected["value"] is None:
+        dimension = dimensions_by_id[selected["targetId"]]
+        column = quote(dimension["column"])
+        if selected.get("operator") == "gte_lt":
+            temporal = _temporal_expression(dimension["column"], str(source_by_name[dimension["column"]]["type"]), quote)
+            predicates.extend((f"{temporal} >= %s", f"{temporal} < %s"))
+            parameters.extend(selected["values"])
+        elif selected["value"] is None:
             predicates.append(f"{column} IS NULL")
         else:
             predicates.append(f"{column} = %s")

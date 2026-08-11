@@ -116,6 +116,49 @@ class SchemerServerTests(unittest.TestCase):
         self.assertEqual(self.request(query_path, "POST", guarded_query, True)[0], 200)
         self.assertEqual(self.request(query_path, "POST", {**guarded_query, "expectedRevision": revision + 1}, True)[0], 409)
         self.assertEqual(self.request(query_path, "POST", {"source": preview_source, "query": query, "sql": "SELECT 1"}, True)[0], 400)
+        series_path = "/api/postgres/profiles/shared/relation/temporal-series"
+        manifest = {"source": preview_source, "query": query, "action": "manifest", "refreshGeneration": "refresh-one"}
+        self.assertEqual(self.request(series_path, "POST", manifest)[0], 403)
+        self.assertEqual(self.request(series_path, "POST", manifest, True)[0], 400)
+        mercury = self.dashboard_store.get("dashboard_mercury")
+        trend = next(item for item in mercury["dashboard"]["widgets"] if item["id"] == "widget_trend")
+        series_source = {**preview_source, "columns": [
+            {"name": "ordered_on", "type": "date", "nullable": False, "ordinal": 1},
+            {"name": "amount", "type": "numeric", "nullable": True, "ordinal": 2},
+        ]}
+        series_query = {
+            "version": 2,
+            "dimensions": [{"id": "dimension_date", "label": "Date", "column": "ordered_on"}],
+            "measures": [{"id": "measure_amount", "label": "Amount", "column": "amount", "aggregation": "sum", "distinct": False, "nullBehavior": "preserve", "numberFormat": {"style": "decimal", "fractionDigits": 2}}],
+            "filters": [], "sort": [], "limit": 500,
+        }
+        trend["kind"] = "aggregate_report"
+        trend["configuration"] = {
+            "source": series_source, "query": series_query,
+            "visualization": {"version": 1, "mode": "line", "selections": {
+                "kpi": {"measureIds": ["measure_amount"]},
+                "bar": {"dimensionId": "dimension_date", "measureIds": ["measure_amount"]},
+                "line": {"dimensionId": "dimension_date", "measureIds": ["measure_amount"]},
+                "donut": {"dimensionId": "dimension_date", "measureId": "measure_amount"},
+            }},
+        }
+        mercury = self.dashboard_store.save("dashboard_mercury", mercury)
+        revision = mercury["revision"]
+        guarded_manifest = {**manifest, "source": series_source, "query": series_query, "dashboardId": "dashboard_mercury", "expectedRevision": revision, "widgetId": "widget_trend"}
+        self.assertEqual(self.request(series_path, "POST", guarded_manifest, True)[0], 200)
+        self.assertIn(("execute_temporal_series", "shared", guarded_manifest["source"], guarded_manifest["query"], "manifest", "refresh-one", None, None), self.service.calls)
+        series = {
+            "key": "a" * 64, "dimensionId": "dimension_date", "sourceType": "date", "interpretation": "utc",
+            "bucketSeconds": 86400, "windowBucketCount": 48, "pointLimit": 500,
+            "alignedStart": "2026-01-01T00:00:00Z", "alignedEndExclusive": "2026-03-01T00:00:00Z",
+        }
+        window = {**guarded_manifest, "action": "window", "series": series, "windowStart": "2026-01-01T00:00:00Z"}
+        self.assertEqual(self.request(series_path, "POST", window, True)[0], 200)
+        self.assertIn(("execute_temporal_series", "shared", guarded_manifest["source"], guarded_manifest["query"], "window", "refresh-one", series, "2026-01-01T00:00:00Z"), self.service.calls)
+        self.assertEqual(self.request(series_path, "POST", {**window, "expectedRevision": revision + 1}, True)[0], 409)
+        self.assertEqual(self.request(series_path, "POST", {**guarded_manifest, "query": query}, True)[0], 409)
+        self.assertEqual(self.request(series_path, "POST", {**guarded_manifest, "widgetId": "widget_orders"}, True)[0], 409)
+        self.assertEqual(self.request(series_path, "POST", {**manifest, "windowStart": "2026-01-01T00:00:00Z"}, True)[0], 400)
         detail_request = {
             "source": preview_source, "query": query, "selection": {"dimensions": []},
             "detail": {"version": 1, "columns": [], "rowIdentifier": None},

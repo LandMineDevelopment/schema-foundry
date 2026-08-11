@@ -116,6 +116,7 @@ def make_handler(
             "max_result_bytes": 256 * 1024,
         }
         postgres_relation_query_context_fields = frozenset({"dashboardId", "expectedRevision"})
+        postgres_temporal_series_context_fields = frozenset({"dashboardId", "expectedRevision", "widgetId"})
         postgres_relation_detail_context_fields = frozenset({"dashboardId", "expectedRevision"})
 
         def _authorize_dashboard(self) -> bool:
@@ -137,6 +138,36 @@ def make_handler(
         _postgres_read_sql_guard = _postgres_dashboard_revision_guard
         _postgres_relation_query_guard = _postgres_dashboard_revision_guard
         _postgres_relation_detail_guard = _postgres_dashboard_revision_guard
+
+        @contextmanager
+        def _postgres_temporal_series_guard(self, body):
+            dashboard_id = body.get("dashboardId")
+            expected_revision = body.get("expectedRevision")
+            widget_id = body.get("widgetId")
+            if not isinstance(dashboard_id, str) or isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or not isinstance(widget_id, str):
+                raise PostgresServiceError(400, "validation_error", "Temporal series dashboard context is invalid")
+            try:
+                with dashboard_store.guard_revision(dashboard_id, expected_revision) as record:
+                    widget = next((item for item in record["dashboard"]["widgets"] if item["id"] == widget_id), None)
+                    configuration = widget.get("configuration", {}) if widget else {}
+                    visualization = configuration.get("visualization", {})
+                    selection = visualization.get("selections", {}).get("line", {})
+                    saved_query = configuration.get("query", {})
+                    selected_dimension = selection.get("dimensionId")
+                    selected_measures = selection.get("measureIds", [])
+                    target_ids = {selected_dimension, *selected_measures}
+                    expected_query = {
+                        **saved_query,
+                        "dimensions": [item for item in saved_query.get("dimensions", []) if item.get("id") == selected_dimension],
+                        "measures": [item for item in saved_query.get("measures", []) if item.get("id") in selected_measures],
+                        "sort": [item for item in saved_query.get("sort", []) if item.get("targetId") in target_ids],
+                    }
+                    if not widget or visualization.get("mode") != "line" or configuration.get("source") != body.get("source") or expected_query != body.get("query"):
+                        raise PostgresServiceError(409, "temporal_series_changed", "The temporal series no longer matches the saved line widget")
+                    yield
+            except DashboardStoreError as error:
+                detail = error.payload["error"]
+                raise PostgresServiceError(error.status, detail["code"], detail["message"]) from error
 
         def _dashboard_call(self, callback, status: int = 200):
             try:

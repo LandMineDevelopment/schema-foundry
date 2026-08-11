@@ -110,6 +110,10 @@ class FakePostgresService:
         self.calls.append(("execute_widget_query", profile_id, source, query))
         return {"columns": [{"label": "Rows"}], "rows": [[1]], "sql": "SELECT count(*)", "parameters": []}
 
+    def execute_temporal_series(self, profile_id, source, query, action, refresh_generation, series=None, window_start=None):
+        self.calls.append(("execute_temporal_series", profile_id, source, query, action, refresh_generation, series, window_start))
+        return {"seriesVersion": 1, "action": action, "refreshGeneration": refresh_generation}
+
     def execute_relation_detail(self, profile_id, source, query, selection, detail, offset, limit, sort, searches):
         self.calls.append(("execute_relation_detail", profile_id, source, query, selection, detail, offset, limit, sort, searches))
         return {"columns": [], "rows": [], "matchingRowCount": 0, "offset": offset, "limit": limit, "hasMore": False}

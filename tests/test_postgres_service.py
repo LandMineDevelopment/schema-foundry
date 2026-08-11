@@ -3,7 +3,7 @@ import stat
 import sys
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from uuid import UUID
@@ -466,6 +466,79 @@ class PostgresServiceTests(unittest.TestCase):
         duplicate_ordinals = {**source, "columns": [{**column, "ordinal": 1} for column in source["columns"]]}
         with self.assertRaises(ValidationError):
             service.execute_widget_query("local", duplicate_ordinals, query)
+
+    def test_temporal_series_manifest_and_windows_use_one_proportional_utc_domain(self):
+        responses = {
+            "SELECT current_database() AS database": [{"database": "demo"}],
+            "c.relkind AS catalog_kind": [{"catalog_kind": "r", "relation_kind": "table", "view_definition": None}],
+            "a.attname AS column_name": [
+                {"column_name": "ordered_on", "data_type": "date", "nullable": False, "ordinal": 1, "type_category": "D", "type_name": "date"},
+                {"column_name": "amount", "data_type": "numeric", "nullable": True, "ordinal": 2, "type_category": "N", "type_name": "numeric"},
+            ],
+            "pg_catalog.min": [{"__schemer_min": datetime(2026, 1, 1), "__schemer_max": datetime(2026, 1, 10), "__schemer_points": 10}],
+            "pg_catalog.to_timestamp": {
+                "columns": ["__schemer_t0", "__schemer_m0"],
+                "rows": [
+                    (datetime(2026, 1, 1, tzinfo=timezone.utc), Decimal("30.50")),
+                    (datetime(2026, 1, 3, tzinfo=timezone.utc), Decimal("12.00")),
+                ],
+            },
+        }
+        connections = []
+        service = PostgresService(
+            self.temporary_directory.name,
+            connect_factory=lambda **kwargs: (connections.append(Connection(responses=responses)) or connections[-1]),
+        )
+        descriptor = service.inspect_relation("local", "demo", "public", "orders")
+        source = {
+            **{key: descriptor[key] for key in ("profileId", "database", "namespace", "relation", "kind", "fingerprint")},
+            "columns": [{key: column[key] for key in ("name", "type", "nullable", "ordinal")} for column in descriptor["columns"]],
+        }
+        query = {
+            "version": 2,
+            "dimensions": [{"id": "dimension_ordered", "label": "Ordered on", "column": "ordered_on"}],
+            "measures": [{"id": "measure_revenue", "label": "Revenue", "column": "amount", "aggregation": "sum", "distinct": False, "nullBehavior": "zero", "numberFormat": {"style": "currency", "currency": "USD", "fractionDigits": 2}}],
+            "filters": [], "sort": [], "limit": 10,
+        }
+        manifest = service.execute_temporal_series("local", source, query, "manifest", "refresh-one")
+        self.assertFalse(manifest["empty"])
+        self.assertEqual(manifest["domain"], {"min": "2026-01-01T00:00:00.000Z", "max": "2026-01-10T00:00:00.000Z"})
+        self.assertEqual(manifest["series"]["bucketSeconds"], 86400)
+        self.assertEqual(manifest["series"]["alignedStart"], "2026-01-01T00:00:00.000Z")
+        self.assertEqual(manifest["series"]["alignedEndExclusive"], "2026-01-11T00:00:00.000Z")
+        self.assertEqual(manifest["series"]["refreshGeneration"], "refresh-one")
+        self.assertGreater(manifest["series"]["expiresAtEpoch"], 0)
+        self.assertEqual(len(manifest["series"]["key"]), 64)
+        manifest_connection = connections[-1]
+        self.assertIn(("SET LOCAL TIME ZONE 'UTC'", ()), manifest_connection.executed)
+        self.assertEqual(manifest_connection.rollbacks, 1)
+
+        window = service.execute_temporal_series(
+            "local", source, query, "window", "refresh-one", manifest["series"], manifest["series"]["alignedStart"]
+        )
+        self.assertEqual(window["rows"], [["2026-01-01T00:00:00.000Z", "30.50"], ["2026-01-03T00:00:00.000Z", "12.00"]])
+        self.assertEqual(window["range"], {"start": "2026-01-01T00:00:00.000Z", "endExclusive": "2026-01-11T00:00:00.000Z"})
+        window_connection = connections[-1]
+        sql, parameters = next(item for item in window_connection.executed if "pg_catalog.to_timestamp" in item[0])
+        self.assertIn(">= %s", sql)
+        self.assertIn("< %s", sql)
+        self.assertEqual(parameters[:2], (86400, 86400))
+        self.assertEqual(parameters[-1], 11)
+        self.assertEqual(window_connection.rollbacks, 1)
+
+        stale = {**manifest["series"], "bucketSeconds": 60}
+        with self.assertRaises(ValidationError):
+            service.execute_temporal_series("local", source, query, "window", "refresh-one", stale, stale["alignedStart"])
+        stale_key = {**manifest["series"], "key": "0" * 64}
+        with self.assertRaises(PostgresServiceError) as error:
+            service.execute_temporal_series("local", source, query, "window", "refresh-one", stale_key, stale_key["alignedStart"])
+        self.assertEqual(error.exception.code, "temporal_series_stale")
+        with self.assertRaises(ValidationError):
+            service.execute_temporal_series("local", source, query, "window", "refresh-two", manifest["series"], manifest["series"]["alignedStart"])
+        expired = {**manifest["series"], "expiresAtEpoch": 0}
+        with self.assertRaises(PostgresServiceError) as error:
+            service.execute_temporal_series("local", source, query, "window", "refresh-one", expired, expired["alignedStart"])
+        self.assertEqual(error.exception.code, "temporal_series_expired")
 
     def test_relation_detail_counts_and_pages_one_verified_snapshot(self):
         responses = {

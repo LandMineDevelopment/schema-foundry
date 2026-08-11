@@ -10,6 +10,7 @@ SQL_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})
 RELATION_PREVIEW_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/relation/preview$")
 RELATION_VERIFY_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/relation/verify$")
 RELATION_QUERY_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/relation/query$")
+RELATION_TEMPORAL_SERIES_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/relation/temporal-series$")
 RELATION_DETAIL_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/relation/detail$")
 POSTGRES_PROFILE_CAPABILITY = "profiles"
 POSTGRES_CATALOG_CAPABILITY = "catalog"
@@ -39,6 +40,7 @@ class PostgresHttpMixin:
         "max_result_bytes": 1024 * 1024,
     }
     postgres_relation_query_context_fields = frozenset()
+    postgres_temporal_series_context_fields = frozenset()
     postgres_relation_detail_context_fields = frozenset()
 
     def _has_postgres_capability(self, capability: str) -> bool:
@@ -107,17 +109,18 @@ class PostgresHttpMixin:
         relation_preview_match = RELATION_PREVIEW_PATH.fullmatch(path)
         relation_verify_match = RELATION_VERIFY_PATH.fullmatch(path)
         relation_query_match = RELATION_QUERY_PATH.fullmatch(path)
+        relation_temporal_series_match = RELATION_TEMPORAL_SERIES_PATH.fullmatch(path)
         relation_detail_match = RELATION_DETAIL_PATH.fullmatch(path)
         profile_match = PROFILE_PATH.fullmatch(path)
         if sql_match and not self._has_postgres_capability(POSTGRES_READ_SQL_CAPABILITY):
             return False
-        if any((relation_preview_match, relation_verify_match, relation_query_match, relation_detail_match)) and not self._has_postgres_capability(POSTGRES_RELATION_QUERY_CAPABILITY):
+        if any((relation_preview_match, relation_verify_match, relation_query_match, relation_temporal_series_match, relation_detail_match)) and not self._has_postgres_capability(POSTGRES_RELATION_QUERY_CAPABILITY):
             return False
         if profile_match and profile_match.group(2) == "test" and not self._has_postgres_capability(POSTGRES_PROFILE_CAPABILITY):
             return False
         if profile_match and profile_match.group(2) == "introspect" and not self._has_postgres_capability(POSTGRES_SCHEMA_CAPABILITY):
             return False
-        if not sql_match and not relation_preview_match and not relation_verify_match and not relation_query_match and not relation_detail_match and not (profile_match and profile_match.group(2) in {"test", "introspect"}):
+        if not sql_match and not relation_preview_match and not relation_verify_match and not relation_query_match and not relation_temporal_series_match and not relation_detail_match and not (profile_match and profile_match.group(2) in {"test", "introspect"}):
             return False
         if not self._authorize_postgres():
             return True
@@ -143,6 +146,27 @@ class PostgresHttpMixin:
                             body["detail"], body["offset"], body["limit"], body["sort"], body["searches"],
                         )
                 self._service_call(execute_detail)
+        elif relation_temporal_series_match:
+            manifest_fields = {"source", "query", "action", "refreshGeneration"}
+            window_fields = manifest_fields | {"series", "windowStart"}
+            context = set(self.postgres_temporal_series_context_fields)
+            fields = set(body) if isinstance(body, dict) else set()
+            expected_fields = manifest_fields if isinstance(body, dict) and body.get("action") == "manifest" else window_fields if isinstance(body, dict) and body.get("action") == "window" else set()
+            valid_fields = (expected_fields | context,) if context else (expected_fields,)
+            if not expected_fields or fields not in valid_fields:
+                self.send_json(400, {"error": {"code": "validation_error", "message": "temporal series request fields are invalid"}})
+            else:
+                def execute_temporal_series():
+                    call = lambda: self.service.execute_temporal_series(
+                        relation_temporal_series_match.group(1), body["source"], body["query"], body["action"], body["refreshGeneration"],
+                        body.get("series"), body.get("windowStart"),
+                    )
+                    guard = getattr(self, "_postgres_temporal_series_guard", None)
+                    if guard is None:
+                        return call()
+                    with guard(body):
+                        return call()
+                self._service_call(execute_temporal_series)
         elif relation_query_match:
             base_fields = {"source", "query"}
             contextual_fields = base_fields | set(self.postgres_relation_query_context_fields)

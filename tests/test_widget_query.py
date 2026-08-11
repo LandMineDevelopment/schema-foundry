@@ -10,8 +10,11 @@ from schemii.widget_query import (
     QueryValidationError,
     compile_detail_query,
     compile_query,
+    compile_temporal_series_manifest,
+    compile_temporal_series_window,
     normalize_detail_request,
     normalize_query,
+    normalize_temporal_series,
 )
 from schemii.postgres_service import quote_identifier
 
@@ -48,6 +51,32 @@ def query():
 
 
 class WidgetQueryTests(unittest.TestCase):
+    def test_temporal_series_compiles_utc_manifest_and_half_open_aligned_window(self):
+        columns = [*COLUMNS, {"name": "ordered_at", "type": "timestamp without time zone", "nullable": False, "ordinal": 10}]
+        value = query()
+        value["dimensions"] = [{"id": "dimension_ordered", "label": "Ordered", "column": "ordered_at"}]
+        value["measures"] = [value["measures"][1]]
+        value["sort"] = [{"targetKind": "measure", "targetId": "measure_revenue", "direction": "desc", "nulls": "last"}]
+        series = normalize_temporal_series(value, columns)
+        manifest = compile_temporal_series_manifest({"namespace": "bookstore", "relation": "orders"}, series, quote_identifier)
+        self.assertIn('pg_catalog.min(("ordered_at" AT TIME ZONE \'UTC\'))', manifest["sql"])
+        self.assertIn('(\n    (\n        "format" IN (%s, %s)\n    )\n)\n    AND ("ordered_at" AT TIME ZONE \'UTC\') IS NOT NULL', manifest["sql"])
+        window = compile_temporal_series_window(
+            {"namespace": "bookstore", "relation": "orders"}, series, quote_identifier,
+            86400, "2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z", 32,
+        )
+        self.assertIn("extract(epoch FROM", window["sql"])
+        self.assertIn("GROUP BY\n    1", window["sql"])
+        self.assertIn('ORDER BY\n    "__schemer_t0" ASC NULLS LAST', window["sql"])
+        self.assertIn(">= %s", window["sql"])
+        self.assertIn("< %s", window["sql"])
+        self.assertNotIn("__schemer_m0\" DESC", window["sql"])
+        self.assertEqual(window["parameters"], [86400, 86400, "paperback", "hardcover", "2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z", 33])
+
+        value["dimensions"] = [{"id": "dimension_publisher", "label": "Publisher", "column": "publisher"}]
+        with self.assertRaisesRegex(QueryValidationError, "date or timestamp"):
+            normalize_temporal_series(value, columns)
+
     def test_normalizes_and_compiles_deterministically(self):
         normalized = normalize_query(query(), COLUMNS)
         compiled = compile_query(
@@ -209,6 +238,36 @@ class WidgetQueryTests(unittest.TestCase):
         for dimensions, candidate_detail, offset, limit, sort, searches in invalid:
             with self.subTest(detail=candidate_detail, offset=offset, limit=limit), self.assertRaises(QueryValidationError):
                 normalize_detail_request({"dimensions": dimensions}, candidate_detail, offset, limit, sort, searches, normalized, COLUMNS)
+
+    def test_temporal_bucket_detail_selection_uses_a_half_open_utc_range(self):
+        columns = [*COLUMNS, {"name": "ordered_at", "type": "timestamp without time zone", "nullable": False, "ordinal": 10}]
+        value = query()
+        value["dimensions"] = [{"id": "dimension_ordered", "label": "Ordered", "column": "ordered_at"}]
+        value["measures"] = [value["measures"][1]]
+        value["sort"] = []
+        normalized = normalize_query(value, columns)
+        detail = {
+            "version": 1,
+            "columns": [{"id": "detail_ordered", "label": "Ordered", "column": "ordered_at", "numberFormat": {"style": "auto"}, "searchable": True}],
+            "rowIdentifier": None,
+        }
+        request = normalize_detail_request(
+            {"dimensions": [{
+                "targetId": "dimension_ordered", "operator": "gte_lt",
+                "values": ["2026-01-01T00:00:00.000Z", "2026-01-02T00:00:00.000Z"],
+            }]},
+            detail, 0, 25, None, [], normalized, columns,
+        )
+        compiled = compile_detail_query({"namespace": "public", "relation": "orders"}, normalized, request, columns, quote_identifier)
+        self.assertIn("(\"ordered_at\" AT TIME ZONE 'UTC') >= %s", compiled["sql"])
+        self.assertIn("(\"ordered_at\" AT TIME ZONE 'UTC') < %s", compiled["sql"])
+        self.assertEqual(compiled["countParameters"][-2:], ["2026-01-01T00:00:00.000Z", "2026-01-02T00:00:00.000Z"])
+
+        with self.assertRaisesRegex(QueryValidationError, "selected dimension"):
+            normalize_detail_request(
+                {"dimensions": [{"targetId": "dimension_ordered", "operator": "gte_lt", "values": ["2026-01-01T00:00:00.000Z"]}]},
+                detail, 0, 25, None, [], normalized, columns,
+            )
 
     def test_rejects_invalid_shapes_references_and_values(self):
         invalid = []

@@ -104,9 +104,11 @@ let widgetEditorGeneration = 0;
 let widgetQueryApplySession = null;
 const sourceVerification = new Map();
 const widgetQueryResults = new Map();
+const widgetTemporalSeries = new Map();
 const widgetQueryExecutionTokens = new Map();
 const widgetTablePages = new Map();
 const executedSqlByResult = new Map();
+const TEMPORAL_SERIES_PIXELS_PER_BUCKET = 28;
 let detailRequestToken = null;
 let detailContext = null;
 let detailReturnFocus = null;
@@ -176,6 +178,7 @@ function invalidateWidgetRuntime(widgetId) {
   widgetQueryExecutionTokens.set(`${widgetId}:publish`, {});
   widgetQueryExecutionTokens.set(`${widgetId}:draft`, {});
   widgetQueryResults.delete(widgetId);
+  widgetTemporalSeries.delete(widgetId);
   widgetTablePages.delete(widgetId);
   executedSqlByResult.delete(`${widgetId}:widget`);
   sourceVerification.delete(widgetId);
@@ -484,6 +487,15 @@ function queryForVisualization(query, visualization = null) {
     measures: query.measures.filter(item => measureIds.includes(item.id)).map(clone),
     sort: query.sort.filter(item => targetIds.has(item.targetId)).map(clone)
   };
+}
+
+function temporalSeriesEligible(source, query, visualization) {
+  const presentation = reconcileVisualization(query, visualization);
+  if (presentation.mode !== "line") return false;
+  const projected = queryForVisualization(query, presentation);
+  if (projected.dimensions.length !== 1 || !projected.measures.length) return false;
+  const sourceColumn = source?.columns?.find(column => column.name === projected.dimensions[0].column);
+  return /^(?:date|timestamp(?:\(\d+\))?(?: with(?:out)? time zone)?|timestamptz)$/i.test(sourceColumn?.type ?? "");
 }
 
 function numericPostgresType(type) {
@@ -1445,6 +1457,7 @@ async function verifyDashboardSources() {
   const generation = ++sourceVerificationGeneration;
   sourceVerification.clear();
   widgetQueryResults.clear();
+  widgetTemporalSeries.clear();
   widgetTablePages.clear();
   widgetQueryExecutionTokens.clear();
   for (const key of executedSqlByResult.keys()) {
@@ -1453,6 +1466,7 @@ async function verifyDashboardSources() {
   const sourcedWidgets = activeDashboard?.dashboard.widgets.filter(widget => widget.configuration?.source) ?? [];
   if (!sourcedWidgets.length) {
     widgetQueryResults.clear();
+    widgetTemporalSeries.clear();
     return;
   }
   for (const widget of sourcedWidgets) sourceVerification.set(widget.id, { state: "checking" });
@@ -1664,9 +1678,11 @@ function visualizationDataTable(widget, columns, rows) {
   return details;
 }
 
-function visualizationLineage(result, values, measure = null) {
+function visualizationLineage(result, values, measure = null, dimensionRanges = {}) {
   const dimensions = result.columns.filter(column => column.kind === "dimension").map(column => {
     const value = values[result.columns.indexOf(column)];
+    const range = dimensionRanges[column.id];
+    if (range) return { targetId: column.id, column: column.sourceColumn, operator: "gte_lt", values: range };
     return { targetId: column.id, column: column.sourceColumn, operator: value === null ? "is_null" : "eq", values: value === null ? [] : [value] };
   });
   return { dimensions, ...(measure ? { measure: result.lineage?.measures?.find(item => item.id === measure.id) ?? measure } : {}), filterGroups: result.lineage?.filterGroups ?? [] };
@@ -1727,11 +1743,14 @@ function axisTickIndexes(length, count = 5) {
   return [...new Set(Array.from({ length: Math.min(count, length) }, (_item, index) => Math.round(index * (length - 1) / (Math.min(count, length) - 1))))];
 }
 
-function formatAxisDimension(value) {
+function formatAxisDimension(value, bucketSeconds = null) {
   if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}(?:T|$)/.test(value)) return formatQueryValue(value);
   const parsed = new Date(value.length === 10 ? `${value}T00:00:00Z` : value);
   if (!Number.isFinite(parsed.getTime())) return value;
-  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "2-digit", timeZone: "UTC" }).format(parsed);
+  const options = bucketSeconds !== null && bucketSeconds < 86400
+    ? { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZone: "UTC" }
+    : { month: "short", day: "numeric", year: "2-digit", timeZone: "UTC" };
+  return new Intl.DateTimeFormat(undefined, options).format(parsed);
 }
 
 function renderKpiVisualization(container, widget, execution, visualization) {
@@ -1835,6 +1854,42 @@ function renderBarVisualization(container, widget, execution, visualization) {
   container.append(frame, visualizationDataTable(widget, [dimension, ...measures], execution.result.rows));
 }
 
+function temporalSeriesTimestamp(value) {
+  if (typeof value !== "string") return null;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function proportionalTemporalX(timestamp, domainStart, domainEnd, chartWidth) {
+  if (![timestamp, domainStart, domainEnd, chartWidth].every(Number.isFinite) || domainEnd <= domainStart) return null;
+  return 24 + (timestamp - domainStart) / (domainEnd - domainStart) * (chartWidth - 48);
+}
+
+function temporalSeriesRows(execution) {
+  const windows = execution.temporalSeries?.windows;
+  if (!windows) return execution.result.rows;
+  return [...windows.values()]
+    .sort((left, right) => temporalSeriesTimestamp(left.range.start) - temporalSeriesTimestamp(right.range.start))
+    .flatMap(result => result.rows)
+    .sort((left, right) => (temporalSeriesTimestamp(left[0]) ?? 0) - (temporalSeriesTimestamp(right[0]) ?? 0));
+}
+
+function temporalSeriesWindowGroups(execution) {
+  const windows = execution.temporalSeries?.windows;
+  if (!windows) return [execution.result.rows];
+  const groups = [];
+  for (const result of [...windows.values()].sort((left, right) => temporalSeriesTimestamp(left.range.start) - temporalSeriesTimestamp(right.range.start))) {
+    const previous = groups.at(-1);
+    if (previous?.endExclusive === result.range.start) {
+      previous.rows.push(...result.rows);
+      previous.endExclusive = result.range.endExclusive;
+    } else {
+      groups.push({ rows: [...result.rows], endExclusive: result.range.endExclusive });
+    }
+  }
+  return groups.map(item => item.rows);
+}
+
 function renderLineVisualization(container, widget, execution, visualization) {
   const selection = visualization.selections.line;
   const dimension = selectedResultColumns(execution.result, [selection.dimensionId])[0];
@@ -1843,61 +1898,82 @@ function renderLineVisualization(container, widget, execution, visualization) {
     container.append(visualizationGuidance("Lines require one ordered grouping dimension. Add one in the widget editor or select another saved grouping here."));
     return;
   }
-  const numeric = measures.every(measure => execution.result.rows.every(row => row[measure.index] === null || numericResultValue(row[measure.index]) !== null));
+  const rows = temporalSeriesRows(execution);
+  const numeric = measures.every(measure => rows.every(row => row[measure.index] === null || numericResultValue(row[measure.index]) !== null));
   if (!measures.length || !numeric) {
     container.append(visualizationGuidance("Lines require at least one numeric measure. Non-numeric aggregates remain available in the query and table view."));
     return;
   }
-  const values = execution.result.rows.flatMap(row => measures.map(measure => numericResultValue(row[measure.index])).filter(value => value !== null));
-  if (!execution.result.rows.length || !values.length) {
+  const values = rows.flatMap(row => measures.map(measure => numericResultValue(row[measure.index])).filter(value => value !== null));
+  const temporalSeries = execution.temporalSeries;
+  if ((!rows.length || !values.length) && !temporalSeries) {
     container.append(visualizationGuidance("No numeric points matched this query, so there is no trend to draw."));
     return;
   }
   const minimum = Math.min(...values, 0);
   const maximum = Math.max(...values, 1);
   const range = maximum - minimum || 1;
+  const domainStart = temporalSeriesTimestamp(temporalSeries?.manifest.series.alignedStart);
+  const domainEnd = temporalSeriesTimestamp(temporalSeries?.manifest.series.alignedEndExclusive);
+  const totalBuckets = temporalSeries ? Math.round((domainEnd - domainStart) / (temporalSeries.manifest.series.bucketSeconds * 1000)) : 0;
+  const chartWidth = temporalSeries ? Math.max(700, totalBuckets * TEMPORAL_SERIES_PIXELS_PER_BUCKET + 48) : 700;
+  const xPosition = (row, index, groupRows) => {
+    if (!temporalSeries) return groupRows.length <= 1 ? chartWidth / 2 : 24 + index / (groupRows.length - 1) * (chartWidth - 48);
+    const timestamp = temporalSeriesTimestamp(row[dimension.index]);
+    const bucketCenter = timestamp === null ? null : timestamp + temporalSeries.manifest.series.bucketSeconds * 500;
+    return bucketCenter === null ? null : proportionalTemporalX(bucketCenter, domainStart, domainEnd, chartWidth);
+  };
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.classList.add("live-line-chart");
-  svg.setAttribute("viewBox", "0 0 700 260");
+  svg.setAttribute("viewBox", `0 0 ${chartWidth} 260`);
+  svg.style.width = `${chartWidth}px`;
   svg.setAttribute("role", "img");
   svg.setAttribute("aria-label", `${widget.title}: ${measures.map(item => item.label).join(", ")} by ${dimension.label}`);
-  const pointIndexes = new Set(axisTickIndexes(execution.result.rows.length, 7));
+  const pointIndexes = new Set(axisTickIndexes(rows.length, 7));
+  const points = [];
   measures.forEach((measure, seriesIndex) => {
-    let segment = [];
-    const appendSegment = () => {
-      if (segment.length > 1) {
-        const line = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
-        line.setAttribute("points", segment.join(" "));
-        line.style.setProperty("--series", seriesIndex);
-        svg.append(line);
-      }
-      segment = [];
-    };
-    execution.result.rows.forEach((row, index) => {
-      const numericValue = numericResultValue(row[measure.index]);
-      if (numericValue === null) {
-        appendSegment();
-        return;
-      }
-      const x = execution.result.rows.length <= 1 ? 350 : 24 + index / (execution.result.rows.length - 1) * 652;
-      const y = 230 - (numericValue - minimum) / range * 200;
-      segment.push(`${x},${y}`);
-      if (execution.result.rows.length <= 32 || pointIndexes.has(index)) {
-        const point = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-        point.setAttribute("cx", String(x));
-        point.setAttribute("cy", String(y));
-        point.setAttribute("r", "4");
-        point.setAttribute("tabindex", "0");
-        point.setAttribute("role", "button");
-        point.setAttribute("aria-label", `${measure.label}: ${formatQueryValue(row[measure.index], measure.numberFormat)} for ${formatQueryValue(row[dimension.index])}`);
-        point.style.setProperty("--series", seriesIndex);
-        point.dataset.inspectMetric = measure.label;
-        point.dataset.drillLineage = JSON.stringify(visualizationLineage(execution.result, row, measure));
-        svg.append(point);
-      }
-    });
-    appendSegment();
+    for (const groupRows of temporalSeriesWindowGroups(execution)) {
+      let segment = [];
+      const appendSegment = () => {
+        if (segment.length > 1) {
+          const line = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+          line.setAttribute("points", segment.join(" "));
+          line.style.setProperty("--series", seriesIndex);
+          svg.append(line);
+        }
+        segment = [];
+      };
+      groupRows.forEach((row, index) => {
+        const numericValue = numericResultValue(row[measure.index]);
+        const x = xPosition(row, index, groupRows);
+        if (numericValue === null || x === null) {
+          appendSegment();
+          return;
+        }
+        const y = 230 - (numericValue - minimum) / range * 200;
+        segment.push(`${x},${y}`);
+        const mergedIndex = rows.indexOf(row);
+        if (temporalSeries || rows.length <= 32 || pointIndexes.has(mergedIndex)) {
+          const point = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+          point.setAttribute("cx", String(x));
+          point.setAttribute("cy", String(y));
+          point.setAttribute("r", "4");
+          point.setAttribute("tabindex", "0");
+          point.setAttribute("role", "button");
+          point.setAttribute("aria-label", `${measure.label}: ${formatQueryValue(row[measure.index], measure.numberFormat)} for ${formatQueryValue(row[dimension.index])}`);
+          point.style.setProperty("--series", seriesIndex);
+          point.dataset.inspectMetric = measure.label;
+          const dimensionRanges = temporalSeries ? {
+            [dimension.id]: [row[dimension.index], new Date(temporalSeriesTimestamp(row[dimension.index]) + temporalSeries.manifest.series.bucketSeconds * 1000).toISOString()],
+          } : {};
+          point.dataset.drillLineage = JSON.stringify(visualizationLineage(execution.result, row, measure, dimensionRanges));
+          points.push(point);
+        }
+      });
+      appendSegment();
+    }
   });
+  svg.append(...points);
   const frame = document.createElement("div");
   frame.className = "live-chart-frame live-line-frame";
   frame.append(chartHeading(dimension, measures));
@@ -1910,15 +1986,38 @@ function renderLineVisualization(container, widget, execution, visualization) {
     tick.textContent = formatQueryValue(minimum + range * index / 4, measures[0].numberFormat);
     yAxis.append(tick);
   }
-  plot.append(yAxis, svg);
+  const viewport = document.createElement("div");
+  viewport.className = "live-line-viewport";
+  viewport.tabIndex = 0;
+  viewport.setAttribute("role", "region");
+  viewport.setAttribute("aria-label", `${widget.title} scrollable time range`);
+  const timeline = document.createElement("div");
+  timeline.className = "live-line-timeline";
+  timeline.classList.toggle("temporal", Boolean(temporalSeries));
+  timeline.style.width = `${chartWidth}px`;
+  timeline.append(svg);
   const xAxis = document.createElement("div");
   xAxis.className = "live-chart-x-axis";
-  const tickIndexes = axisTickIndexes(execution.result.rows.length);
-  tickIndexes.forEach(index => {
-    const tick = document.createElement("span");
-    tick.textContent = formatAxisDimension(execution.result.rows[index][dimension.index]);
-    xAxis.append(tick);
-  });
+  if (temporalSeries) {
+    const tickStep = Math.max(1, Math.ceil(170 / TEMPORAL_SERIES_PIXELS_PER_BUCKET));
+    for (let index = 0; index < totalBuckets; index += tickStep) {
+      const tick = document.createElement("span");
+      const timestamp = domainStart + index * temporalSeries.manifest.series.bucketSeconds * 1000;
+      tick.textContent = formatAxisDimension(new Date(timestamp).toISOString(), temporalSeries.manifest.series.bucketSeconds);
+      tick.style.left = `${24 + (index + .5) / totalBuckets * (chartWidth - 48)}px`;
+      xAxis.append(tick);
+    }
+  } else {
+    const tickIndexes = axisTickIndexes(rows.length);
+    tickIndexes.forEach(index => {
+      const tick = document.createElement("span");
+      tick.textContent = formatAxisDimension(rows[index][dimension.index]);
+      xAxis.append(tick);
+    });
+  }
+  timeline.append(xAxis);
+  viewport.append(timeline);
+  plot.append(yAxis, viewport);
   const axisTitles = document.createElement("div");
   axisTitles.className = "live-chart-axis-titles";
   const measureTitle = document.createElement("span");
@@ -1926,8 +2025,41 @@ function renderLineVisualization(container, widget, execution, visualization) {
   const dimensionTitle = document.createElement("span");
   dimensionTitle.textContent = dimension.label;
   axisTitles.append(measureTitle, dimensionTitle);
-  frame.append(plot, xAxis, axisTitles);
-  container.append(frame, visualizationDataTable(widget, [dimension, ...measures], execution.result.rows));
+  frame.append(plot, axisTitles);
+  if (temporalSeries) {
+    const status = document.createElement("p");
+    status.className = `live-line-load-status${temporalSeries.error ? " error" : ""}`;
+    const totalWindows = Math.ceil(totalBuckets / temporalSeries.manifest.series.windowBucketCount);
+    status.textContent = temporalSeries.error
+      ? `${temporalSeries.error} Scroll again to retry.`
+      : `${rows.length} point${rows.length === 1 ? "" : "s"} cached in ${temporalSeries.windows.size} of ${totalWindows} time windows${temporalSeries.inFlight.size ? " · loading..." : ""}`;
+    frame.append(status);
+    const requestVisibleWindows = () => {
+      temporalSeries.scrollLeft = viewport.scrollLeft;
+      const windowWidth = temporalSeries.manifest.series.windowBucketCount * TEMPORAL_SERIES_PIXELS_PER_BUCKET;
+      const first = Math.max(0, Math.floor(viewport.scrollLeft / windowWidth));
+      const last = Math.min(totalWindows - 1, Math.floor((viewport.scrollLeft + viewport.clientWidth - 1) / windowWidth));
+      for (let index = first; index <= last; index += 1) loadTemporalSeriesWindow(widget, execution, index, container.closest(".widget"));
+    };
+    let scrollFrame = null;
+    viewport.addEventListener("scroll", () => {
+      if (scrollFrame !== null) return;
+      scrollFrame = requestAnimationFrame(() => {
+        scrollFrame = null;
+        requestVisibleWindows();
+      });
+    });
+    viewport.addEventListener("wheel", event => {
+      if (Math.abs(event.deltaY) <= Math.abs(event.deltaX) || viewport.scrollWidth <= viewport.clientWidth) return;
+      event.preventDefault();
+      viewport.scrollLeft += event.deltaY;
+    }, { passive: false });
+    requestAnimationFrame(() => {
+      viewport.scrollLeft = temporalSeries.scrollLeft;
+      requestVisibleWindows();
+    });
+  }
+  container.append(frame, visualizationDataTable(widget, [dimension, ...measures], rows));
 }
 
 function renderDonutVisualization(container, widget, execution, visualization) {
@@ -1984,6 +2116,170 @@ function renderDonutVisualization(container, widget, execution, visualization) {
   container.append(layout, visualizationDataTable(widget, [dimension, measure], execution.result.rows));
 }
 
+function temporalSeriesIdentity(widget) {
+  return JSON.stringify({
+    dashboardId: activeDashboard?.id,
+    revision: activeDashboard?.revision,
+    source: widget.configuration?.source,
+    query: queryForVisualization(widget.configuration?.query, widget.configuration?.visualization),
+  });
+}
+
+function temporalSeriesIsCurrent(widget, execution) {
+  const currentWidget = activeDashboard?.dashboard.widgets.find(item => item.id === widget.id);
+  return currentWidget === widget
+    && widgetTemporalSeries.get(widget.id) === execution
+    && execution.identity === temporalSeriesIdentity(widget);
+}
+
+function renderCurrentFocusedWidget(widget, fallbackCard) {
+  const currentCard = focusedWidgetId === widget.id
+    ? elements.widgetFocusContent.querySelector(`.focused-widget-card[data-widget-id="${widget.id}"]`)
+    : null;
+  const card = currentCard ?? fallbackCard;
+  if (card?.isConnected) renderQueryResult(card, widget);
+}
+
+function updateTemporalSeriesSql(execution) {
+  const windows = [...execution.temporalSeries.windows.values()]
+    .sort((left, right) => temporalSeriesTimestamp(left.range.start) - temporalSeriesTimestamp(right.range.start));
+  const windowSql = windows[0]?.sql;
+  execution.sqlExecution = {
+    sql: `${execution.temporalSeries.manifest.sql}${windowSql ? `\n\n-- Repeated for each loaded half-open time window\n${windowSql}` : ""}`,
+    parameters: {
+      manifest: execution.temporalSeries.manifest.parameters,
+      windows: windows.map(item => ({ range: item.range, parameters: item.parameters })),
+    },
+    temporalSeries: true,
+  };
+}
+
+async function ensureTemporalSeries(widget, card) {
+  if (!temporalSeriesEligible(widget.configuration?.source, widget.configuration?.query, widget.configuration?.visualization)) return;
+  const identity = temporalSeriesIdentity(widget);
+  const existing = widgetTemporalSeries.get(widget.id);
+  if (existing?.identity === identity) {
+    renderCurrentFocusedWidget(widget, card);
+    return;
+  }
+  const dashboardId = activeDashboard.id;
+  const dashboardRevision = activeDashboard.revision;
+  const source = clone(widget.configuration.source);
+  const query = queryForVisualization(widget.configuration.query, widget.configuration.visualization);
+  const refreshGeneration = crypto.randomUUID();
+  const execution = { state: "loading", message: "Preparing proportional time range...", identity, dashboardId, dashboardRevision };
+  widgetTemporalSeries.set(widget.id, execution);
+  renderQueryResult(card, widget);
+  const path = `/api/postgres/profiles/${encodeURIComponent(source.profileId)}/relation/temporal-series`;
+  try {
+    const manifest = await postgres.request(path, {
+      method: "POST",
+      body: JSON.stringify({ source, query, action: "manifest", refreshGeneration, dashboardId, expectedRevision: dashboardRevision, widgetId: widget.id }),
+    });
+    if (!temporalSeriesIsCurrent(widget, execution) || manifest.refreshGeneration !== refreshGeneration) return;
+    const temporalSeries = {
+      manifest,
+      windows: new Map(),
+      inFlight: new Set(),
+      scrollLeft: 0,
+      error: null,
+      path,
+    };
+    execution.temporalSeries = temporalSeries;
+    execution.source = source;
+    execution.query = query;
+    if (!manifest.empty) {
+      const firstWindow = await postgres.request(path, {
+        method: "POST",
+        body: JSON.stringify({
+          source, query, action: "window", refreshGeneration, series: manifest.series,
+          windowStart: manifest.series.alignedStart, dashboardId, expectedRevision: dashboardRevision, widgetId: widget.id,
+        }),
+      });
+      if (!temporalSeriesIsCurrent(widget, execution) || firstWindow.refreshGeneration !== refreshGeneration || firstWindow.seriesKey !== manifest.series.key) return;
+      temporalSeries.windows.set(firstWindow.range.start, firstWindow);
+    }
+    const rows = temporalSeriesRows(execution);
+    const latest = [...temporalSeries.windows.values()].at(-1);
+    execution.result = {
+      source: { profileId: source.profileId, database: source.database, namespace: source.namespace, relation: source.relation, kind: source.kind, fingerprint: source.fingerprint },
+      queryVersion: 2,
+      columns: latest?.columns ?? manifest.columns,
+      rows,
+      rowCount: rows.length,
+      limit: query.limit,
+      truncated: false,
+      sql: latest?.sql ?? manifest.sql,
+      parameters: latest?.parameters ?? manifest.parameters,
+      queryDurationMs: (manifest.queryDurationMs ?? 0) + (latest?.queryDurationMs ?? 0),
+      queriedAt: latest?.queriedAt ?? manifest.queriedAt,
+      provenance: latest?.provenance ?? manifest.provenance,
+      lineage: latest?.lineage ?? manifest.lineage,
+    };
+    execution.state = "ready";
+    updateTemporalSeriesSql(execution);
+    renderCurrentFocusedWidget(widget, card);
+  } catch (error) {
+    if (!temporalSeriesIsCurrent(widget, execution)) return;
+    execution.state = "error";
+    execution.message = error.message;
+    renderCurrentFocusedWidget(widget, card);
+  }
+}
+
+async function loadTemporalSeriesWindow(widget, execution, windowIndex, card) {
+  const temporalSeries = execution.temporalSeries;
+  if (!temporalSeries || !temporalSeriesIsCurrent(widget, execution)) return;
+  const descriptor = temporalSeries.manifest.series;
+  const start = temporalSeriesTimestamp(descriptor.alignedStart)
+    + windowIndex * descriptor.windowBucketCount * descriptor.bucketSeconds * 1000;
+  const windowStart = new Date(start).toISOString();
+  if (temporalSeries.windows.has(windowStart) || temporalSeries.inFlight.has(windowStart)) return;
+  temporalSeries.inFlight.add(windowStart);
+  temporalSeries.error = null;
+  const status = card?.querySelector(".live-line-load-status");
+  if (status) status.textContent = `${execution.result.rows.length} points cached · loading next time window...`;
+  try {
+    const result = await postgres.request(temporalSeries.path, {
+      method: "POST",
+      body: JSON.stringify({
+        source: execution.source, query: execution.query, action: "window",
+        refreshGeneration: temporalSeries.manifest.refreshGeneration,
+        series: descriptor, windowStart,
+        dashboardId: execution.dashboardId, expectedRevision: execution.dashboardRevision, widgetId: widget.id,
+      }),
+    });
+    if (!temporalSeriesIsCurrent(widget, execution) || result.refreshGeneration !== temporalSeries.manifest.refreshGeneration || result.seriesKey !== descriptor.key || result.range.start !== windowStart) return;
+    const cachedPointCount = [...temporalSeries.windows.values()].reduce((total, item) => total + item.rows.length, 0);
+    if (cachedPointCount + result.rows.length > descriptor.pointLimit) throw new Error("The refreshed time series exceeds this widget's saved result limit; refresh or raise the limit");
+    temporalSeries.windows.set(windowStart, result);
+    execution.result.rows = temporalSeriesRows(execution);
+    execution.result.rowCount = execution.result.rows.length;
+    execution.result.queriedAt = result.queriedAt;
+    execution.result.queryDurationMs += result.queryDurationMs ?? 0;
+    updateTemporalSeriesSql(execution);
+    temporalSeries.inFlight.delete(windowStart);
+    renderCurrentFocusedWidget(widget, card);
+  } catch (error) {
+    if (!temporalSeriesIsCurrent(widget, execution)) return;
+    temporalSeries.inFlight.delete(windowStart);
+    if (["temporal_series_expired", "temporal_series_stale"].includes(error.code)) {
+      widgetTemporalSeries.delete(widget.id);
+      const currentCard = focusedWidgetId === widget.id ? elements.widgetFocusContent.querySelector(`.focused-widget-card[data-widget-id="${widget.id}"]`) : null;
+      if (currentCard) ensureTemporalSeries(widget, currentCard);
+      return;
+    }
+    temporalSeries.error = error.message;
+    const currentStatus = card?.querySelector(".live-line-load-status");
+    if (currentStatus) {
+      currentStatus.classList.add("error");
+      currentStatus.textContent = `${error.message} Scroll again to retry.`;
+    }
+  } finally {
+    temporalSeries.inFlight.delete(windowStart);
+  }
+}
+
 function renderQueryResult(card, widget) {
   if (!widget.configuration?.query) return;
   const focusedBody = card.querySelector(":scope > .focused-widget-body");
@@ -1999,7 +2295,9 @@ function renderQueryResult(card, widget) {
   card.classList.toggle("metric-widget", visualization.mode === "kpi");
   card.classList.toggle("chart-widget", ["bar", "line"].includes(visualization.mode));
   card.classList.toggle("status-widget", visualization.mode === "donut");
-  const execution = widgetQueryResults.get(widget.id);
+  const execution = focusedBody && visualization.mode === "line"
+    ? widgetTemporalSeries.get(widget.id) ?? widgetQueryResults.get(widget.id)
+    : widgetQueryResults.get(widget.id);
   if (!execution || execution.state !== "ready") {
     const status = document.createElement("p");
     status.className = `query-result-status${execution?.state === "error" ? " error" : ""}`;
@@ -2343,6 +2641,7 @@ function openDashboard(dashboardId) {
   activeDashboard = record ? clone(record) : null;
   queryExecutionGeneration += 1;
   widgetQueryResults.clear();
+  widgetTemporalSeries.clear();
   widgetTablePages.clear();
   widgetQueryExecutionTokens.clear();
   executedSqlByResult.clear();
@@ -2397,6 +2696,13 @@ async function persistDashboard(expectedDashboardId = activeDashboard?.id) {
       else {
         activeDashboard.revision = saved.revision;
         activeDashboard.updatedAt = saved.updatedAt;
+      }
+      const focusedTemporalId = focusedWidgetId && widgetTemporalSeries.has(focusedWidgetId) ? focusedWidgetId : null;
+      widgetTemporalSeries.clear();
+      if (focusedTemporalId) {
+        const focusedWidget = activeDashboard.dashboard.widgets.find(item => item.id === focusedTemporalId);
+        const focusedCard = elements.widgetFocusContent.querySelector(`.focused-widget-card[data-widget-id="${focusedTemporalId}"]`);
+        if (focusedWidget && focusedCard) ensureTemporalSeries(focusedWidget, focusedCard);
       }
       const index = dashboards.findIndex(record => record.id === dashboardId);
       if (index >= 0) dashboards[index] = clone(activeDashboard);
@@ -2606,6 +2912,7 @@ function openWidgetFocus(widgetId) {
   card.append(body);
   renderQueryResult(card, widget);
   elements.widgetFocusContent.replaceChildren(card);
+  ensureTemporalSeries(widget, card);
   elements.widgetInspector.classList.add("dismissed");
   elements.widgetInspector.inert = true;
   elements.widgetInspector.setAttribute("aria-hidden", "true");
@@ -2872,7 +3179,9 @@ function renderDetailReport() {
   const dimensionLabels = new Map(detailContext.query.dimensions.map(dimension => [dimension.id, dimension.label]));
   for (const dimension of detailContext.selection.dimensions) {
     const chip = document.createElement("span");
-    chip.textContent = `${dimensionLabels.get(dimension.targetId) ?? dimension.targetId}: ${dimension.value === null ? "NULL" : String(dimension.value)}`;
+    chip.textContent = dimension.operator === "gte_lt"
+      ? `${dimensionLabels.get(dimension.targetId) ?? dimension.targetId}: ${formatAxisDimension(dimension.values[0])} to ${formatAxisDimension(dimension.values[1])}`
+      : `${dimensionLabels.get(dimension.targetId) ?? dimension.targetId}: ${dimension.value === null ? "NULL" : String(dimension.value)}`;
     elements.detailFilters.append(chip);
   }
   const operatorLabels = { eq: "=", neq: "!=", lt: "<", lte: "<=", gt: ">", gte: ">=", between: "between", in: "in", not_in: "not in", like: "matches", contains: "contains", starts_with: "starts with", ends_with: "ends with", is_null: "is NULL", is_not_null: "is not NULL" };
@@ -2955,7 +3264,9 @@ function openDetailReport(target, widgetId) {
   if (focusedWidgetId !== widget.id) openWidgetFocus(widget.id);
   const detail = reconcileDetailReport(widget.configuration.source, widget.configuration.detail);
   const selection = {
-    dimensions: (lineage.dimensions ?? []).map(dimension => ({ targetId: dimension.targetId, value: dimension.operator === "is_null" ? null : dimension.values?.[0] ?? null })),
+    dimensions: (lineage.dimensions ?? []).map(dimension => dimension.operator === "gte_lt"
+      ? { targetId: dimension.targetId, operator: "gte_lt", values: dimension.values }
+      : { targetId: dimension.targetId, value: dimension.operator === "is_null" ? null : dimension.values?.[0] ?? null }),
     ...(lineage.measure?.id ? { measureId: lineage.measure.id } : {})
   };
   detailReturnFocus = target;
@@ -3003,10 +3314,16 @@ function openDetailSql() {
 
 function openExecutedSql(widget, population = false) {
   if (!widget) return;
-  const execution = executedSqlByResult.get(`${widget.id}:${population ? "population" : "widget"}`);
+  const cachedTemporalExecution = widgetTemporalSeries.get(widget.id);
+  const temporalExecution = !population && focusedWidgetId === widget.id && cachedTemporalExecution?.state === "ready" && temporalSeriesIsCurrent(widget, cachedTemporalExecution)
+    ? cachedTemporalExecution.sqlExecution
+    : null;
+  const execution = temporalExecution ?? executedSqlByResult.get(`${widget.id}:${population ? "population" : "widget"}`);
   elements.sqlContext.textContent = population ? "Population result" : "Widget result";
   elements.sqlTitle.textContent = `${widget.title} SQL`;
-  elements.sqlStatus.textContent = execution ? "The parameterized statement used for the currently displayed result." : "No live SQL has run for this widget.";
+  elements.sqlStatus.textContent = execution?.temporalSeries
+    ? "The manifest statement and repeated window statement used by the cached proportional timeline. Bound parameters are listed per loaded window."
+    : execution ? "The parameterized statement used for the currently displayed result." : "No live SQL has run for this widget.";
   elements.sqlCode.textContent = execution?.sql || "-- No database query has run for this widget.";
   elements.sqlParameters.hidden = !execution || execution.parameters === undefined;
   elements.sqlParameterCode.textContent = execution?.parameters === undefined ? "" : JSON.stringify(execution.parameters, null, 2);
@@ -3116,7 +3433,9 @@ function appendQueryInputs(query, detail = null) {
   }
   body.append(filters);
   if (detail) {
-    const selection = detail.selection?.dimensions?.map(item => `${item.targetId} = ${item.value === null ? "NULL" : String(item.value)}`).join(", ") || "All aggregate rows";
+    const selection = detail.selection?.dimensions?.map(item => item.operator === "gte_lt"
+      ? `${item.targetId} >= ${item.values[0]} AND < ${item.values[1]}`
+      : `${item.targetId} = ${item.value === null ? "NULL" : String(item.value)}`).join(", ") || "All aggregate rows";
     const detailList = document.createElement("dl");
     appendLineageField(detailList, "Clicked dimensions", selection);
     appendLineageField(detailList, "Selected measure", detail.selection?.measureId || "None");
@@ -3129,8 +3448,12 @@ function appendQueryInputs(query, detail = null) {
 
 function openDataLineage(widget, { detail = null } = {}) {
   if (!widget?.configuration?.source) return;
-  const execution = detail ? detail.result : widgetQueryResults.get(widget.id)?.result;
-  const executionState = detail ? detail.state : widgetQueryResults.get(widget.id)?.state;
+  const cachedTemporalExecution = widgetTemporalSeries.get(widget.id);
+  const temporalExecution = !detail && focusedWidgetId === widget.id && cachedTemporalExecution?.state === "ready" && temporalSeriesIsCurrent(widget, cachedTemporalExecution)
+    ? cachedTemporalExecution
+    : null;
+  const execution = detail ? detail.result : temporalExecution?.result ?? widgetQueryResults.get(widget.id)?.result;
+  const executionState = detail ? detail.state : temporalExecution?.state ?? widgetQueryResults.get(widget.id)?.state;
   const source = execution?.source ?? widget.configuration.source;
   const profile = execution?.provenance?.profile ?? {
     id: source.profileId,
@@ -3166,6 +3489,17 @@ function openDataLineage(widget, { detail = null } = {}) {
   }
   const query = detail?.request?.query ?? widgetQueryResults.get(widget.id)?.query ?? widget.configuration.query;
   appendQueryInputs(query, detail?.request ?? null);
+  if (temporalExecution) {
+    const manifest = temporalExecution.temporalSeries.manifest;
+    lineageFields("Temporal series", [
+      ["Time interpretation", `${manifest.series.sourceType} interpreted as ${manifest.series.interpretation.toUpperCase()}`],
+      ["Actual domain", `${formatAxisDimension(manifest.domain.min)} to ${formatAxisDimension(manifest.domain.max)}`],
+      ["Bucket", `${manifest.series.bucketSeconds} seconds`],
+      ["Window size", `${manifest.series.windowBucketCount} buckets`],
+      ["Cached windows", temporalExecution.temporalSeries.windows.size],
+      ["Snapshot behavior", "Each window is a separate read-only PostgreSQL snapshot; Refresh clears the complete cache."],
+    ]);
+  }
   const resultRows = detail && execution ? detailRows(execution).length : execution?.rowCount;
   lineageFields("Execution", [
     ["State", executionState ?? "not run"], ["Refreshed", execution?.queriedAt ? new Date(execution.queriedAt).toLocaleString() : "Not run"],
@@ -3177,13 +3511,14 @@ function openDataLineage(widget, { detail = null } = {}) {
     ["More detail rows", detail && execution ? execution.hasMore ? "Yes" : "No" : "Not applicable"],
   ]);
   const sqlBody = lineageSection("SQL and bound parameters");
-  if (!execution?.sql) {
+  const sqlExecution = temporalExecution?.sqlExecution ?? execution;
+  if (!sqlExecution?.sql) {
     const unavailable = document.createElement("p");
     unavailable.textContent = "No live SQL is available for this result.";
     sqlBody.append(unavailable);
   } else {
-    appendLineageCode(sqlBody, detail ? "Detail page SQL" : "Aggregation SQL", execution.sql, detail ? "detail page SQL" : "aggregation SQL");
-    appendLineageCode(sqlBody, detail ? "Detail page parameters" : "Aggregation parameters", JSON.stringify(execution.parameters ?? [], null, 2), detail ? "detail page parameters" : "aggregation parameters");
+    appendLineageCode(sqlBody, detail ? "Detail page SQL" : temporalExecution ? "Manifest and window SQL" : "Aggregation SQL", sqlExecution.sql, detail ? "detail page SQL" : temporalExecution ? "temporal series SQL" : "aggregation SQL");
+    appendLineageCode(sqlBody, detail ? "Detail page parameters" : temporalExecution ? "Parameters by request" : "Aggregation parameters", JSON.stringify(sqlExecution.parameters ?? [], null, 2), detail ? "detail page parameters" : temporalExecution ? "temporal series parameters" : "aggregation parameters");
     if (detail && execution.countSql) {
       appendLineageCode(sqlBody, "Detail count SQL", execution.countSql, "detail count SQL");
       appendLineageCode(sqlBody, "Detail count parameters", JSON.stringify(execution.countParameters ?? [], null, 2), "detail count parameters");
