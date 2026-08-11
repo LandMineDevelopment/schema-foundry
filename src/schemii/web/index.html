@@ -65,7 +65,7 @@
       </header>
 
       <main class="main-layout" id="main-layout">
-        <aside class="tool-rail" id="tool-rail" aria-label="Diagram tools">
+        <aside class="tool-rail" id="tool-rail" aria-label="Workspace tools">
           <button class="rail-button active" id="select-tool" type="button" data-tooltip="Select and move" aria-label="Select and move">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 3 12 8-6.3 1.2L9 18Z" /></svg>
           </button>
@@ -98,6 +98,9 @@
           </button>
           <button class="rail-button" id="postgres-button" type="button" data-tooltip="PostgreSQL sync" aria-label="PostgreSQL sync">
             <svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>
+          </button>
+          <button class="rail-button sql-workspace-rail-button" id="sql-workspace-button" type="button" data-tooltip="SQL Console" aria-label="Open SQL Console" aria-controls="standalone-sql-workspace" aria-expanded="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="14" rx="2"/><path d="m7 10 2.5 2L7 14M12 15h5"/></svg>
           </button>
           <div class="rail-divider"></div>
           <button class="rail-button ai-rail-button" id="ai-button" type="button" data-tooltip="AI schema assistant" aria-label="AI schema assistant" aria-expanded="false">
@@ -169,6 +172,70 @@
           </section>
           <div class="canvas-hint"><kbd>Drag</kbd> blank space to select <span></span> <kbd>Shift</kbd> adds tables <span></span> <kbd>Middle</kbd> drag to pan <span></span> Scroll to zoom</div>
           <div class="zoom-display" id="zoom-display">100%</div>
+        </section>
+
+        <section class="standalone-sql-workspace history-collapsed" id="standalone-sql-workspace" aria-label="SQL Console workspace" aria-hidden="true" hidden inert>
+          <header class="standalone-sql-head">
+            <div class="standalone-sql-heading">
+              <span class="eyebrow">Independent database workspace</span>
+              <div><h2>SQL Console</h2><span class="prototype-badge">UI prototype · no execution</span></div>
+            </div>
+            <label class="standalone-sql-view-select" for="standalone-sql-view"><span>View</span><select id="standalone-sql-view" aria-label="SQL Console view"><option value="orders">Order review</option><option value="customers">Customer lookup</option><option value="scratchpad">Operations scratchpad</option></select></label>
+            <dl class="standalone-sql-target" aria-label="SQL target identity">
+              <div><dt>Connection</dt><dd id="standalone-sql-profile">No linked profile</dd></div>
+              <div><dt>Database</dt><dd id="standalone-sql-database">Not selected</dd></div>
+              <div><dt>Namespace</dt><dd id="standalone-sql-namespace">Not selected</dd></div>
+            </dl>
+            <div class="standalone-sql-head-actions">
+              <label class="standalone-sql-write-toggle" for="standalone-sql-write-toggle"><input id="standalone-sql-write-toggle" type="checkbox" role="switch" aria-describedby="standalone-sql-write-help"/><span>Allow writes</span></label>
+              <button class="shared-icon-button" id="close-standalone-sql" type="button" aria-label="Close SQL Console" data-tooltip="Close SQL Console"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button>
+            </div>
+          </header>
+          <div class="standalone-sql-write-warning" id="standalone-sql-write-warning" hidden><strong>WRITE MODE ENABLED</strong><span>Future executions may change data or schema objects using the selected PostgreSQL role. Target: <b id="standalone-sql-write-target">No PostgreSQL target selected</b></span><small>This Phase 1 prototype never sends SQL to PostgreSQL.</small></div>
+          <p class="sr-only" id="standalone-sql-write-help">Write mode is off by default and resets when the target changes, this workspace closes, or the page reloads.</p>
+          <div class="standalone-sql-body">
+            <aside class="standalone-sql-history" id="standalone-sql-history" aria-label="SQL Console history">
+              <header><div><span class="eyebrow">SQL workspace</span><strong>Queries</strong></div><span>Local only</span><button id="close-standalone-sql-history" type="button" aria-label="Close queries"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button></header>
+              <section class="standalone-sql-saved">
+                <header><span>Saved queries</span><button id="save-standalone-sql-sidebar" type="button" aria-label="Save current query">+</button></header>
+                <div id="standalone-sql-saved-list"></div>
+                <small>Browser memory · resets on reload</small>
+              </section>
+              <div class="standalone-sql-history-label"><span>Recent history</span><small>3 entries</small></div>
+              <button type="button" data-sql-prototype-query="read"><span>READ</span><strong>Recent orders</strong><small>bookstore.order_summary</small></button>
+              <button type="button" data-sql-prototype-query="write"><span>WRITE</span><strong>Mark order shipped</strong><small>Requires write mode</small></button>
+              <button type="button" data-sql-prototype-query="error"><span>ERROR</span><strong>Missing relation</strong><small>42P01</small></button>
+              <p>History remains in memory and clears when this page reloads.</p>
+            </aside>
+            <div class="standalone-sql-panes" id="standalone-sql-panes" data-active-pane="editor">
+              <section class="standalone-sql-editor-panel">
+                <button class="standalone-sql-pane-heading" id="show-standalone-sql-editor" type="button" aria-expanded="true"><span><span class="eyebrow">Browser-local draft</span><strong>Script</strong></span><span id="standalone-sql-editor-state">Ready</span></button>
+                <button class="standalone-sql-queries-toggle" id="toggle-standalone-sql-history" type="button" aria-label="Open saved queries" aria-expanded="false"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 4.5h10v11H5zM8 8h4M8 11h4"/></svg><span>Queries</span></button>
+                <div class="standalone-sql-editor-content" id="standalone-sql-editor-content">
+                  <textarea id="standalone-sql-input" aria-label="SQL script" spellcheck="false">SELECT
+    order_id,
+    customer_name,
+    status,
+    order_total
+FROM bookstore.order_summary
+ORDER BY ordered_at DESC
+LIMIT 25;</textarea>
+                  <footer>
+                    <span>Run with <kbd>Ctrl</kbd> + <kbd>Enter</kbd></span>
+                    <button type="button" id="copy-standalone-sql">Copy</button>
+                    <button type="button" id="save-standalone-sql">Save query</button>
+                    <button type="button" id="clear-standalone-sql">Clear</button>
+                    <button type="button" id="cancel-standalone-sql" disabled>Cancel</button>
+                    <button class="button button-primary" type="button" id="run-standalone-sql">Run preview</button>
+                  </footer>
+                </div>
+              </section>
+              <section class="standalone-sql-result-panel" aria-label="SQL result preview">
+                <button class="standalone-sql-pane-heading" id="show-standalone-sql-result" type="button" aria-expanded="false"><span><span class="eyebrow">Synthetic response</span><strong>Result preview</strong></span><span class="standalone-sql-result-status" id="standalone-sql-result-status">Not run</span></button>
+                <div class="standalone-sql-result" id="standalone-sql-result" aria-live="polite" hidden><div class="standalone-sql-empty"><span>SQL</span><strong>Ready for a local preview</strong><p>Run the draft to review table, command, error, loading, and empty states. No database request will be made.</p></div></div>
+              </section>
+            </div>
+          </div>
         </section>
 
         <aside class="inspector" id="inspector">
@@ -596,6 +663,29 @@ ALTER TABLE "public"."books"
           <button class="button button-danger push-left" type="button" id="delete-database-object">Delete</button>
           <button class="button button-primary" type="submit">Save object</button>
         </div>
+      </form>
+    </dialog>
+
+    <dialog id="standalone-sql-write-dialog" class="standalone-sql-write-dialog" aria-labelledby="standalone-sql-write-title">
+      <div class="standalone-sql-write-confirmation">
+        <div class="standalone-sql-warning-mark" aria-hidden="true">!</div>
+        <div><span class="eyebrow">Elevated console mode</span><h2 id="standalone-sql-write-title">Enable SQL writes?</h2><p>Write-capable SQL can insert, update, delete, and change database objects with the selected PostgreSQL role's permissions.</p></div>
+        <div class="standalone-sql-write-risk"><strong>Write mode will be temporary.</strong><span>It resets when the SQL Console closes, the target changes, or this page reloads. Phase 1 remains a visual prototype and executes nothing.</span></div>
+        <label class="standalone-sql-write-ack"><input id="standalone-sql-write-ack" type="checkbox"/> I understand future write-enabled runs may change PostgreSQL data and schema objects.</label>
+        <div class="dialog-actions"><button class="button button-ghost" id="cancel-standalone-sql-write" type="button">Keep read-only</button><button class="button button-danger" id="confirm-standalone-sql-write" type="button" disabled>Enable writes</button></div>
+      </div>
+    </dialog>
+
+    <dialog id="standalone-sql-save-dialog" class="standalone-sql-save-dialog" aria-labelledby="standalone-sql-save-title">
+      <form id="standalone-sql-save-form">
+        <header class="standalone-sql-save-head">
+          <span class="standalone-sql-save-mark" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M5 3.5h10v13l-5-3-5 3zM8 7h4"/></svg></span>
+          <div><span class="eyebrow">Saved queries</span><h2 id="standalone-sql-save-title">Save this query</h2></div>
+        </header>
+        <p class="standalone-sql-save-copy">Name this draft so it is easy to find in the Queries drawer.</p>
+        <div class="standalone-sql-save-notice"><strong>Session only</strong><span>This visual prototype clears saved queries when the page reloads.</span></div>
+        <label class="standalone-sql-save-field" for="standalone-sql-save-name"><span>Query name</span><input id="standalone-sql-save-name" maxlength="80" autocomplete="off" placeholder="e.g. Recent paid orders" /></label>
+        <footer class="dialog-actions"><button class="button button-ghost" id="cancel-standalone-sql-save" type="button">Cancel</button><button class="button button-primary" type="submit">Save query</button></footer>
       </form>
     </dialog>
 

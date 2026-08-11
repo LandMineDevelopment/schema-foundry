@@ -159,6 +159,39 @@ const elements = {
   sqlConsoleStatus: document.querySelector("#sql-console-status"),
   runSqlConsole: document.querySelector("#run-sql-console"),
   clearSqlConsole: document.querySelector("#clear-sql-console"),
+  standaloneSqlButton: document.querySelector("#sql-workspace-button"),
+  standaloneSqlWorkspace: document.querySelector("#standalone-sql-workspace"),
+  standaloneSqlClose: document.querySelector("#close-standalone-sql"),
+  standaloneSqlProfile: document.querySelector("#standalone-sql-profile"),
+  standaloneSqlDatabase: document.querySelector("#standalone-sql-database"),
+  standaloneSqlNamespace: document.querySelector("#standalone-sql-namespace"),
+  standaloneSqlView: document.querySelector("#standalone-sql-view"),
+  standaloneSqlWriteMode: document.querySelector("#standalone-sql-write-toggle"),
+  standaloneSqlWriteWarning: document.querySelector("#standalone-sql-write-warning"),
+  standaloneSqlWriteTarget: document.querySelector("#standalone-sql-write-target"),
+  standaloneSqlHistory: document.querySelector("#standalone-sql-history"),
+  standaloneSqlHistoryToggle: document.querySelector("#toggle-standalone-sql-history"),
+  standaloneSqlHistoryClose: document.querySelector("#close-standalone-sql-history"),
+  standaloneSqlSavedList: document.querySelector("#standalone-sql-saved-list"),
+  standaloneSqlSave: document.querySelector("#save-standalone-sql"),
+  standaloneSqlSaveSidebar: document.querySelector("#save-standalone-sql-sidebar"),
+  standaloneSqlSaveDialog: document.querySelector("#standalone-sql-save-dialog"),
+  standaloneSqlSaveForm: document.querySelector("#standalone-sql-save-form"),
+  standaloneSqlSaveName: document.querySelector("#standalone-sql-save-name"),
+  standaloneSqlPanes: document.querySelector("#standalone-sql-panes"),
+  standaloneSqlEditorToggle: document.querySelector("#show-standalone-sql-editor"),
+  standaloneSqlResultToggle: document.querySelector("#show-standalone-sql-result"),
+  standaloneSqlEditorContent: document.querySelector("#standalone-sql-editor-content"),
+  standaloneSqlInput: document.querySelector("#standalone-sql-input"),
+  standaloneSqlCopy: document.querySelector("#copy-standalone-sql"),
+  standaloneSqlClear: document.querySelector("#clear-standalone-sql"),
+  standaloneSqlCancel: document.querySelector("#cancel-standalone-sql"),
+  standaloneSqlRun: document.querySelector("#run-standalone-sql"),
+  standaloneSqlResultStatus: document.querySelector("#standalone-sql-result-status"),
+  standaloneSqlResult: document.querySelector("#standalone-sql-result"),
+  standaloneSqlWriteDialog: document.querySelector("#standalone-sql-write-dialog"),
+  standaloneSqlWriteAck: document.querySelector("#standalone-sql-write-ack"),
+  standaloneSqlWriteConfirm: document.querySelector("#confirm-standalone-sql-write"),
   databaseDriftBanner: document.querySelector("#database-drift-banner"),
   databaseDriftMessage: document.querySelector("#database-drift-message"),
   objectIconMenu: document.querySelector("#object-icon-menu"),
@@ -300,6 +333,32 @@ let sqlConsoleState = {
   error: null,
   requestId: 0
 };
+let standaloneSqlState = {
+  open: false,
+  writeMode: false,
+  running: false,
+  runTimer: null,
+  paneTimer: null,
+  viewTimer: null,
+  activeViewId: "orders",
+  activePane: "editor",
+  views: [
+    { id: "orders", sql: "SELECT\n    order_id,\n    customer_name,\n    status,\n    order_total\nFROM bookstore.order_summary\nORDER BY ordered_at DESC\nLIMIT 25;", result: null, activePane: "editor" },
+    { id: "customers", sql: "SELECT\n    customer_id,\n    display_name,\n    email\nFROM bookstore.customers\nWHERE email ILIKE '%@example.com'\nORDER BY display_name;", result: null, activePane: "editor" },
+    { id: "scratchpad", sql: "", result: null, activePane: "editor" }
+  ],
+  historyCollapsed: true,
+  savedQueries: [
+    { label: "Daily order totals", sql: 'SELECT date_trunc(\'day\', created_at) AS day, sum(total)\nFROM "public"."orders"\nGROUP BY 1\nORDER BY 1 DESC;' },
+    { label: "Unfulfilled orders", sql: 'SELECT id, customer_id, status\nFROM "public"."orders"\nWHERE status IN (\'paid\', \'processing\')\nORDER BY created_at;' }
+  ],
+  targetKey: "",
+  history: [
+    { kind: "Read", label: "Recent orders", meta: "12 rows · 31 ms", sql: 'SELECT id, status, total\nFROM "public"."orders"\nORDER BY created_at DESC\nLIMIT 12;' },
+    { kind: "Write", label: "Archive stale carts", meta: "4 rows · 18 ms", sql: 'UPDATE "public"."carts"\nSET archived = true\nWHERE updated_at < now() - interval \'30 days\';' },
+    { kind: "Error", label: "Missing relation", meta: "42P01 · just now", sql: "SELECT * FROM missing_relation;" }
+  ]
+};
 let postgresState = {
   token: null,
   profiles: [],
@@ -360,6 +419,262 @@ const tableCreationDemo = window.SchemiiShared.createOnboardingDemo({
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+function standaloneSqlTarget() {
+  const selected = currentPostgresProfile();
+  if (selected && postgresState.namespace) {
+    return { profile: selected.name || selected.id, database: selected.dbname, namespace: postgresState.namespace };
+  }
+  const source = schema.postgres;
+  if (source?.sourceProfileId && source.database && source.namespace) {
+    const linked = postgresState.profiles.find(profile => profile.id === source.sourceProfileId);
+    return { profile: linked?.name || source.sourceProfileId, database: source.database, namespace: source.namespace };
+  }
+  return { profile: "Not selected", database: "Not selected", namespace: "Not selected" };
+}
+
+function standaloneSqlTargetLabel() {
+  const target = standaloneSqlTarget();
+  if (target.database === "Not selected") return "No PostgreSQL target selected";
+  return `${target.profile} · ${target.database}.${target.namespace}`;
+}
+
+function setStandaloneSqlWriteMode(enabled) {
+  standaloneSqlState.writeMode = enabled;
+  elements.standaloneSqlWriteMode.checked = enabled;
+  elements.standaloneSqlWriteWarning.hidden = !enabled;
+  elements.standaloneSqlWriteTarget.textContent = standaloneSqlTargetLabel();
+}
+
+function syncStandaloneSqlTarget(resetWriteMode = false) {
+  const target = standaloneSqlTarget();
+  const targetKey = `${target.profile}\u0000${target.database}\u0000${target.namespace}`;
+  const targetChanged = standaloneSqlState.targetKey && standaloneSqlState.targetKey !== targetKey;
+  standaloneSqlState.targetKey = targetKey;
+  elements.standaloneSqlProfile.textContent = target.profile;
+  elements.standaloneSqlDatabase.textContent = target.database;
+  elements.standaloneSqlNamespace.textContent = target.namespace;
+  elements.standaloneSqlWriteTarget.textContent = standaloneSqlTargetLabel();
+  if (resetWriteMode || (targetChanged && standaloneSqlState.open)) setStandaloneSqlWriteMode(false);
+}
+
+function renderStandaloneSqlHistory() {
+  const buttons = [...elements.standaloneSqlHistory.querySelectorAll(":scope > button")];
+  buttons.forEach((button, index) => {
+    const item = standaloneSqlState.history[index];
+    button.hidden = !item;
+    if (!item) return;
+    button.innerHTML = `<span>${escapeHtml(item.kind)}</span><strong>${escapeHtml(item.label)}</strong><small>${escapeHtml(item.meta)}</small>`;
+    button.dataset.sql = item.sql;
+  });
+  elements.standaloneSqlSavedList.innerHTML = standaloneSqlState.savedQueries.map((item, index) => `<button type="button" data-saved-sql="${index}" data-sql="${escapeHtml(item.sql)}"><span>Saved</span><strong>${escapeHtml(item.label)}</strong></button>`).join("");
+}
+
+function setStandaloneSqlHistoryCollapsed(collapsed) {
+  standaloneSqlState.historyCollapsed = collapsed;
+  elements.standaloneSqlWorkspace.classList.toggle("history-collapsed", collapsed);
+  elements.standaloneSqlHistoryToggle.setAttribute("aria-expanded", String(!collapsed));
+  elements.standaloneSqlHistoryToggle.setAttribute("aria-label", collapsed ? "Open saved queries" : "Close saved queries");
+}
+
+function openStandaloneSqlSaveDialog() {
+  if (!elements.standaloneSqlInput.value.trim()) return showToast("Enter a query before saving");
+  elements.standaloneSqlSaveName.value = "";
+  elements.standaloneSqlSaveDialog.showModal();
+  elements.standaloneSqlSaveName.focus();
+}
+
+function setStandaloneSqlResult(status, content, state = "") {
+  elements.standaloneSqlResultStatus.textContent = status;
+  elements.standaloneSqlResultStatus.className = `standalone-sql-result-status ${state}`.trim();
+  elements.standaloneSqlResult.innerHTML = content;
+  const viewState = standaloneSqlState.views.find(view => view.id === standaloneSqlState.activeViewId);
+  if (viewState) viewState.result = { status, content, state };
+}
+
+function setStandaloneSqlActivePane(pane, focus = false) {
+  const activePane = pane === "result" ? "result" : "editor";
+  const previousPane = elements.standaloneSqlPanes.dataset.activePane;
+  const transitioning = Boolean(previousPane && previousPane !== activePane);
+  clearTimeout(standaloneSqlState.paneTimer);
+  standaloneSqlState.activePane = activePane;
+  const viewState = standaloneSqlState.views.find(view => view.id === standaloneSqlState.activeViewId);
+  if (viewState) viewState.activePane = activePane;
+  if (transitioning) {
+    elements.standaloneSqlEditorContent.hidden = false;
+    elements.standaloneSqlResult.hidden = false;
+    void elements.standaloneSqlPanes.offsetHeight;
+  }
+  elements.standaloneSqlPanes.dataset.activePane = activePane;
+  if (transitioning) {
+    standaloneSqlState.paneTimer = setTimeout(() => {
+      if (elements.standaloneSqlPanes.dataset.activePane !== activePane) return;
+      elements.standaloneSqlEditorContent.hidden = activePane !== "editor";
+      elements.standaloneSqlResult.hidden = activePane !== "result";
+    }, 380);
+  } else {
+    elements.standaloneSqlEditorContent.hidden = activePane !== "editor";
+    elements.standaloneSqlResult.hidden = activePane !== "result";
+  }
+  elements.standaloneSqlEditorToggle.setAttribute("aria-expanded", String(activePane === "editor"));
+  elements.standaloneSqlResultToggle.setAttribute("aria-expanded", String(activePane === "result"));
+  if (focus && activePane === "editor") requestAnimationFrame(() => elements.standaloneSqlInput.focus());
+}
+
+function toggleStandaloneSqlActivePane(pane) {
+  const nextPane = standaloneSqlState.activePane === pane ? (pane === "editor" ? "result" : "editor") : pane;
+  setStandaloneSqlActivePane(nextPane, nextPane === "editor");
+}
+
+function standaloneSqlEmpty(title, detail, error = false) {
+  return `<div class="standalone-sql-empty${error ? " error" : ""}"><span>${error ? "!" : "SQL"}</span><strong>${escapeHtml(title)}</strong><p>${escapeHtml(detail)}</p></div>`;
+}
+
+function currentStandaloneSqlView() {
+  return standaloneSqlState.views.find(view => view.id === standaloneSqlState.activeViewId) ?? standaloneSqlState.views[0];
+}
+
+function captureStandaloneSqlView() {
+  const viewState = currentStandaloneSqlView();
+  viewState.sql = elements.standaloneSqlInput.value;
+  viewState.activePane = standaloneSqlState.activePane;
+  viewState.result = {
+    status: elements.standaloneSqlResultStatus.textContent,
+    content: elements.standaloneSqlResult.innerHTML,
+    state: elements.standaloneSqlResultStatus.className.replace("standalone-sql-result-status", "").trim()
+  };
+}
+
+function renderStandaloneSqlView(viewState) {
+  elements.standaloneSqlView.value = viewState.id;
+  elements.standaloneSqlInput.value = viewState.sql;
+  const empty = !viewState.sql;
+  elements.standaloneSqlCopy.disabled = empty;
+  elements.standaloneSqlClear.disabled = empty;
+  if (viewState.result) {
+    setStandaloneSqlResult(viewState.result.status, viewState.result.content, viewState.result.state);
+  } else {
+    setStandaloneSqlResult("Awaiting query", standaloneSqlEmpty("Run a statement to inspect its result", "Each console view keeps its own browser-local script and result."));
+  }
+  setStandaloneSqlActivePane(viewState.activePane || "editor");
+}
+
+function switchStandaloneSqlView(viewId) {
+  const nextView = standaloneSqlState.views.find(view => view.id === viewId);
+  if (!nextView || nextView.id === standaloneSqlState.activeViewId) return;
+  cancelStandaloneSqlRun();
+  captureStandaloneSqlView();
+  clearTimeout(standaloneSqlState.viewTimer);
+  elements.standaloneSqlView.disabled = true;
+  elements.standaloneSqlPanes.classList.remove("sql-view-enter-right", "sql-view-positioning");
+  elements.standaloneSqlPanes.classList.add("sql-view-exit-left");
+  standaloneSqlState.viewTimer = setTimeout(() => {
+    standaloneSqlState.activeViewId = nextView.id;
+    elements.standaloneSqlPanes.classList.add("sql-view-positioning", "sql-view-enter-right");
+    elements.standaloneSqlPanes.classList.remove("sql-view-exit-left");
+    renderStandaloneSqlView(nextView);
+    void elements.standaloneSqlPanes.offsetWidth;
+    elements.standaloneSqlPanes.classList.remove("sql-view-positioning");
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      elements.standaloneSqlPanes.classList.remove("sql-view-enter-right");
+      elements.standaloneSqlView.disabled = false;
+    }));
+  }, 240);
+}
+
+function isStandaloneSqlWrite(sql) {
+  return /\b(?:INSERT|UPDATE|DELETE|MERGE|CREATE|ALTER|DROP|TRUNCATE|GRANT|REVOKE|COMMENT|REINDEX|VACUUM|ANALYZE|CALL|DO|REFRESH)\b/i.test(sql);
+}
+
+function finishStandaloneSqlRun(sql) {
+  standaloneSqlState.running = false;
+  standaloneSqlState.runTimer = null;
+  elements.standaloneSqlRun.disabled = false;
+  elements.standaloneSqlCancel.disabled = true;
+  const elapsed = `${18 + sql.length % 29} ms`;
+  if (/missing_relation|syntax_error/i.test(sql)) {
+    setStandaloneSqlResult("PostgreSQL error", standaloneSqlEmpty("relation does not exist", 'ERROR 42P01: relation "missing_relation" does not exist\nLINE 1: SELECT * FROM missing_relation;', true), "error");
+    standaloneSqlState.history.unshift({ kind: "Error", label: "Missing relation", meta: `42P01 · ${elapsed}`, sql });
+  } else if (isStandaloneSqlWrite(sql)) {
+    const command = sql.trim().match(/^[A-Za-z]+/)?.[0]?.toUpperCase() || "COMMAND";
+    setStandaloneSqlResult("Command complete", `<div class="standalone-sql-command"><span>Write preview · no database call</span><strong>${escapeHtml(command)} 4</strong><dl><dt>Target</dt><dd>${escapeHtml(standaloneSqlTargetLabel())}</dd><dt>Duration</dt><dd>${elapsed}</dd><dt>Transaction</dt><dd>synthetic prototype</dd></dl></div>`, "ready");
+    standaloneSqlState.history.unshift({ kind: "Write", label: `${command} preview`, meta: `4 rows · ${elapsed}`, sql });
+  } else {
+    setStandaloneSqlResult("12 rows", `<table class="standalone-sql-table"><thead><tr><th>id</th><th>status</th><th>customer</th><th>total</th><th>created_at</th></tr></thead><tbody>${[
+      ["ord_1042", "paid", "Mira Chen", "$184.00", "2026-08-11 09:42"],
+      ["ord_1041", "processing", "Noah Reed", "$72.50", "2026-08-11 09:31"],
+      ["ord_1040", "paid", "Avery Stone", "$219.90", "2026-08-11 08:57"],
+      ["ord_1039", "refunded", "Inez Diaz", "$48.00", "2026-08-10 18:14"],
+      ["ord_1038", "paid", "Sam Okafor", "$96.25", "2026-08-10 17:49"]
+    ].map(row => `<tr>${row.map(value => `<td>${escapeHtml(value)}</td>`).join("")}</tr>`).join("")}</tbody><caption>Showing 5 of 12 synthetic rows · ${elapsed}</caption></table>`, "ready");
+    standaloneSqlState.history.unshift({ kind: "Read", label: "Query result", meta: `12 rows · ${elapsed}`, sql });
+  }
+  standaloneSqlState.history = standaloneSqlState.history.slice(0, 3);
+  renderStandaloneSqlHistory();
+}
+
+function runStandaloneSql() {
+  const sql = elements.standaloneSqlInput.value.trim();
+  if (!sql) {
+    setStandaloneSqlResult("Empty query", standaloneSqlEmpty("Nothing to preview", "Enter a PostgreSQL statement in the editor, then run the local prototype."));
+    setStandaloneSqlActivePane("result");
+    return;
+  }
+  if (isStandaloneSqlWrite(sql) && !standaloneSqlState.writeMode) {
+    setStandaloneSqlResult("Write blocked", standaloneSqlEmpty("Write mode is off", "This statement can change data or schema. Deliberately enable Write mode before previewing it.", true), "error");
+    setStandaloneSqlActivePane("result");
+    return;
+  }
+  clearTimeout(standaloneSqlState.runTimer);
+  standaloneSqlState.running = true;
+  elements.standaloneSqlRun.disabled = true;
+  elements.standaloneSqlCancel.disabled = false;
+  setStandaloneSqlResult("Running", '<div class="standalone-sql-loading"><i></i><span>Preparing a synthetic PostgreSQL response...</span></div>', "loading");
+  setStandaloneSqlActivePane("result");
+  standaloneSqlState.runTimer = setTimeout(() => finishStandaloneSqlRun(sql), 650);
+}
+
+function cancelStandaloneSqlRun() {
+  if (!standaloneSqlState.running) return;
+  clearTimeout(standaloneSqlState.runTimer);
+  standaloneSqlState.running = false;
+  standaloneSqlState.runTimer = null;
+  elements.standaloneSqlRun.disabled = false;
+  elements.standaloneSqlCancel.disabled = true;
+  setStandaloneSqlResult("Cancelled", standaloneSqlEmpty("Preview cancelled", "No request was sent and no database state changed."));
+}
+
+function openStandaloneSqlWorkspace() {
+  syncStandaloneSqlTarget(true);
+  renderStandaloneSqlHistory();
+  renderStandaloneSqlView(currentStandaloneSqlView());
+  setStandaloneSqlHistoryCollapsed(true);
+  standaloneSqlState.open = true;
+  updateHistoryControls();
+  elements.standaloneSqlWorkspace.hidden = false;
+  elements.standaloneSqlWorkspace.inert = false;
+  elements.standaloneSqlWorkspace.setAttribute("aria-hidden", "false");
+  elements.mainLayout.classList.add("sql-workspace-open");
+  elements.standaloneSqlButton.classList.add("active");
+  elements.standaloneSqlButton.setAttribute("aria-expanded", "true");
+  requestAnimationFrame(() => elements.standaloneSqlWorkspace.classList.add("open"));
+  elements.standaloneSqlInput.focus();
+}
+
+function closeStandaloneSqlWorkspace() {
+  cancelStandaloneSqlRun();
+  setStandaloneSqlWriteMode(false);
+  standaloneSqlState.open = false;
+  updateHistoryControls();
+  elements.standaloneSqlWorkspace.classList.remove("open");
+  elements.mainLayout.classList.remove("sql-workspace-open");
+  elements.standaloneSqlButton.classList.remove("active");
+  elements.standaloneSqlButton.setAttribute("aria-expanded", "false");
+  elements.standaloneSqlWorkspace.inert = true;
+  elements.standaloneSqlWorkspace.setAttribute("aria-hidden", "true");
+  setTimeout(() => { if (!standaloneSqlState.open) elements.standaloneSqlWorkspace.hidden = true; }, 270);
+  elements.standaloneSqlButton.focus();
 }
 
 const RELATIONSHIP_DEMO_STEPS = [
@@ -1544,6 +1859,11 @@ function captureHistoryState() {
 }
 
 function updateHistoryControls() {
+  if (standaloneSqlState.open) {
+    elements.undoButton.disabled = false;
+    elements.redoButton.disabled = false;
+    return;
+  }
   elements.undoButton.disabled = undoStack.length === 0;
   elements.redoButton.disabled = redoStack.length === 0;
 }
@@ -1580,6 +1900,12 @@ function restoreHistoryState(snapshot) {
 }
 
 function undo() {
+  if (standaloneSqlState.open) {
+    elements.standaloneSqlInput.focus();
+    document.execCommand("undo");
+    elements.standaloneSqlInput.dispatchEvent(new Event("input", { bubbles: true }));
+    return;
+  }
   const snapshot = undoStack.pop();
   if (!snapshot) return showToast("Nothing to undo");
   redoStack.push(captureHistoryState());
@@ -1589,6 +1915,12 @@ function undo() {
 }
 
 function redo() {
+  if (standaloneSqlState.open) {
+    elements.standaloneSqlInput.focus();
+    document.execCommand("redo");
+    elements.standaloneSqlInput.dispatchEvent(new Event("input", { bubbles: true }));
+    return;
+  }
   const snapshot = redoStack.pop();
   if (!snapshot) return showToast("Nothing to redo");
   undoStack.push(captureHistoryState());
@@ -3582,6 +3914,7 @@ function updatePostgresControls() {
   elements.postgresImportButton.textContent = designMatchesPostgresTarget() ? "Refresh design" : "Import";
   elements.applyMigrationButton.disabled = postgresState.busy || !postgresState.plan;
   document.querySelectorAll("[data-postgres-action]").forEach(button => { button.disabled = postgresState.busy; });
+  syncStandaloneSqlTarget();
 }
 
 function setPostgresBusy(busy, message = "") {
@@ -4634,7 +4967,12 @@ const aiAssistant = window.SchemiiShared.createAiAssistant({
   labels: { trigger: "AI schema assistant", prompt: "Ask about this schema...", newChatCopy: "Proposals will use the currently active design." },
   onOpenChange: open => {
     elements.mainLayout.classList.toggle("ai-open", open);
-    for (const background of [elements.toolRail, elements.workspace, elements.inspector]) {
+    for (const background of [elements.toolRail, elements.workspace, elements.inspector, elements.standaloneSqlWorkspace]) {
+      if (background === elements.standaloneSqlWorkspace && !standaloneSqlState.open) {
+        background.inert = true;
+        background.setAttribute("aria-hidden", "true");
+        continue;
+      }
       background.inert = open;
       background.setAttribute("aria-hidden", String(open));
     }
@@ -5427,6 +5765,90 @@ elements.schemaLibrary.addEventListener("click", event => {
   if (button.dataset.libraryAction === "delete") deleteSavedSchema(button.dataset.schemaId);
 });
 
+elements.standaloneSqlButton.addEventListener("click", () => {
+  if (standaloneSqlState.open) closeStandaloneSqlWorkspace(); else openStandaloneSqlWorkspace();
+});
+elements.standaloneSqlClose.addEventListener("click", closeStandaloneSqlWorkspace);
+elements.standaloneSqlHistory.addEventListener("click", event => {
+  const item = event.target.closest("button[data-sql]");
+  if (!item) return;
+  elements.standaloneSqlInput.value = item.dataset.sql;
+  currentStandaloneSqlView().sql = item.dataset.sql;
+  elements.standaloneSqlCopy.disabled = false;
+  elements.standaloneSqlClear.disabled = false;
+  setStandaloneSqlActivePane("editor", true);
+});
+elements.standaloneSqlHistoryToggle.addEventListener("click", () => setStandaloneSqlHistoryCollapsed(!standaloneSqlState.historyCollapsed));
+elements.standaloneSqlHistoryClose.addEventListener("click", () => setStandaloneSqlHistoryCollapsed(true));
+elements.standaloneSqlSave.addEventListener("click", openStandaloneSqlSaveDialog);
+elements.standaloneSqlSaveSidebar.addEventListener("click", openStandaloneSqlSaveDialog);
+document.querySelector("#cancel-standalone-sql-save").addEventListener("click", () => elements.standaloneSqlSaveDialog.close());
+elements.standaloneSqlSaveForm.addEventListener("submit", event => {
+  event.preventDefault();
+  const label = elements.standaloneSqlSaveName.value.trim();
+  const sql = elements.standaloneSqlInput.value.trim();
+  if (!label || !sql) return;
+  standaloneSqlState.savedQueries.unshift({ label, sql });
+  renderStandaloneSqlHistory();
+  setStandaloneSqlHistoryCollapsed(false);
+  elements.standaloneSqlSaveDialog.close();
+  showToast("Query saved for this session");
+});
+elements.standaloneSqlEditorToggle.addEventListener("click", () => toggleStandaloneSqlActivePane("editor"));
+elements.standaloneSqlResultToggle.addEventListener("click", () => toggleStandaloneSqlActivePane("result"));
+elements.standaloneSqlInput.addEventListener("input", () => {
+  const empty = !elements.standaloneSqlInput.value;
+  currentStandaloneSqlView().sql = elements.standaloneSqlInput.value;
+  elements.standaloneSqlCopy.disabled = empty;
+  elements.standaloneSqlClear.disabled = empty;
+});
+elements.standaloneSqlInput.addEventListener("keydown", event => {
+  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+    event.preventDefault();
+    runStandaloneSql();
+  }
+});
+elements.standaloneSqlCopy.addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(elements.standaloneSqlInput.value);
+    showToast("SQL copied");
+  } catch {
+    showToast("Could not copy SQL");
+  }
+});
+elements.standaloneSqlClear.addEventListener("click", () => {
+  cancelStandaloneSqlRun();
+  elements.standaloneSqlInput.value = "";
+  currentStandaloneSqlView().sql = "";
+  elements.standaloneSqlCopy.disabled = true;
+  elements.standaloneSqlClear.disabled = true;
+  setStandaloneSqlResult("Awaiting query", standaloneSqlEmpty("Run a statement to inspect its result", "This prototype uses browser-local sample states. It does not contact PostgreSQL."));
+  elements.standaloneSqlInput.focus();
+});
+elements.standaloneSqlRun.addEventListener("click", runStandaloneSql);
+elements.standaloneSqlCancel.addEventListener("click", cancelStandaloneSqlRun);
+elements.standaloneSqlView.addEventListener("change", event => switchStandaloneSqlView(event.target.value));
+elements.standaloneSqlWriteMode.addEventListener("change", () => {
+  if (!elements.standaloneSqlWriteMode.checked) return setStandaloneSqlWriteMode(false);
+  elements.standaloneSqlWriteMode.checked = false;
+  elements.standaloneSqlWriteAck.checked = false;
+  elements.standaloneSqlWriteConfirm.disabled = true;
+  elements.standaloneSqlWriteDialog.showModal();
+});
+elements.standaloneSqlWriteAck.addEventListener("change", () => {
+  elements.standaloneSqlWriteConfirm.disabled = !elements.standaloneSqlWriteAck.checked;
+});
+document.querySelector("#cancel-standalone-sql-write").addEventListener("click", () => elements.standaloneSqlWriteDialog.close());
+elements.standaloneSqlWriteConfirm.addEventListener("click", () => {
+  if (!elements.standaloneSqlWriteAck.checked) return;
+  setStandaloneSqlWriteMode(true);
+  elements.standaloneSqlWriteDialog.close();
+});
+elements.standaloneSqlWriteDialog.addEventListener("close", () => {
+  elements.standaloneSqlWriteAck.checked = false;
+  elements.standaloneSqlWriteConfirm.disabled = true;
+});
+
 elements.postgresButton.addEventListener("click", async () => {
   renderPostgresCatalogSummary();
   elements.postgresDialog.showModal();
@@ -5658,6 +6080,7 @@ window.addEventListener("keydown", event => {
     hideTooltip();
     closeObjectIconMenu();
     if (document.querySelector("dialog[open]")) return;
+    if (standaloneSqlState.open) return closeStandaloneSqlWorkspace();
     setRelationMode(false);
     closeInspectorPane();
   }
