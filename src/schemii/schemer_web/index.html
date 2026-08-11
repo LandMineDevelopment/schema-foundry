@@ -12,7 +12,7 @@
       <header class="topbar">
         <div class="topbar-leading"><div class="brand"><div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div><div><strong>Schemer</strong><span class="brand-subtitle">PostgreSQL dashboard studio</span></div></div><div class="mobile-dashboard-nav"><select id="mobile-dashboard-select" aria-label="Current dashboard"></select><button id="mobile-new-dashboard" type="button" aria-label="Create dashboard">+</button></div></div>
         <div class="dashboard-title"><span class="status-dot" aria-hidden="true"></span><strong id="top-dashboard-title">Loading dashboard</strong><span id="save-status">Loading...</span></div>
-        <div class="top-actions"><button class="button button-ghost" id="connections-button" type="button">Data source</button><button class="button button-ghost" id="edit-mode-button" type="button">Edit dashboard</button><button class="button button-primary" id="add-widget-button" type="button" hidden>+ Widget</button><details class="dashboard-menu" id="dashboard-menu"><summary class="button button-ghost" aria-label="Dashboard actions">...</summary><div><button id="rename-dashboard" type="button">Rename</button><button id="duplicate-dashboard" type="button">Duplicate</button><button id="archive-dashboard" type="button">Archive</button><button class="danger" id="delete-dashboard" type="button">Delete</button></div></details></div>
+        <div class="top-actions"><button class="button button-ghost" id="connections-button" type="button">Data source</button><button class="button button-ghost" id="edit-mode-button" type="button">Edit dashboard</button><button class="button button-primary" id="add-widget-button" type="button" hidden>+ Widget</button><details class="dashboard-menu shared-menu" id="dashboard-menu"><summary class="button button-ghost" aria-label="Dashboard actions">...</summary><div class="shared-menu-surface"><button id="rename-dashboard" type="button">Rename</button><button id="duplicate-dashboard" type="button">Duplicate</button><button id="archive-dashboard" type="button">Archive</button><button class="danger" id="delete-dashboard" type="button">Delete</button></div></details></div>
       </header>
 
       <main class="schemer-layout">
@@ -64,18 +64,18 @@
       </main>
     </div>
 
-    <dialog id="connections-dialog">
-      <div class="dialog-head"><div><span class="eyebrow">Shared PostgreSQL service</span><h2>Data sources</h2><p>Connections saved here are immediately available in Schemii.</p></div><button id="close-connections" type="button" aria-label="Close">x</button></div>
+    <dialog id="connections-dialog" class="shared-dialog">
+      <div class="dialog-head shared-dialog-head"><div><span class="eyebrow">Shared PostgreSQL service</span><h2>Data sources</h2><p>Connections saved here are immediately available in Schemii.</p></div><button id="close-connections" type="button" aria-label="Close">x</button></div>
       <div class="connection-layout">
         <section><div class="section-title"><span>Saved connections</span><button class="button button-ghost" id="new-connection" type="button">+ New</button></div><div class="connection-list" id="connection-list"></div></section>
-        <form id="connection-form">
+        <form id="connection-form" class="shared-form">
           <input id="profile-id" type="hidden" />
           <label>Name<input id="profile-name" required maxlength="128" value="Analytics database" /></label>
-          <div class="field-pair"><label>Host<input id="profile-host" required value="127.0.0.1" /></label><label>Port<input id="profile-port" required type="number" min="1" max="65535" value="5432" /></label></div>
-          <div class="field-pair"><label>Database<input id="profile-database" required /></label><label>User<input id="profile-user" required /></label></div>
+          <div class="field-pair shared-field-pair"><label>Host<input id="profile-host" required value="127.0.0.1" /></label><label>Port<input id="profile-port" required type="number" min="1" max="65535" value="5432" /></label></div>
+          <div class="field-pair shared-field-pair"><label>Database<input id="profile-database" required /></label><label>User<input id="profile-user" required /></label></div>
           <label>Password<input id="profile-password" type="password" autocomplete="new-password" /><small>Leave empty while editing to keep the stored password.</small></label>
-          <div class="field-pair"><label>SSL mode<select id="profile-sslmode"><option>prefer</option><option>require</option><option>verify-ca</option><option>verify-full</option><option>disable</option><option>allow</option></select></label><label>Timeout<input id="profile-timeout" type="number" min="1" max="120" value="10" /></label></div>
-          <p class="form-status" id="connection-status"></p><div class="form-actions"><button class="button button-ghost" id="test-connection" type="button">Test</button><button class="button button-primary" type="submit">Save connection</button></div>
+          <div class="field-pair shared-field-pair"><label>SSL mode<select id="profile-sslmode"><option>prefer</option><option>require</option><option>verify-ca</option><option>verify-full</option><option>disable</option><option>allow</option></select></label><label>Timeout<input id="profile-timeout" type="number" min="1" max="120" value="10" /></label></div>
+          <p class="form-status shared-control-status" id="connection-status"></p><div class="form-actions shared-form-actions"><button class="button button-ghost" id="test-connection" type="button">Test</button><button class="button button-primary" type="submit">Save connection</button></div>
         </form>
       </div>
     </dialog>
@@ -102,6 +102,6 @@
     </dialog>
 
     <div class="app-tooltip" id="app-tooltip" role="tooltip" hidden></div>
-    <script src="/shared/postgres-client.js"></script><script src="/shared/ui-components.js"></script><script src="app.js"></script>
+    <script src="/shared/session-client.js"></script><script src="/shared/postgres-client.js"></script><script src="/shared/profile-manager.js"></script><script src="/shared/ui-components.js"></script><script src="app.js"></script>
   </body>
 </html>

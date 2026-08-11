@@ -109,9 +109,25 @@ let detailRequestToken = null;
 let detailContext = null;
 let detailReturnFocus = null;
 let detailSearchTimer = null;
-const postgres = window.SchemiiShared.createPostgresClient({
+const sessionClient = window.SchemiiShared.createSessionClient({
   getToken: () => sessionToken,
   setToken: token => { sessionToken = token; }
+});
+const postgres = window.SchemiiShared.createPostgresClient({ sessionClient });
+const profileRepository = window.SchemiiShared.createProfileRepository({ postgresClient: postgres });
+const profileForm = window.SchemiiShared.createProfileForm({
+  fields: {
+    id: document.querySelector("#profile-id"),
+    name: document.querySelector("#profile-name"),
+    host: document.querySelector("#profile-host"),
+    port: document.querySelector("#profile-port"),
+    database: document.querySelector("#profile-database"),
+    user: document.querySelector("#profile-user"),
+    password: document.querySelector("#profile-password"),
+    sslmode: document.querySelector("#profile-sslmode"),
+    timeout: document.querySelector("#profile-timeout")
+  },
+  defaults: { name: "Analytics database" }
 });
 const tooltipController = window.SchemiiShared.createTooltipController({ element: elements.tooltip });
 
@@ -145,6 +161,7 @@ replaceWithSharedIcon("refresh-button", { icon: "refresh", label: "Refresh dashb
 window.SchemiiShared.decorateIconControl(document.querySelector("#dashboard-menu > summary"), {
   icon: "more", label: "Dashboard actions", tooltip: "Dashboard actions", placement: "bottom",
 });
+window.SchemiiShared.installDetailsMenu(document.querySelector("#dashboard-menu"));
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -166,39 +183,22 @@ function isMobileLayout() {
   return window.matchMedia("(max-width: 600px)").matches;
 }
 
-async function ensureSession() {
-  if (sessionToken) return sessionToken;
-  const response = await fetch("/api/session");
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || !payload.token) throw new Error(payload.error?.message || "Could not start a dashboard session");
-  sessionToken = payload.token;
-  return sessionToken;
-}
-
-async function dashboardRequest(path, options = {}, retry = true) {
-  if (typeof path !== "string" || !path.startsWith("/api/dashboards")) throw new Error("Dashboard requests must use the local Schemer API");
-  const token = await ensureSession();
-  const response = await fetch(path, {
-    ...options,
-    headers: { "Content-Type": "application/json", "X-Schemii-Token": token, ...(options.headers || {}) }
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    if (payload.error?.code === "invalid_session" && retry) {
-      sessionToken = null;
-      return dashboardRequest(path, options, false);
-    }
-    const error = new Error(payload.error?.message || "Dashboard request failed");
-    error.code = payload.error?.code;
-    error.currentRevision = payload.error?.currentRevision;
+async function dashboardRequest(path, options = {}) {
+  try {
+    return await sessionClient.json(path, options, {
+      allowPath: value => typeof value === "string" && value.startsWith("/api/dashboards"),
+      defaultMessage: "Dashboard request failed"
+    });
+  } catch (error) {
+    error.currentRevision = error.payload?.error?.currentRevision;
     throw error;
   }
-  return payload;
 }
 
 function setConnectionStatus(message, error = false) {
-  elements.connectionStatus.textContent = message;
-  elements.connectionStatus.classList.toggle("error", error);
+  window.SchemiiShared.setControlStatus(elements.connectionStatus, message, {
+    state: error ? "error" : "info",
+  });
 }
 
 function setSaveStatus(message, state = "") {
@@ -207,28 +207,11 @@ function setSaveStatus(message, state = "") {
 }
 
 function profilePayload() {
-  return {
-    name: document.querySelector("#profile-name").value.trim(),
-    host: document.querySelector("#profile-host").value.trim(),
-    port: Number(document.querySelector("#profile-port").value),
-    dbname: document.querySelector("#profile-database").value.trim(),
-    user: document.querySelector("#profile-user").value.trim(),
-    password: document.querySelector("#profile-password").value,
-    sslmode: document.querySelector("#profile-sslmode").value,
-    timeout: Number(document.querySelector("#profile-timeout").value)
-  };
+  return profileForm.read();
 }
 
 function fillProfileForm(profile = null) {
-  document.querySelector("#profile-id").value = profile?.id ?? "";
-  document.querySelector("#profile-name").value = profile?.name ?? "Analytics database";
-  document.querySelector("#profile-host").value = profile?.host ?? "127.0.0.1";
-  document.querySelector("#profile-port").value = profile?.port ?? 5432;
-  document.querySelector("#profile-database").value = profile?.dbname ?? "";
-  document.querySelector("#profile-user").value = profile?.user ?? "";
-  document.querySelector("#profile-password").value = "";
-  document.querySelector("#profile-sslmode").value = profile?.sslmode ?? "prefer";
-  document.querySelector("#profile-timeout").value = profile?.timeout ?? 10;
+  profileForm.fill(profile);
   setConnectionStatus("");
 }
 
@@ -264,8 +247,7 @@ async function loadProfiles() {
   if (profilesLoading) return profilesLoading;
   profilesLoading = (async () => {
     try {
-      const result = await postgres.request("/api/postgres/profiles");
-      profiles = result.profiles ?? [];
+      profiles = await profileRepository.list();
       if (!profiles.some(profile => profile.id === selectedProfileId)) selectedProfileId = profiles[0]?.id ?? null;
       renderProfiles();
       const selected = profiles.find(profile => profile.id === selectedProfileId);
@@ -1530,10 +1512,8 @@ async function selectProfile(profile) {
   elements.namespaceSelect.disabled = true;
   elements.namespaceSelect.replaceChildren(new Option("Loading namespaces...", ""));
   try {
-    const result = await postgres.request(`/api/postgres/profiles/${encodeURIComponent(profile.id)}/namespaces`);
-    const namespaces = result.namespaces ?? [];
-    elements.namespaceSelect.replaceChildren(...namespaces.map(namespace => new Option(namespace, namespace)));
-    elements.namespaceSelect.disabled = !namespaces.length;
+    const namespaces = await profileRepository.namespaces(profile.id);
+    window.SchemiiShared.initializeNamespaceSelect(elements.namespaceSelect, namespaces);
     elements.sourceSummary.classList.add("connected");
     elements.sourceName.textContent = profile.name;
     elements.sourceDetail.textContent = namespaces.length ? `${profile.dbname}.${namespaces[0]}` : `${profile.dbname} has no user namespaces`;
@@ -1554,13 +1534,11 @@ async function loadWidgetSourceNamespaces(profile, preferredNamespace = null) {
   elements.relationList.replaceChildren();
   elements.relationDetail.hidden = true;
   try {
-    const result = await postgres.request(`/api/postgres/profiles/${encodeURIComponent(profile.id)}/namespaces`);
+    const namespaces = await profileRepository.namespaces(profile.id);
     if (editedWidgetId !== widgetId || elements.widgetSourceProfile.value !== profile.id) return;
-    const namespaces = result.namespaces ?? [];
-    elements.widgetSourceNamespace.replaceChildren(...namespaces.map(namespace => new Option(namespace, namespace)));
-    const namespace = namespaces.includes(preferredNamespace) ? preferredNamespace : namespaces[0];
-    if (namespace) elements.widgetSourceNamespace.value = namespace;
-    elements.widgetSourceNamespace.disabled = !namespaces.length;
+    const namespace = window.SchemiiShared.initializeNamespaceSelect(elements.widgetSourceNamespace, namespaces, {
+      preferred: preferredNamespace,
+    });
     return await loadRelations(profile, namespace);
   } catch (error) {
     if (editedWidgetId !== widgetId) return;
@@ -3019,12 +2997,11 @@ document.querySelector("#new-connection").addEventListener("click", () => { sele
 elements.connectionForm.addEventListener("submit", async event => {
   event.preventDefault();
   const profileId = document.querySelector("#profile-id").value;
-  const path = profileId ? `/api/postgres/profiles/${encodeURIComponent(profileId)}` : "/api/postgres/profiles";
   setConnectionStatus("Saving connection...");
   try {
-    const profile = await postgres.request(path, { method: profileId ? "PUT" : "POST", body: JSON.stringify(profilePayload()) });
+    const profile = await profileRepository.save(profileId, profilePayload());
     selectedProfileId = profile.id;
-    document.querySelector("#profile-password").value = "";
+    profileForm.clearPassword();
     await loadProfiles();
   } catch (error) {
     setConnectionStatus(error.message, true);
@@ -3035,7 +3012,7 @@ document.querySelector("#test-connection").addEventListener("click", async () =>
   if (!profileId) return setConnectionStatus("Save the connection before testing it.", true);
   setConnectionStatus("Testing connection...");
   try {
-    const result = await postgres.request(`/api/postgres/profiles/${encodeURIComponent(profileId)}/test`, { method: "POST", body: "{}" });
+    const result = await profileRepository.test(profileId);
     setConnectionStatus(`Connected to ${result.database ?? "PostgreSQL"}.`);
   } catch (error) {
     setConnectionStatus(error.message, true);
@@ -3049,16 +3026,19 @@ elements.namespaceSelect.addEventListener("change", () => {
 });
 document.querySelector("#refresh-button").addEventListener("click", async event => {
   if (!selectedProfileId || !elements.namespaceSelect.value) return elements.dialog.showModal();
-  event.currentTarget.textContent = "Checking...";
-  try {
-    await postgres.request(`/api/postgres/profiles/${encodeURIComponent(selectedProfileId)}/fingerprint?namespace=${encodeURIComponent(elements.namespaceSelect.value)}`);
+  await window.SchemiiShared.withLoadingControl(event.currentTarget, {
+    label: "Refresh dashboard", loadingLabel: "Checking dashboard sources",
+  }, async () => {
+   try {
+    const profile = profiles.find(item => item.id === selectedProfileId);
+    if (!profile) throw new Error("Select a saved PostgreSQL connection");
+    await postgres.request(`/api/postgres/profiles/${encodeURIComponent(selectedProfileId)}/relations?database=${encodeURIComponent(profile.dbname)}&namespace=${encodeURIComponent(elements.namespaceSelect.value)}`);
     await verifyDashboardSources();
-    elements.sourceDetail.textContent = `${profiles.find(profile => profile.id === selectedProfileId)?.dbname}.${elements.namespaceSelect.value} refreshed now`;
+    elements.sourceDetail.textContent = `${profile.dbname}.${elements.namespaceSelect.value} refreshed now`;
   } catch (error) {
     elements.sourceDetail.textContent = error.message;
-  } finally {
-    event.currentTarget.textContent = "Refresh";
   }
+  });
 });
 
 elements.editModeButton.addEventListener("click", () => setEditMode(!editMode));
@@ -3342,24 +3322,7 @@ window.addEventListener("keydown", event => {
   if (!calendarClosed && detailContext) closeDetailReport();
   else if (!calendarClosed && focusedWidgetId) closeWidgetFocus();
 });
-document.addEventListener("pointerover", event => {
-  const target = event.target.closest?.("[data-tooltip]");
-  if (target && target !== tooltipController.activeTarget) tooltipController.show(target);
-});
-document.addEventListener("pointerout", event => {
-  if (!tooltipController.activeTarget || tooltipController.activeTarget.contains(event.relatedTarget)) return;
-  tooltipController.hide();
-});
-document.addEventListener("focusin", event => {
-  const target = event.target.closest?.("[data-tooltip]");
-  if (target) tooltipController.show(target);
-});
-document.addEventListener("focusout", event => {
-  if (tooltipController.activeTarget?.contains(event.relatedTarget)) return;
-  tooltipController.hide();
-});
-document.addEventListener("pointerdown", () => tooltipController.hide());
-document.addEventListener("scroll", () => tooltipController.hide(), true);
+window.SchemiiShared.installTooltipDelegation({ controller: tooltipController });
 window.addEventListener("beforeunload", () => { if (saveTimer) persistDashboard(); });
 
 Promise.all([loadDashboards(), loadProfiles()]);

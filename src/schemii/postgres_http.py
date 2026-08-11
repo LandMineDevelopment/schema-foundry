@@ -11,19 +11,33 @@ RELATION_PREVIEW_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z
 RELATION_VERIFY_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/relation/verify$")
 RELATION_QUERY_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/relation/query$")
 RELATION_DETAIL_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/relation/detail$")
+POSTGRES_PROFILE_CAPABILITY = "profiles"
+POSTGRES_CATALOG_CAPABILITY = "catalog"
+POSTGRES_SCHEMA_CAPABILITY = "schema"
+POSTGRES_RELATION_QUERY_CAPABILITY = "relation_query"
 
 
 class PostgresHttpMixin:
     """Shared profile, catalog, and read-only query routes for local apps."""
 
+    postgres_capabilities = frozenset({
+        POSTGRES_PROFILE_CAPABILITY,
+        POSTGRES_CATALOG_CAPABILITY,
+        POSTGRES_SCHEMA_CAPABILITY,
+        POSTGRES_RELATION_QUERY_CAPABILITY,
+    })
+
+    def _has_postgres_capability(self, capability: str) -> bool:
+        return capability in self.postgres_capabilities
+
     def _handle_postgres_get(self, parsed) -> bool:
         path = parsed.path
-        if path == "/api/postgres/profiles":
+        if path == "/api/postgres/profiles" and self._has_postgres_capability(POSTGRES_PROFILE_CAPABILITY):
             if self._authorize_postgres():
                 self._service_call(lambda: {"profiles": self.service.list_profiles()})
             return True
         data_match = DATA_PATH.fullmatch(path)
-        if data_match:
+        if data_match and self._has_postgres_capability(POSTGRES_SCHEMA_CAPABILITY):
             if not self._authorize_postgres():
                 return True
             query = parse_qs(parsed.query)
@@ -38,7 +52,13 @@ class PostgresHttpMixin:
             ))
             return True
         profile_match = PROFILE_PATH.fullmatch(path)
-        if profile_match and profile_match.group(2) in {"namespaces", "relations", "relation", "fingerprint"}:
+        action = profile_match.group(2) if profile_match else None
+        catalog_action = action in {"namespaces", "relations", "relation"}
+        schema_action = action == "fingerprint"
+        if profile_match and (
+            (catalog_action and self._has_postgres_capability(POSTGRES_CATALOG_CAPABILITY))
+            or (schema_action and self._has_postgres_capability(POSTGRES_SCHEMA_CAPABILITY))
+        ):
             if not self._authorize_postgres():
                 return True
             if profile_match.group(2) == "namespaces":
@@ -62,7 +82,7 @@ class PostgresHttpMixin:
         return False
 
     def _handle_postgres_post(self, path: str) -> bool:
-        if path == "/api/postgres/profiles":
+        if path == "/api/postgres/profiles" and self._has_postgres_capability(POSTGRES_PROFILE_CAPABILITY):
             if not self._authorize_postgres():
                 return True
             body = self._body_or_error()
@@ -75,6 +95,14 @@ class PostgresHttpMixin:
         relation_query_match = RELATION_QUERY_PATH.fullmatch(path)
         relation_detail_match = RELATION_DETAIL_PATH.fullmatch(path)
         profile_match = PROFILE_PATH.fullmatch(path)
+        if sql_match and not self._has_postgres_capability(POSTGRES_SCHEMA_CAPABILITY):
+            return False
+        if any((relation_preview_match, relation_verify_match, relation_query_match, relation_detail_match)) and not self._has_postgres_capability(POSTGRES_RELATION_QUERY_CAPABILITY):
+            return False
+        if profile_match and profile_match.group(2) == "test" and not self._has_postgres_capability(POSTGRES_PROFILE_CAPABILITY):
+            return False
+        if profile_match and profile_match.group(2) == "introspect" and not self._has_postgres_capability(POSTGRES_SCHEMA_CAPABILITY):
+            return False
         if not sql_match and not relation_preview_match and not relation_verify_match and not relation_query_match and not relation_detail_match and not (profile_match and profile_match.group(2) in {"test", "introspect"}):
             return False
         if not self._authorize_postgres():
@@ -115,6 +143,8 @@ class PostgresHttpMixin:
         return True
 
     def _handle_postgres_put(self, path: str) -> bool:
+        if not self._has_postgres_capability(POSTGRES_PROFILE_CAPABILITY):
+            return False
         profile_match = PROFILE_PATH.fullmatch(path)
         if not profile_match or profile_match.group(2) is not None:
             return False
@@ -126,6 +156,8 @@ class PostgresHttpMixin:
         return True
 
     def _handle_postgres_delete(self, path: str) -> bool:
+        if not self._has_postgres_capability(POSTGRES_PROFILE_CAPABILITY):
+            return False
         profile_match = PROFILE_PATH.fullmatch(path)
         if not profile_match or profile_match.group(2) is not None:
             return False

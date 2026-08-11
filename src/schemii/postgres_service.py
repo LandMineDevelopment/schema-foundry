@@ -14,16 +14,25 @@ import math
 import os
 import re
 import secrets
-import tempfile
 import threading
 import time
 from contextlib import contextmanager
-from datetime import date, datetime, time as datetime_time, timezone
-from decimal import Decimal
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
-from uuid import UUID
 
+from .atomic_json import write_json
+from .postgres_common import (
+    ConflictError,
+    NotFoundError,
+    PostgresServiceError,
+    ValidationError,
+    canonical_fingerprint,
+    quote_identifier,
+)
+from .postgres_catalog import PostgresCatalogMixin
+from .postgres_connections import PostgresConnectionMixin
+from .relation_source import RelationSourceValidationError, normalize_relation_source
 from .widget_query import (
     QueryValidationError,
     compile_detail_query,
@@ -44,25 +53,6 @@ SQL_IDENTIFIER_RE = r'(?:"(?:[^"]|"")*"|[A-Za-z_][A-Za-z0-9_$]*)'
 SQL_QUALIFIED_RE = rf'{SQL_IDENTIFIER_RE}(?:\s*\.\s*{SQL_IDENTIFIER_RE})?'
 SSL_MODES = {"disable", "allow", "prefer", "require", "verify-ca", "verify-full"}
 COLORS = ("#f4b942", "#65a9ff", "#9b82f4", "#59c894", "#ef7c8e", "#e58d4c")
-TRANSIENT_KEYS = {
-    "x", "y", "color", "fingerprint", "importedAt", "importTime", "updatedAt",
-    "profileId", "sourceProfileId", "liveOid", "layout", "timeZone",
-}
-
-
-class PostgresServiceError(Exception):
-    """Safe error suitable for direct serialization by an HTTP adapter."""
-
-    def __init__(self, status: int, code: str, message: str):
-        super().__init__(message)
-        self.status = status
-        self.code = code
-        self.message = message
-
-    def to_dict(self) -> dict[str, Any]:
-        return {"error": {"code": self.code, "message": self.message}}
-
-
 def _safe_sql_query_failure(exc: Exception) -> str:
     sqlstate = getattr(exc, "sqlstate", None)
     primary = getattr(getattr(exc, "diag", None), "message_primary", None)
@@ -70,28 +60,6 @@ def _safe_sql_query_failure(exc: Exception) -> str:
         return "Read-only SQL query failed"
     primary = " ".join(primary.split())[:500]
     return f"Read-only SQL query failed: {primary}" if primary else "Read-only SQL query failed"
-
-
-class ValidationError(PostgresServiceError):
-    def __init__(self, message: str):
-        super().__init__(400, "validation_error", message)
-
-
-class NotFoundError(PostgresServiceError):
-    def __init__(self, message: str):
-        super().__init__(404, "not_found", message)
-
-
-class ConflictError(PostgresServiceError):
-    def __init__(self, code: str, message: str):
-        super().__init__(409, code, message)
-
-
-def quote_identifier(value: str) -> str:
-    """Always quote a PostgreSQL identifier, including ordinary names."""
-    if not isinstance(value, str) or not value or "\x00" in value:
-        raise ValidationError("SQL identifier must be a non-empty string")
-    return '"' + value.replace('"', '""') + '"'
 
 
 def _quote_literal(value: str) -> str:
@@ -107,26 +75,6 @@ def _semantic_id(kind: str, *parts: Any) -> str:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def _canonical_value(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {
-            key: _canonical_value(item)
-            for key, item in sorted(value.items())
-            if key not in TRANSIENT_KEYS
-        }
-    if isinstance(value, list):
-        return [_canonical_value(item) for item in value]
-    return value
-
-
-def canonical_fingerprint(schema: dict[str, Any]) -> str:
-    """Hash semantic schema content while ignoring canvas/transient fields."""
-    canonical = json.dumps(
-        _canonical_value(schema), sort_keys=True, separators=(",", ":"), ensure_ascii=True
-    )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _top_level_semicolons(value: str) -> list[int]:
@@ -336,7 +284,7 @@ def _is_sequence_default(value: Any) -> bool:
     return isinstance(value, str) and bool(re.match(r"^\s*nextval\s*\(", value, re.I))
 
 
-class PostgresService:
+class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
     """Backend engine for PostgreSQL-backed schema profiles and changes."""
 
     def __init__(
@@ -405,23 +353,10 @@ class PostgresService:
 
     def _write_profiles(self, profiles: dict[str, dict[str, Any]]) -> None:
         self._ensure_config_dir()
-        temporary: Path | None = None
         try:
-            descriptor, name = tempfile.mkstemp(prefix=".postgres_profiles.", suffix=".tmp", dir=self.config_dir)
-            temporary = Path(name)
-            os.fchmod(descriptor, 0o600)
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                json.dump({"profiles": profiles}, handle, indent=2, sort_keys=True)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, self.profile_path)
-            os.chmod(self.profile_path, 0o600)
+            write_json(self.profile_path, {"profiles": profiles}, mode=0o600, sort_keys=True)
         except OSError as exc:
             raise PostgresServiceError(500, "profile_store_error", "Profile store could not be written") from exc
-        finally:
-            if temporary is not None:
-                temporary.unlink(missing_ok=True)
 
     @staticmethod
     def _validate_profile_id(profile_id: Any) -> str:
@@ -532,23 +467,10 @@ class PostgresService:
             history.append(entry)
             history.sort(key=lambda item: (item.get("appliedAt", ""), item.get("id", "")))
             history = history[-1000:]
-            temporary = None
             try:
-                descriptor, name = tempfile.mkstemp(prefix=".migration_history.", suffix=".tmp", dir=self.config_dir)
-                temporary = Path(name)
-                os.fchmod(descriptor, 0o600)
-                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                    json.dump(history, handle, indent=2)
-                    handle.write("\n")
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(temporary, self.history_path)
-                os.chmod(self.history_path, 0o600)
+                write_json(self.history_path, history, mode=0o600)
             except OSError as exc:
                 raise PostgresServiceError(500, "history_store_error", "Migration history could not be written") from exc
-            finally:
-                if temporary:
-                    temporary.unlink(missing_ok=True)
 
     def list_history(self, profile_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
         if profile_id is not None:
@@ -567,280 +489,15 @@ class PostgresService:
             raise NotFoundError("Profile was not found")
         return profile
 
-    def _connect(self, profile_id: str):
-        return self._connect_profile(self._profile(profile_id))
-
-    def _connect_profile(self, profile: dict[str, Any]):
-        kwargs = {
-            "host": profile["host"], "port": profile["port"], "dbname": profile["dbname"],
-            "user": profile["user"], "password": profile["password"], "sslmode": profile["sslmode"],
-            "connect_timeout": profile["timeout"], "application_name": "schemii",
-        }
-        try:
-            if self._connect_factory is not None:
-                return self._connect_factory(**kwargs)
-            import psycopg
-            from psycopg.rows import dict_row
-            return psycopg.connect(**kwargs, row_factory=dict_row)
-        except Exception as exc:
-            raise PostgresServiceError(502, "connection_failed", "PostgreSQL connection failed") from exc
-
-    @staticmethod
-    def _profile_fingerprint(profile: dict[str, Any]) -> str:
-        encoded = json.dumps(profile, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-
-    @staticmethod
-    def _close(connection: Any) -> None:
-        close = getattr(connection, "close", None)
-        if close:
-            close()
-
-    @staticmethod
-    def _execute_rows(connection: Any, query: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
-        cursor = connection.cursor()
-        try:
-            cursor.execute(query, params)
-            rows = cursor.fetchall()
-            if not rows:
-                return []
-            if isinstance(rows[0], dict):
-                return [dict(row) for row in rows]
-            names = [item.name if hasattr(item, "name") else item[0] for item in cursor.description]
-            return [dict(zip(names, row)) for row in rows]
-        finally:
-            close = getattr(cursor, "close", None)
-            if close:
-                close()
-
-    @staticmethod
-    def _execute_statement(connection: Any, query: str, params: tuple[Any, ...] = ()) -> None:
-        cursor = connection.cursor()
-        try:
-            cursor.execute(query, params)
-        finally:
-            close = getattr(cursor, "close", None)
-            if close:
-                close()
-
-    @staticmethod
-    def _json_cell(value: Any) -> Any:
-        if value is None or isinstance(value, (str, int, float, bool)):
-            return value
-        if isinstance(value, (datetime, date, datetime_time)):
-            return value.isoformat()
-        if isinstance(value, (Decimal, UUID)):
-            return str(value)
-        if isinstance(value, bytes):
-            return "\\x" + value.hex()
-        if isinstance(value, dict):
-            return {str(key): PostgresService._json_cell(item) for key, item in value.items()}
-        if isinstance(value, (list, tuple)):
-            return [PostgresService._json_cell(item) for item in value]
-        return str(value)
-
-    def test_profile(self, profile_id: str) -> dict[str, Any]:
-        connection = self._connect(profile_id)
-        try:
-            rows = self._execute_rows(connection, "SELECT current_database() AS database, version() AS version")
-            row = rows[0]
-            return {"ok": True, "database": row["database"], "serverVersion": row["version"]}
-        except PostgresServiceError:
-            raise
-        except Exception as exc:
-            raise PostgresServiceError(502, "query_failed", "PostgreSQL connection test failed") from exc
-        finally:
-            self._close(connection)
-
-    def list_namespaces(self, profile_id: str) -> list[str]:
-        connection = self._connect(profile_id)
-        try:
-            rows = self._execute_rows(connection, """
-                SELECT nspname AS namespace FROM pg_catalog.pg_namespace
-                WHERE nspname <> 'information_schema' AND nspname !~ '^pg_'
-                ORDER BY nspname
-            """)
-            return [row["namespace"] for row in rows]
-        except Exception as exc:
-            raise PostgresServiceError(502, "introspection_failed", "PostgreSQL namespaces could not be read") from exc
-        finally:
-            self._close(connection)
-
-    def list_relations(self, profile_id: str, database: str, namespace: str) -> dict[str, Any]:
-        database = self._validate_database(database)
-        namespace = self._validate_namespace(namespace)
-        connection = self._connect(profile_id)
-        try:
-            self._execute_statement(connection, "SET TRANSACTION READ ONLY")
-            current = self._execute_rows(connection, "SELECT current_database() AS database")[0]["database"]
-            if current != database:
-                raise PostgresServiceError(409, "database_changed", "The connected PostgreSQL database does not match the requested database")
-            rows = self._execute_rows(connection, """
-                SELECT c.relname AS relation_name,
-                       CASE WHEN c.relkind IN ('r', 'p') THEN 'table'
-                            WHEN c.relkind = 'v' THEN 'view'
-                            ELSE 'materialized_view' END AS relation_kind
-                FROM pg_catalog.pg_class c
-                JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-                WHERE n.nspname = %s AND c.relkind IN ('r', 'p', 'v', 'm')
-                ORDER BY relation_kind, c.relname
-            """, (namespace,))
-            return {
-                "profileId": profile_id,
-                "database": current,
-                "namespace": namespace,
-                "relations": [{"name": row["relation_name"], "kind": row["relation_kind"]} for row in rows],
-            }
-        except PostgresServiceError:
-            raise
-        except Exception as exc:
-            raise PostgresServiceError(502, "introspection_failed", "PostgreSQL relations could not be read") from exc
-        finally:
-            self._close(connection)
-
-    def inspect_relation(
-        self,
-        profile_id: str,
-        database: str,
-        namespace: str,
-        relation: str,
-        expected_kind: str | None = None,
-        expected_fingerprint: str | None = None,
-    ) -> dict[str, Any]:
-        database = self._validate_database(database)
-        namespace = self._validate_namespace(namespace)
-        relation = self._validate_relation_name(relation)
-        if expected_kind is not None and expected_kind not in {"table", "view", "materialized_view"}:
-            raise ValidationError("expectedKind must be table, view, or materialized_view")
-        if expected_fingerprint is not None and (not isinstance(expected_fingerprint, str) or not FINGERPRINT_RE.fullmatch(expected_fingerprint)):
-            raise ValidationError("expectedFingerprint must be a 64-character lowercase hexadecimal fingerprint")
-        connection = self._connect(profile_id)
-        try:
-            self._execute_statement(connection, "SET TRANSACTION READ ONLY")
-            return self._inspect_relation_connection(
-                connection, profile_id, database, namespace, relation, expected_kind, expected_fingerprint
-            )
-        except PostgresServiceError:
-            raise
-        except Exception as exc:
-            raise PostgresServiceError(502, "introspection_failed", "PostgreSQL relation metadata could not be read") from exc
-        finally:
-            self._close(connection)
-
-    def _inspect_relation_connection(
-        self,
-        connection: Any,
-        profile_id: str,
-        database: str,
-        namespace: str,
-        relation: str,
-        expected_kind: str | None,
-        expected_fingerprint: str | None,
-    ) -> dict[str, Any]:
-        current = self._execute_rows(connection, "SELECT current_database() AS database")[0]["database"]
-        if current != database:
-            raise PostgresServiceError(409, "database_changed", "The connected PostgreSQL database does not match the requested database")
-        relation_rows = self._execute_rows(connection, """
-                SELECT c.relkind AS catalog_kind,
-                       CASE WHEN c.relkind IN ('r', 'p') THEN 'table'
-                            WHEN c.relkind = 'v' THEN 'view'
-                            ELSE 'materialized_view' END AS relation_kind,
-                       CASE WHEN c.relkind IN ('v', 'm') THEN pg_catalog.pg_get_viewdef(c.oid, true) END AS view_definition
-                FROM pg_catalog.pg_class c
-                JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-                WHERE n.nspname = %s AND c.relname = %s AND c.relkind IN ('r', 'p', 'v', 'm')
-        """, (namespace, relation))
-        if not relation_rows:
-            raise NotFoundError(f"Relation {namespace}.{relation} was not found")
-        relation_row = relation_rows[0]
-        column_rows = self._execute_rows(connection, """
-                SELECT a.attname AS column_name,
-                       pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
-                       NOT a.attnotnull AS nullable,
-                       a.attnum AS ordinal,
-                       COALESCE(base_type.typcategory, attribute_type.typcategory) AS type_category,
-                       COALESCE(base_type.typname, attribute_type.typname) AS type_name
-                FROM pg_catalog.pg_class c
-                JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-                JOIN pg_catalog.pg_attribute a
-                  ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
-                JOIN pg_catalog.pg_type attribute_type ON attribute_type.oid = a.atttypid
-                LEFT JOIN pg_catalog.pg_type base_type ON base_type.oid = attribute_type.typbasetype
-                WHERE n.nspname = %s AND c.relname = %s AND c.relkind IN ('r', 'p', 'v', 'm')
-                ORDER BY a.attnum
-        """, (namespace, relation))
-        fingerprint_columns = [
-            {
-                "name": row["column_name"],
-                "type": row["data_type"],
-                "nullable": bool(row["nullable"]),
-                "ordinal": int(row["ordinal"]),
-            }
-            for row in column_rows
-        ]
-        columns = [
-            {
-                **column,
-                "suggestions": self._column_role_suggestions(
-                    column["name"], row.get("type_category"), row.get("type_name")
-                ),
-            }
-            for column, row in zip(fingerprint_columns, column_rows)
-        ]
-        descriptor = {
-            "profileId": profile_id,
-            "database": current,
-            "namespace": namespace,
-            "relation": relation,
-            "kind": relation_row["relation_kind"],
-            "columns": columns,
-        }
-        descriptor["fingerprint"] = canonical_fingerprint({
-            **descriptor, "columns": fingerprint_columns,
-            "catalogKind": relation_row["catalog_kind"],
-            "viewDefinition": relation_row.get("view_definition"),
-        })
-        if expected_kind is not None and descriptor["kind"] != expected_kind:
-            raise PostgresServiceError(409, "relation_changed", "The PostgreSQL relation kind changed; reselect the widget source")
-        if expected_fingerprint is not None and descriptor["fingerprint"] != expected_fingerprint:
-            raise PostgresServiceError(409, "relation_changed", "The PostgreSQL relation definition changed; reselect the widget source")
-        return descriptor
-
     def _validate_relation_source(self, profile_id: str, source: Any) -> tuple[str, str, str, str, str, list[dict[str, Any]] | None]:
-        identity_fields = {"profileId", "database", "namespace", "relation", "kind", "fingerprint"}
-        if not isinstance(source, dict) or set(source) not in (identity_fields, identity_fields | {"columns"}) or source.get("profileId") != profile_id:
-            raise ValidationError("source must be one exact relation identity for the requested profile")
-        database = self._validate_database(source.get("database"))
-        namespace = self._validate_namespace(source.get("namespace"))
-        relation = self._validate_relation_name(source.get("relation"))
-        kind = source.get("kind")
-        fingerprint = source.get("fingerprint")
-        if kind not in {"table", "view", "materialized_view"}:
-            raise ValidationError("source kind must be table, view, or materialized_view")
-        if not isinstance(fingerprint, str) or not FINGERPRINT_RE.fullmatch(fingerprint):
-            raise ValidationError("source fingerprint must be a 64-character lowercase hexadecimal fingerprint")
-        columns = source.get("columns")
-        if columns is not None:
-            if not isinstance(columns, list) or len(columns) > 1600:
-                raise ValidationError("source columns must be a bounded catalog snapshot")
-            names = set()
-            ordinals = set()
-            normalized_columns = []
-            for column in columns:
-                if not isinstance(column, dict) or set(column) != {"name", "type", "nullable", "ordinal"}:
-                    raise ValidationError("source column snapshot is invalid")
-                name = self._validate_relation_name(column.get("name"))
-                column_type = column.get("type")
-                ordinal = column.get("ordinal")
-                if name in names or ordinal in ordinals or not isinstance(column_type, str) or not column_type or len(column_type) > 256 or any(ord(char) < 32 or ord(char) == 127 for char in column_type) or not isinstance(column.get("nullable"), bool) or isinstance(ordinal, bool) or not isinstance(ordinal, int) or not 1 <= ordinal <= 1600:
-                    raise ValidationError("source column snapshot is invalid")
-                names.add(name)
-                ordinals.add(ordinal)
-                normalized_columns.append({key: column[key] for key in ("name", "type", "nullable", "ordinal")})
-            if [column["ordinal"] for column in normalized_columns] != sorted(ordinals):
-                raise ValidationError("source column snapshot must use ordinal order")
-            columns = normalized_columns
-        return database, namespace, relation, kind, fingerprint, columns
+        try:
+            normalized = normalize_relation_source(source, expected_profile_id=profile_id)
+        except RelationSourceValidationError as exc:
+            raise ValidationError(str(exc)) from exc
+        return (
+            normalized["database"], normalized["namespace"], normalized["relation"],
+            normalized["kind"], normalized["fingerprint"], normalized.get("columns"),
+        )
 
     def verify_relation_source(self, profile_id: str, source: Any) -> dict[str, Any]:
         database, namespace, relation, kind, fingerprint, expected_columns = self._validate_relation_source(profile_id, source)

@@ -115,7 +115,7 @@ const linkedConnection = connectionContext.schemaLibraryConnection({ postgres: {
 assert.equal(linkedConnection.type, "Docker DB");
 assert.equal(linkedConnection.identity, "Docker (docker) · app.public");
 const libraryLoader = source.slice(source.indexOf("async function loadSchemaLibraryConnections"), source.indexOf("function renderSchemaLibrary"));
-assert.match(libraryLoader, /\/api\/postgres\/profiles/, "schema library must load redacted saved-profile metadata");
+assert.match(libraryLoader, /postgresProfileRepository\.list\(\)/, "schema library must load redacted saved-profile metadata through the shared repository");
 assert.doesNotMatch(libraryLoader, /namespaces|password/, "opening the schema library must not contact PostgreSQL or expose credentials");
 
 assert.match(source, /if \(!confirm\(`Confirm action:/, "write actions must require explicit confirmation");
@@ -123,7 +123,7 @@ assert.match(source, /elements\.aiSqlPolicy\.value === "ask" && !confirm\(/, "as
 assert.match(source, /elements\.aiSqlPolicy\.value === "allow-session" && aiState\.sqlPolicyDeliberatelySelected/, "session SQL must require a deliberate user setting");
 assert.match(source, /context\.accessLevel === "data" && elements\.aiAccessSelect\.value === "data"/, "SQL actions must require both captured and current data access");
 assert.match(source, /context\.accessLevel !== "data" \|\| elements\.aiAccessSelect\.value !== "data"/, "query execution must reject stale data access");
-assert.match(source, /elements\.postgresProfilePassword\.value = ""/, "connection proposals must clear the password field");
+assert.match(source, /postgresProfileForm\.clearPassword\(\)|postgresProfileForm\.fill\(profile\)/, "connection workflows must clear the password field through the shared form contract");
 const navigationHandler = source.slice(source.indexOf("async function confirmAiNavigationAction"), source.indexOf("function detailAiActionError"));
 assert.match(navigationHandler, /if \(!confirm\(`Create and open local project/, "project creation must require confirmation");
 assert.match(navigationHandler, /if \(!confirm\(`Open local project/, "project opening must require confirmation");
@@ -133,8 +133,8 @@ assert.match(navigationHandler, /postgresState\.namespaces\.includes\(requestedN
 assert.match(navigationHandler, /openSchema\(validated\.record\.id, \{ fit: false \}\)/, "agent project opening must preserve the saved viewport");
 const authUi = source.slice(source.indexOf("function buildAiAuthForm"), source.indexOf("function loadAiStatus"));
 assert.doesNotMatch(authUi, /localStorage|sessionStorage/, "provider credentials must not use browser storage");
-assert.match(source, /path\.startsWith\("\/api\/ai\/"\)/, "AI requests must be restricted to the local API");
-assert.doesNotMatch(source.slice(source.indexOf("async function aiRequest"), source.indexOf("async function checkPostgresDrift")), /fetch\((?!path|"\/api\/session")/, "AI request code must not fetch external URLs");
+assert.match(source, /value\.startsWith\("\/api\/ai\/"\)/, "AI requests must be restricted to the local API");
+assert.doesNotMatch(source.slice(source.indexOf("function aiRequest"), source.indexOf("async function checkPostgresDrift")), /fetch\((?!path|"\/api\/session")/, "AI request code must not fetch external URLs");
 const targetResolverStart = source.indexOf("function currentAiPostgresTarget");
 const targetResolverEnd = source.indexOf("async function executeAiReadQuery", targetResolverStart);
 const targetContext = vm.createContext({

@@ -41,20 +41,20 @@
           <button class="button button-ghost top-action-icon" id="import-sql-button" type="button" data-tooltip="Upload SQL" data-tooltip-placement="bottom" aria-label="Upload SQL">
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 12V3M6.5 6.5 10 3l3.5 3.5M4 14v2h12v-2"/></svg>
           </button>
-          <details class="export-menu" id="export-menu">
+          <details class="export-menu shared-menu" id="export-menu">
             <summary class="button button-ghost top-action-icon" data-tooltip="Download design" data-tooltip-placement="bottom" aria-label="Download design">
               <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v9M6.5 8.5 10 12l3.5-3.5M4 14v2h12v-2"/></svg>
             </summary>
-            <div class="export-menu-options">
+            <div class="export-menu-options shared-menu-surface">
               <button id="export-json-button" type="button">Download JSON</button>
               <button id="export-sql-button" type="button">Download SQL</button>
             </div>
           </details>
-          <details class="export-menu app-menu" id="app-menu">
+          <details class="export-menu app-menu shared-menu" id="app-menu">
             <summary class="button button-ghost top-action-icon" data-tooltip="Help and app controls" data-tooltip-placement="bottom" aria-label="Help and app controls">
               <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7"/><path d="M7.8 7.5A2.3 2.3 0 0 1 10 6c1.4 0 2.4.8 2.4 2 0 1.7-2.4 1.8-2.4 3.5M10 14.5h.01"/></svg>
             </summary>
-            <div class="export-menu-options app-menu-options">
+            <div class="export-menu-options app-menu-options shared-menu-surface">
               <button id="show-onboarding-button" type="button">Show introduction</button>
               <button id="restore-examples-button" type="button">Restore examples</button>
               <button class="menu-danger" id="shutdown-button" type="button">Shut down Schemii</button>
@@ -481,9 +481,9 @@ ALTER TABLE "public"."books"
       </form>
     </dialog>
 
-    <dialog id="postgres-dialog" class="schema-dialog">
+    <dialog id="postgres-dialog" class="schema-dialog shared-dialog">
       <div class="schema-dialog-panel postgres-dialog-panel">
-        <header class="schema-dialog-head">
+        <header class="schema-dialog-head shared-dialog-head">
           <div>
             <span class="eyebrow">Live database</span>
             <h2>PostgreSQL</h2>
@@ -491,7 +491,7 @@ ALTER TABLE "public"."books"
           </div>
           <button class="dialog-close" id="close-postgres-dialog" type="button" aria-label="Close">×</button>
         </header>
-        <div class="postgres-status" id="postgres-status" hidden></div>
+        <div class="postgres-status shared-control-status" id="postgres-status" hidden></div>
         <div class="postgres-profiles" id="postgres-profiles-list"></div>
         <div class="postgres-target">
           <label for="postgres-namespace-select">PostgreSQL namespace</label>
@@ -510,8 +510,8 @@ ALTER TABLE "public"."books"
       </div>
     </dialog>
 
-    <dialog id="postgres-profile-dialog">
-      <form method="dialog" id="postgres-profile-form" class="postgres-profile-form">
+    <dialog id="postgres-profile-dialog" class="shared-dialog">
+      <form method="dialog" id="postgres-profile-form" class="postgres-profile-form shared-form">
         <div class="dialog-copy postgres-form-title">
           <span class="eyebrow">Server-side profile</span>
           <h2 id="postgres-profile-title">New connection</h2>
@@ -519,22 +519,22 @@ ALTER TABLE "public"."books"
         </div>
         <label for="postgres-profile-name">Profile name</label>
         <input id="postgres-profile-name" autocomplete="off" required placeholder="Development" />
-        <div class="postgres-form-row">
+        <div class="postgres-form-row shared-field-pair">
           <label>Host<input id="postgres-profile-host" autocomplete="off" required value="127.0.0.1" /></label>
           <label>Port<input id="postgres-profile-port" type="number" min="1" max="65535" required value="5432" /></label>
         </div>
-        <div class="postgres-form-row">
+        <div class="postgres-form-row shared-field-pair">
           <label>Database<input id="postgres-profile-database" autocomplete="off" required /></label>
           <label>User<input id="postgres-profile-user" autocomplete="username" required /></label>
         </div>
         <label for="postgres-profile-password">Password</label>
         <input id="postgres-profile-password" type="password" autocomplete="current-password" placeholder="Leave blank to keep the stored password" />
-        <div class="postgres-form-row">
+        <div class="postgres-form-row shared-field-pair">
           <label>SSL mode<select id="postgres-profile-sslmode"><option>prefer</option><option>require</option><option>verify-ca</option><option>verify-full</option><option>disable</option><option>allow</option></select></label>
           <label>Timeout (seconds)<input id="postgres-profile-timeout" type="number" min="1" max="120" value="10" /></label>
         </div>
-        <div class="postgres-status" id="postgres-profile-status" hidden></div>
-        <div class="dialog-actions">
+        <div class="postgres-status shared-control-status" id="postgres-profile-status" hidden></div>
+        <div class="dialog-actions shared-form-actions">
           <button class="button button-ghost" type="button" id="cancel-postgres-profile">Cancel</button>
           <button class="button button-ghost" type="button" id="test-postgres-profile">Save &amp; test</button>
           <button class="button button-primary" type="submit">Save connection</button>
@@ -639,7 +639,9 @@ ALTER TABLE "public"."books"
     <div class="object-icon-menu" id="object-icon-menu" role="menu" hidden></div>
     <div class="app-tooltip" id="app-tooltip" role="tooltip" hidden></div>
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="/shared/session-client.js"></script>
     <script src="/shared/postgres-client.js"></script>
+    <script src="/shared/profile-manager.js"></script>
     <script src="/shared/ui-components.js"></script>
     <script src="app.js"></script>
   </body>

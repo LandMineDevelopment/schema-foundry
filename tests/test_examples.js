@@ -11,8 +11,8 @@ const start = source.indexOf("async function restoreExamples");
 const end = source.indexOf("async function readAiActivity", start);
 const restore = source.slice(start, end);
 assert.match(restore, /await flushPendingSave\(\)/, "restoration must save active user work first");
-assert.match(restore, /fetch\("\/api\/examples\/restore"/, "restoration must use the narrow local endpoint");
-assert.match(restore, /"X-Schemii-Token": postgresState\.token/, "restoration must use the local session token");
+assert.match(restore, /sharedSessionClient\.json\("\/api\/examples\/restore"/, "restoration must use the narrow local endpoint");
+assert.match(restore, /allowPath: path => path === "\/api\/examples\/restore"/, "restoration must use the authenticated local session client");
 assert.match(restore, /library\.schemas = schemasPayload\.schemas/, "restoration must refresh the saved design library");
 assert.doesNotMatch(restore, /openSchema\(|persistSchemaRecord\(/, "restoration must not replace or switch the active design");
 

@@ -2,24 +2,19 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 
-const source = fs.readFileSync("src/schemii/web/app.js", "utf8");
-const start = source.indexOf("function elementHasTruncatedText");
-const end = source.indexOf("function showTooltip", start);
-assert.notEqual(start, -1, "truncated tooltip helper marker is missing");
-assert.notEqual(end, -1, "truncated tooltip helper end marker is missing");
-
 const body = {};
 const style = { textOverflow: "ellipsis", webkitLineClamp: "none" };
 const context = vm.createContext({
   document: { body },
-  getComputedStyle: () => style
+  window: {},
+  HTMLElement: class {},
+  getComputedStyle: () => style,
+  setTimeout,
+  clearTimeout,
+  requestAnimationFrame: callback => callback()
 });
-vm.runInContext(`
-  ${source.slice(start, end)}
-  globalThis.elementHasTruncatedText = elementHasTruncatedText;
-  globalThis.automaticTooltipText = automaticTooltipText;
-  globalThis.findAppTooltipTarget = findAppTooltipTarget;
-`, context);
+vm.runInContext(fs.readFileSync("src/schemii/shared_web/ui-components.js", "utf8"), context);
+const { elementHasTruncatedText, automaticTooltipText, findTooltipTarget } = context.window.SchemiiShared;
 
 const element = {
   hidden: false,
@@ -33,32 +28,32 @@ const element = {
   getAttribute: () => null
 };
 
-assert.equal(context.elementHasTruncatedText(element), true);
-assert.equal(context.automaticTooltipText(element), "A long database object name");
-assert.equal(context.findAppTooltipTarget(element), element);
+assert.equal(elementHasTruncatedText(element), true);
+assert.equal(automaticTooltipText(element), "A long database object name");
+assert.equal(findTooltipTarget(element, { automaticTruncation: true, boundary: body }), element);
 assert.equal(element.dataset.tooltip, "A long database object name");
 assert.equal(element.dataset.tooltipAutomatic, "true");
 
 element.textContent = "Updated truncated text";
-assert.equal(context.findAppTooltipTarget(element), element);
+assert.equal(findTooltipTarget(element, { automaticTruncation: true, boundary: body }), element);
 assert.equal(element.dataset.tooltip, "Updated truncated text");
 
 element.scrollWidth = 80;
-assert.equal(context.findAppTooltipTarget(element), null);
+assert.equal(findTooltipTarget(element, { automaticTruncation: true, boundary: body }), null);
 assert.equal("tooltip" in element.dataset, false);
 assert.equal("tooltipAutomatic" in element.dataset, false);
 
 element.dataset.tooltip = "Explicit tooltip";
-assert.equal(context.findAppTooltipTarget(element), element);
+assert.equal(findTooltipTarget(element, { automaticTruncation: true, boundary: body }), element);
 assert.equal(element.dataset.tooltip, "Explicit tooltip");
 
 style.textOverflow = "clip";
 element.dataset = {};
 element.scrollWidth = 160;
-assert.equal(context.elementHasTruncatedText(element), false);
+assert.equal(elementHasTruncatedText(element), false);
 
 element.value = "Truncated input value";
 style.textOverflow = "ellipsis";
-assert.equal(context.automaticTooltipText(element), "Truncated input value");
+assert.equal(automaticTooltipText(element), "Truncated input value");
 
 console.log("Automatic tooltip tests passed");

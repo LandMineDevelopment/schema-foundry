@@ -1,97 +1,16 @@
 import json
 import sys
 import tempfile
-import threading
 import unittest
 from pathlib import Path
-from urllib.error import HTTPError
-from urllib.request import Request, urlopen
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from schemii.schema_store import SchemaStore
-from schemii.server import CONTENT_SECURITY_POLICY, ThreadingHTTPServer, _is_local_request, _proposal_manifest_fallback, make_handler
-
-
-class FakePostgresService:
-    def __init__(self):
-        self.calls = []
-        self.profiles = []
-
-    def list_profiles(self):
-        return self.profiles
-
-    def save_profile(self, profile_id, body):
-        self.calls.append(("save_profile", profile_id, body))
-        saved = {"id": profile_id or "pg_created", **{key: value for key, value in body.items() if key != "password"}}
-        self.profiles = [saved]
-        return saved
-
-    def delete_profile(self, profile_id):
-        self.calls.append(("delete_profile", profile_id))
-        return {"deleted": profile_id}
-
-    def list_history(self, profile_id, limit):
-        self.calls.append(("list_history", profile_id, limit))
-        return [{"id": "history_one"}]
-
-    def preview_table_data(self, profile_id, namespace, table, offset, limit):
-        self.calls.append(("preview_table_data", profile_id, namespace, table, offset, limit))
-        return {"columns": [], "rows": [], "offset": offset, "nextOffset": offset, "hasMore": False}
-
-    def execute_read_only_sql(self, profile_id, namespace, statement):
-        self.calls.append(("execute_read_only_sql", profile_id, namespace, statement))
-        return {"columns": [{"name": "answer"}], "rows": [[1]], "rowCount": 1, "truncated": False}
-
-    def list_namespaces(self, profile_id):
-        self.calls.append(("list_namespaces", profile_id))
-        return ["public"]
-
-    def list_relations(self, profile_id, database, namespace):
-        self.calls.append(("list_relations", profile_id, database, namespace))
-        return {"profileId": profile_id, "database": database, "namespace": namespace, "relations": []}
-
-    def inspect_relation(self, profile_id, database, namespace, relation, expected_kind=None, expected_fingerprint=None):
-        self.calls.append(("inspect_relation", profile_id, database, namespace, relation, expected_kind, expected_fingerprint))
-        return {"profileId": profile_id, "database": database, "namespace": namespace, "relation": relation, "kind": "table", "columns": [], "fingerprint": "live"}
-
-    def preview_relation_rows(self, profile_id, source, offset, limit):
-        self.calls.append(("preview_relation_rows", profile_id, source, offset, limit))
-        return {**source, "columns": [], "rows": [], "offset": offset, "nextOffset": offset, "hasMore": False, "stableOrder": False}
-
-    def verify_relation_source(self, profile_id, source):
-        self.calls.append(("verify_relation_source", profile_id, source))
-        return {"status": "verified", "matches": True, **source, "missingColumns": [], "addedColumns": [], "changedColumns": []}
-
-    def execute_widget_query(self, profile_id, source, query):
-        self.calls.append(("execute_widget_query", profile_id, source, query))
-        return {"columns": [{"label": "Rows"}], "rows": [[1]], "sql": "SELECT count(*)", "parameters": []}
-
-    def execute_relation_detail(self, profile_id, source, query, selection, detail, offset, limit, sort, search):
-        self.calls.append(("execute_relation_detail", profile_id, source, query, selection, detail, offset, limit, sort, search))
-        return {"columns": [], "rows": [], "matchingRowCount": 0, "offset": offset, "limit": limit, "hasMore": False}
-
-    def catalog_status(self, profile_id, namespace):
-        self.calls.append(("catalog_status", profile_id, namespace))
-        return {"profileId": profile_id, "namespace": namespace, "fingerprint": "live"}
-
-    def test_profile(self, profile_id):
-        self.calls.append(("test_profile", profile_id))
-        return {"ok": True}
-
-    def introspect(self, profile_id, namespace):
-        self.calls.append(("introspect", profile_id, namespace))
-        return {"projectName": "demo.public", "tables": [], "relationships": [], "functions": []}
-
-    def preview(self, profile_id, namespace, schema, allow_destructive):
-        self.calls.append(("preview", profile_id, namespace, schema, allow_destructive))
-        return {"id": "plan_one", "steps": [], "warnings": []}
-
-    def apply(self, profile_id, plan_id, confirm_destructive):
-        self.calls.append(("apply", profile_id, plan_id, confirm_destructive))
-        return {"projectName": "demo.public", "tables": [], "relationships": [], "functions": []}
+from schemii.server import CONTENT_SECURITY_POLICY, _is_local_request, _proposal_manifest_fallback, make_handler
+from tests.http_test_support import FakePostgresService, RunningHttpServer
 
 
 class FakeAIService:
@@ -159,11 +78,6 @@ class FakeExampleInstaller:
         return {"installed": ["schemii_example_local"], "preserved": [], "completed": ["local"], "errors": []}
 
 
-class QuietHandlerMixin:
-    def log_message(self, format, *args):
-        pass
-
-
 class ServerTests(unittest.TestCase):
     def setUp(self):
         self.temporary_directory = tempfile.TemporaryDirectory()
@@ -177,35 +91,16 @@ class ServerTests(unittest.TestCase):
             ai_service=self.ai_service,
             example_installer=self.example_installer,
         )
-        quiet_handler = type("QuietSchemiiHandler", (QuietHandlerMixin, handler), {})
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), quiet_handler)
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-        self.thread.start()
-        self.base_url = f"http://127.0.0.1:{self.server.server_port}"
+        self.http = RunningHttpServer(handler)
+        self.server = self.http.server
+        self.thread = self.http.thread
 
     def tearDown(self):
-        self.server.shutdown()
-        self.server.server_close()
-        self.thread.join()
+        self.http.close()
         self.temporary_directory.cleanup()
 
     def request(self, path, method="GET", payload=None, content_type="application/json", authorized=False, headers=None):
-        data = json.dumps(payload).encode() if payload is not None else None
-        request = Request(f"{self.base_url}{path}", data=data, method=method)
-        if data is not None:
-            request.add_header("Content-Type", content_type)
-        if authorized:
-            request.add_header("X-Schemii-Token", "session-token")
-        for name, value in (headers or {}).items():
-            request.add_header(name, value)
-        try:
-            with urlopen(request) as response:
-                return response.status, response.read(), response.headers
-        except HTTPError as error:
-            try:
-                return error.code, error.read(), error.headers
-            finally:
-                error.close()
+        return self.http.request(path, method, payload, content_type, authorized, headers)
 
     def test_static_and_session_routes(self):
         status, body, headers = self.request("/")
@@ -317,39 +212,9 @@ class ServerTests(unittest.TestCase):
         verify_path = inspect_path + "&expectedKind=table&expectedFingerprint=" + "a" * 64
         self.assertEqual(self.request(verify_path, authorized=True)[0], 200)
         self.assertIn(("inspect_relation", "local", "demo", "public", "events", "table", "a" * 64), self.service.calls)
-        preview_source = {
-            "profileId": "local", "database": "demo", "namespace": "public", "relation": "events",
-            "kind": "table", "fingerprint": "a" * 64,
-        }
-        preview_path = "/api/postgres/profiles/local/relation/preview"
-        self.assertEqual(self.request(preview_path, "POST", {"source": preview_source, "offset": 5, "limit": 10})[0], 403)
-        self.assertEqual(self.request(preview_path, "POST", {"source": preview_source, "offset": 5, "limit": 10}, authorized=True)[0], 200)
-        self.assertIn(("preview_relation_rows", "local", preview_source, 5, 10), self.service.calls)
-        verify_path = "/api/postgres/profiles/local/relation/verify"
-        self.assertEqual(self.request(verify_path, "POST", {"source": preview_source}, authorized=True)[0], 200)
-        self.assertIn(("verify_relation_source", "local", preview_source), self.service.calls)
-        query = {"version": 1, "measures": []}
-        query_path = "/api/postgres/profiles/local/relation/query"
-        self.assertEqual(self.request(query_path, "POST", {"source": preview_source, "query": query})[0], 403)
-        self.assertEqual(self.request(query_path, "POST", {"source": preview_source, "query": query}, authorized=True)[0], 200)
-        self.assertIn(("execute_widget_query", "local", preview_source, query), self.service.calls)
-        self.assertEqual(self.request(query_path, "POST", {"source": preview_source, "query": query, "extra": True}, authorized=True)[0], 400)
-        detail_path = "/api/postgres/profiles/local/relation/detail"
-        detail_request = {
-            "source": preview_source, "query": query,
-            "selection": {"dimensions": []},
-            "detail": {"version": 1, "columns": [], "rowIdentifier": None},
-            "offset": 0, "limit": 25, "sort": None, "search": "",
-        }
-        self.assertEqual(self.request(detail_path, "POST", detail_request)[0], 403)
-        self.assertEqual(self.request(detail_path, "POST", detail_request, authorized=True)[0], 200)
-        self.assertIn((
-            "execute_relation_detail", "local", preview_source, query, detail_request["selection"],
-            detail_request["detail"], 0, 25, None, "",
-        ), self.service.calls)
-        self.assertEqual(self.request(detail_path, "POST", {**detail_request, "sql": "SELECT 1"}, authorized=True)[0], 400)
-        missing_search = dict(detail_request); missing_search.pop("search")
-        self.assertEqual(self.request(detail_path, "POST", missing_search, authorized=True)[0], 400)
+        for route in ("preview", "verify", "query", "detail"):
+            path = f"/api/postgres/profiles/local/relation/{route}"
+            self.assertEqual(self.request(path, "POST", {}, authorized=True)[0], 404)
 
     def test_test_introspect_preview_and_apply_routes_forward_contracts(self):
         schema = {"projectName": "demo.public", "tables": [], "relationships": [], "functions": []}

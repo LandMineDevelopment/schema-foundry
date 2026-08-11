@@ -4,11 +4,12 @@ import hashlib
 import json
 import os
 import re
-import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from .atomic_json import write_json
 
 
 SCHEMA_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -145,23 +146,12 @@ class SchemaStore:
             stored["revision"] = current_revision + 1
             stored["updatedAt"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             destination = self.schema_dir / f"{schema_id}.json"
-            temporary: Path | None = None
             try:
-                descriptor, name = tempfile.mkstemp(prefix=f".{schema_id}.", suffix=".tmp", dir=self.schema_dir)
-                temporary = Path(name)
-                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                    json.dump(stored, handle, indent=2)
-                    handle.write("\n")
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(temporary, destination)
+                write_json(destination, stored)
                 if existing_path and existing_path != destination:
                     existing_path.unlink()
             except OSError as exc:
                 raise SchemaStoreError(500, "schema_store_error", "Schema file could not be saved") from exc
-            finally:
-                if temporary:
-                    temporary.unlink(missing_ok=True)
             return {
                 "saved": schema_id,
                 "revision": stored["revision"],

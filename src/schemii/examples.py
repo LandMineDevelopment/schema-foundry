@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .atomic_json import write_json
 from .postgres_service import PostgresService, PostgresServiceError
 from .schema_store import SchemaStore, SchemaStoreError
 
@@ -282,19 +282,11 @@ class ExampleInstaller:
 
     def _write_marker(self, components: set[str]) -> None:
         self.config_dir.mkdir(parents=True, exist_ok=True)
-        descriptor, name = tempfile.mkstemp(prefix=".examples_initialized.", suffix=".tmp", dir=self.config_dir)
-        temporary = Path(name)
-        try:
-            os.fchmod(descriptor, 0o600)
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                json.dump({"version": EXAMPLE_VERSION, "components": sorted(components)}, handle, indent=2)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, self.marker_path)
-            os.chmod(self.marker_path, 0o600)
-        finally:
-            temporary.unlink(missing_ok=True)
+        write_json(
+            self.marker_path,
+            {"version": EXAMPLE_VERSION, "components": sorted(components)},
+            mode=0o600,
+        )
 
 
 def installer_from_environment(service: PostgresService, store: SchemaStore, config_dir: str | os.PathLike[str]) -> ExampleInstaller:

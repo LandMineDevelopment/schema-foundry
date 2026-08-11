@@ -4,7 +4,6 @@ import json
 import os
 import re
 import secrets
-import threading
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
@@ -12,9 +11,16 @@ from urllib.parse import parse_qs, unquote, urlparse
 from .examples import ExampleInstaller, installer_from_environment
 from .http_common import CONTENT_SECURITY_POLICY, MAX_BODY_SIZE, is_local_request as _is_local_request, make_local_app_handler
 from .opencode_service import OpenCodeService, OpenCodeServiceError
-from .postgres_http import PROFILE_PATH, PostgresHttpMixin
+from .postgres_http import (
+    POSTGRES_CATALOG_CAPABILITY,
+    POSTGRES_PROFILE_CAPABILITY,
+    POSTGRES_SCHEMA_CAPABILITY,
+    PROFILE_PATH,
+    PostgresHttpMixin,
+)
 from .postgres_service import PostgresService, PostgresServiceError
 from .schema_store import SchemaStore, SchemaStoreError
+from .server_runtime import begin_http_shutdown, parse_port, parse_proxy_setting, run_server, validate_static_directory
 
 
 AI_MAX_BODY_SIZE = 128 * 1024
@@ -271,6 +277,9 @@ def make_handler(
     )
 
     class SchemiiHandler(PostgresHttpMixin, base_handler):
+        postgres_capabilities = frozenset({
+            POSTGRES_PROFILE_CAPABILITY, POSTGRES_CATALOG_CAPABILITY, POSTGRES_SCHEMA_CAPABILITY,
+        })
 
         def _authorize_ai(self) -> bool:
             if not self._is_local_request():
@@ -381,10 +390,7 @@ def make_handler(
             if path == "/api/shutdown":
                 if not self._authorize_shutdown():
                     return
-                shutdown_thread = threading.Thread(target=self.server.shutdown, name="schemii-shutdown", daemon=True)
-                self.send_json(202, {"shuttingDown": True})
-                self.wfile.flush()
-                shutdown_thread.start()
+                begin_http_shutdown(self, "schemii-shutdown")
                 return
             if path == "/api/examples/restore":
                 if not self._authorize_postgres():
@@ -511,23 +517,17 @@ def make_handler(
 def main() -> None:
     web_dir, config_dir, schema_dir = _paths()
     host = os.environ.get("SCHEMII_HOST", "127.0.0.1")
-    proxy_setting = os.environ.get("SCHEMII_BEHIND_LOOPBACK_PROXY", "0")
-    if proxy_setting not in {"0", "1"}:
-        raise SystemExit("SCHEMII_BEHIND_LOOPBACK_PROXY must be 0 or 1")
-    try:
-        port = int(os.environ.get("SCHEMII_PORT", "8080"))
-    except ValueError as exc:
-        raise SystemExit("SCHEMII_PORT must be an integer") from exc
-    if not 1 <= port <= 65535:
-        raise SystemExit("SCHEMII_PORT must be from 1 to 65535")
+    behind_loopback_proxy = parse_proxy_setting(
+        os.environ.get("SCHEMII_BEHIND_LOOPBACK_PROXY", "0"), "SCHEMII_BEHIND_LOOPBACK_PROXY",
+    )
+    port = parse_port(os.environ.get("SCHEMII_PORT", "8080"), "SCHEMII_PORT")
     try:
         ai_timeout = float(os.environ.get("SCHEMII_OPENCODE_TIMEOUT", "45"))
     except ValueError as exc:
         raise SystemExit("SCHEMII_OPENCODE_TIMEOUT must be a number") from exc
     if not 1 <= ai_timeout <= 300:
         raise SystemExit("SCHEMII_OPENCODE_TIMEOUT must be from 1 to 300 seconds")
-    if not web_dir.is_dir():
-        raise SystemExit(f"Static web directory does not exist: {web_dir}")
+    validate_static_directory(web_dir)
     service = PostgresService(config_dir)
     store = SchemaStore(schema_dir)
     try:
@@ -551,16 +551,9 @@ def main() -> None:
         server_id=secrets.token_urlsafe(18),
         ai_service=ai_service,
         example_installer=example_installer,
-        behind_loopback_proxy=proxy_setting == "1",
+        behind_loopback_proxy=behind_loopback_proxy,
     )
-    server = ThreadingHTTPServer((host, port), handler)
-    print(f"Schemii running at http://{host}:{port}/")
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
+    run_server(host, port, handler, "Schemii", server_factory=ThreadingHTTPServer)
 
 
 if __name__ == "__main__":

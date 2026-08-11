@@ -6,16 +6,19 @@ const html = fs.readFileSync("src/schemii/schemer_web/index.html", "utf8");
 const styles = fs.readFileSync("src/schemii/schemer_web/styles.css", "utf8");
 const schemiiStyles = fs.readFileSync("src/schemii/web/styles.css", "utf8");
 const client = fs.readFileSync("src/schemii/shared_web/postgres-client.js", "utf8");
+const sessionClient = fs.readFileSync("src/schemii/shared_web/session-client.js", "utf8");
 const sharedStyles = fs.readFileSync("src/schemii/shared_web/theme.css", "utf8");
 const sharedUi = fs.readFileSync("src/schemii/shared_web/ui-components.js", "utf8");
 const connectionDialog = html.slice(html.indexOf('id="connections-dialog"'), html.indexOf('id="dashboard-form-dialog"'));
 const widgetEditor = html.slice(html.indexOf('id="widget-editor-dialog"'), html.indexOf('id="executed-sql-dialog"'));
 
 assert.match(html, /<title>Schemer<\/title>/, "Schemer needs its own browser identity");
+assert.match(html, /\/shared\/session-client\.js/, "Schemer must load the shared authenticated session client");
 assert.match(html, /\/shared\/postgres-client\.js/, "Schemer must load the shared PostgreSQL browser client");
+assert.match(html, /\/shared\/profile-manager\.js/, "Schemer must load shared profile contracts");
 assert.match(source, /SchemiiShared\.createPostgresClient/, "Schemer must instantiate the shared PostgreSQL client");
-assert.match(source, /path\.startsWith\("\/api\/dashboards"\)/, "dashboard requests must stay on the local Schemer API");
-assert.match(source, /postgres\.request\("\/api\/postgres\/profiles"\)/, "PostgreSQL requests must use the shared browser client");
+assert.match(source, /path\.startsWith\("\/api\/dashboards"\)|value\.startsWith\("\/api\/dashboards"\)/, "dashboard requests must stay on the local Schemer API");
+assert.match(source, /createProfileRepository\(\{ postgresClient: postgres \}\)/, "profile requests must use the shared profile repository");
 assert.match(source, /postgres\.request\(`\/api\/postgres\/profiles\/\$\{encodeURIComponent\(profile\.id\)\}\/relations\?database=\$\{encodeURIComponent\(profile\.dbname\)\}&namespace=\$\{encodeURIComponent\(namespace\)\}`\)/, "relation browsing must use the shared exact-database catalog route");
 assert.match(source, /postgres\.request\(`\/api\/postgres\/profiles\/\$\{encodeURIComponent\(catalog\.profileId\)\}\/relation\?database=[\s\S]*&relation=\$\{encodeURIComponent\(relation\.name\)\}`\)/, "relation selection must inspect one exact catalog identity");
 assert.match(source, /selectedRelationIdentity = \{[\s\S]*profileId: descriptor\.profileId,[\s\S]*database: descriptor\.database,[\s\S]*namespace: descriptor\.namespace,[\s\S]*relation: descriptor\.relation,[\s\S]*kind: descriptor\.kind,[\s\S]*fingerprint: descriptor\.fingerprint/, "inspected relation identity must retain its stable catalog fingerprint");
@@ -241,6 +244,6 @@ assert.match(styles, /\.widget-inspector \{[^}]*padding: 18px;[^}]*background-im
 assert.match(styles, /\.widget-inspector-body \{[^}]*border-radius: 0 0 8px 8px;[^}]*linear-gradient/, "the inspector header and table must form one floating card");
 assert.match(schemiiStyles, /^@import url\("\/shared\/theme\.css"\);/, "Schemii must use the same visual theme");
 assert.match(client, /path\.startsWith\("\/api\/postgres\/"\)/, "the shared client must restrict PostgreSQL requests to the local API");
-assert.match(client, /X-Schemii-Token/, "the shared client must preserve the existing session contract");
+assert.match(sessionClient, /X-Schemii-Token/, "the shared session client must preserve the existing session contract");
 
 console.log("Schemer shared connection and dashboard contracts passed");

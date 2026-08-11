@@ -97,5 +97,160 @@
     return Object.freeze({ show, hide, update, get activeTarget() { return activeTarget; } });
   }
 
-  window.SchemiiShared = Object.freeze({ ...window.SchemiiShared, ICONS, decorateIconControl, createIconButton, createTooltipController });
+  function elementHasTruncatedText(element) {
+    if (!element || element.hidden) return false;
+    const style = getComputedStyle(element);
+    const lineClamp = Number.parseInt(style.webkitLineClamp, 10);
+    const truncates = style.textOverflow === "ellipsis" || (Number.isFinite(lineClamp) && lineClamp > 0);
+    return truncates && (element.scrollWidth > element.clientWidth + 1 || element.scrollHeight > element.clientHeight + 1);
+  }
+
+  function automaticTooltipText(element) {
+    const value = typeof element?.value === "string" ? element.value : element?.textContent;
+    return String(value ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  function findTooltipTarget(start, { includeDescendants = false, automaticTruncation = false, boundary = document.body } = {}) {
+    for (let target = start; target && target !== boundary; target = target.parentElement) {
+      const automatic = target.dataset?.tooltipAutomatic === "true";
+      if (!automatic && (target.dataset?.tooltip || target.getAttribute?.("title"))) return target;
+      const truncated = automaticTruncation && elementHasTruncatedText(target);
+      if (automatic) {
+        if (!truncated) {
+          delete target.dataset.tooltip;
+          delete target.dataset.tooltipAutomatic;
+        } else {
+          target.dataset.tooltip = automaticTooltipText(target);
+        }
+      }
+      if (target.dataset?.tooltip || target.getAttribute?.("title")) return target;
+      if (truncated) {
+        const text = automaticTooltipText(target);
+        if (text) {
+          target.dataset.tooltip = text;
+          target.dataset.tooltipAutomatic = "true";
+          return target;
+        }
+      }
+    }
+    if (includeDescendants) {
+      for (const target of start?.querySelectorAll?.("*") ?? []) {
+        const match = findTooltipTarget(target, { automaticTruncation, boundary });
+        if (match) return match;
+      }
+    }
+    return null;
+  }
+
+  function installTooltipDelegation({ controller, root = document, resolveTarget = target => findTooltipTarget(target), hideOnClick = false, onScroll = null } = {}) {
+    if (!controller) throw new TypeError("A tooltip controller is required");
+    const listeners = [];
+    const listen = (type, callback, options) => {
+      root.addEventListener(type, callback, options);
+      listeners.push([type, callback, options]);
+    };
+    listen("pointerover", event => {
+      const target = resolveTarget(event.target, false);
+      if (target && target !== controller.activeTarget) controller.show(target);
+    });
+    listen("pointerout", event => {
+      if (!controller.activeTarget || controller.activeTarget.contains(event.relatedTarget)) return;
+      controller.hide();
+    });
+    listen("focusin", event => {
+      const target = resolveTarget(event.target, true);
+      if (target) controller.show(target);
+    });
+    listen("focusout", event => {
+      if (!controller.activeTarget || controller.activeTarget.contains(event.relatedTarget)) return;
+      controller.hide();
+    });
+    listen("pointerdown", () => controller.hide());
+    if (hideOnClick) listen("click", () => controller.hide());
+    listen("scroll", () => {
+      controller.hide();
+      if (typeof onScroll === "function") onScroll();
+    }, true);
+    return Object.freeze({
+      destroy() {
+        for (const [type, callback, options] of listeners) root.removeEventListener(type, callback, options);
+      }
+    });
+  }
+
+  function setControlStatus(element, message, { state = "info", hideWhenEmpty = false } = {}) {
+    element.textContent = message;
+    element.dataset.state = state;
+    element.classList.toggle("error", state === "error");
+    if (hideWhenEmpty) element.hidden = !message;
+  }
+
+  const loadingStates = new WeakMap();
+
+  function setControlLoading(control, loading, { label = null, loadingLabel = "Working...", disable = true } = {}) {
+    if (loading) {
+      if (!loadingStates.has(control)) loadingStates.set(control, {
+        disabled: control.disabled,
+        ariaLabel: control.getAttribute("aria-label"),
+        tooltip: control.dataset.tooltip,
+      });
+      control.setAttribute("aria-busy", "true");
+      control.classList.add("shared-control-loading");
+      if (disable) control.disabled = true;
+      if (loadingLabel) {
+        control.setAttribute("aria-label", loadingLabel);
+        control.dataset.tooltip = loadingLabel;
+      }
+      return;
+    }
+    const state = loadingStates.get(control);
+    control.removeAttribute("aria-busy");
+    control.classList.remove("shared-control-loading");
+    if (!state) return;
+    control.disabled = state.disabled;
+    const restoredLabel = label ?? state.ariaLabel;
+    if (restoredLabel) control.setAttribute("aria-label", restoredLabel); else control.removeAttribute("aria-label");
+    const restoredTooltip = label ?? state.tooltip;
+    if (restoredTooltip) control.dataset.tooltip = restoredTooltip; else delete control.dataset.tooltip;
+    loadingStates.delete(control);
+  }
+
+  async function withLoadingControl(control, options, operation) {
+    setControlLoading(control, true, options);
+    try {
+      return await operation();
+    } finally {
+      setControlLoading(control, false, options);
+    }
+  }
+
+  function installDetailsMenu(menu, { closeOnAction = true, closeOnOutside = true, closeOnEscape = true } = {}) {
+    const onClick = event => {
+      if (closeOnAction && event.target.closest?.("button, a, [role='menuitem']")) menu.removeAttribute("open");
+    };
+    const onDocumentClick = event => {
+      if (closeOnOutside && menu.open && !menu.contains(event.target)) menu.removeAttribute("open");
+    };
+    const onKeydown = event => {
+      if (closeOnEscape && event.key === "Escape" && menu.open) {
+        menu.removeAttribute("open");
+        menu.querySelector("summary")?.focus();
+      }
+    };
+    menu.addEventListener("click", onClick);
+    document.addEventListener("click", onDocumentClick);
+    document.addEventListener("keydown", onKeydown);
+    return Object.freeze({ destroy() {
+      menu.removeEventListener("click", onClick);
+      document.removeEventListener("click", onDocumentClick);
+      document.removeEventListener("keydown", onKeydown);
+    } });
+  }
+
+  window.SchemiiShared = Object.freeze({
+    ...(window.SchemiiShared || {}),
+    ICONS, decorateIconControl, createIconButton, createTooltipController,
+    elementHasTruncatedText, automaticTooltipText, findTooltipTarget, installTooltipDelegation,
+    setControlStatus, setControlLoading, withLoadingControl, installDetailsMenu,
+  });
 })();

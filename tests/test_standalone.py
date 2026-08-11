@@ -193,7 +193,7 @@ esac
         literal_fetches = re.findall(r'''fetch\(\s*(["'`])([^"'`]+)\1''', javascript)
         self.assertTrue(literal_fetches)
         self.assertTrue(all(target.startswith("/api/") for _, target in literal_fetches))
-        self.assertIn('!path.startsWith("/api/postgres/")', postgres_client)
+        self.assertIn('path.startsWith("/api/postgres/")', postgres_client)
 
     def test_storage_paths_are_absolute_and_independent_of_launch_directory(self):
         with patch.dict(

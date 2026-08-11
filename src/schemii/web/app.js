@@ -914,37 +914,37 @@ function saveRecordFile(record) {
   return saveQueue;
 }
 
-const sharedPostgresClient = window.SchemiiShared.createPostgresClient({
+const sharedSessionClient = window.SchemiiShared.createSessionClient({
   getToken: () => postgresState.token,
   setToken: token => { postgresState.token = token; }
 });
+const sharedPostgresClient = window.SchemiiShared.createPostgresClient({ sessionClient: sharedSessionClient });
+const postgresProfileRepository = window.SchemiiShared.createProfileRepository({ postgresClient: sharedPostgresClient });
+const postgresProfileForm = window.SchemiiShared.createProfileForm({ fields: {
+  name: elements.postgresProfileName,
+  host: elements.postgresProfileHost,
+  port: elements.postgresProfilePort,
+  database: elements.postgresProfileDatabase,
+  user: elements.postgresProfileUser,
+  password: elements.postgresProfilePassword,
+  sslmode: elements.postgresProfileSslmode,
+  timeout: elements.postgresProfileTimeout,
+} });
 
 function postgresRequest(path, options = {}) {
   return sharedPostgresClient.request(path, options);
 }
 
-async function restoreExamples(retry = true) {
+async function restoreExamples() {
   appMenu.removeAttribute("open");
   try {
     await flushPendingSave();
-    if (!postgresState.token) {
-      const sessionResponse = await fetch("/api/session");
-      const session = await sessionResponse.json().catch(() => ({}));
-      if (!sessionResponse.ok || !session.token) throw new Error(session.error?.message || "Could not start a local examples session");
-      postgresState.token = session.token;
-    }
-    const response = await fetch("/api/examples/restore", {
+    const result = await sharedSessionClient.json("/api/examples/restore", {
       method: "POST",
-      headers: { "X-Schemii-Token": postgresState.token }
+    }, {
+      allowPath: path => path === "/api/examples/restore",
+      defaultMessage: "Examples could not be restored"
     });
-    const result = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      if (result.error?.code === "invalid_session" && retry) {
-        postgresState.token = null;
-        return restoreExamples(false);
-      }
-      throw new Error(result.error?.message || "Examples could not be restored");
-    }
     const schemasResponse = await fetch("/api/schemas");
     const schemasPayload = await schemasResponse.json().catch(() => ({}));
     if (!schemasResponse.ok || !Array.isArray(schemasPayload.schemas)) throw new Error("Restored examples could not be loaded");
@@ -962,56 +962,22 @@ async function restoreExamples(retry = true) {
   }
 }
 
-async function aiRequest(path, options = {}, retry = true) {
-  if (typeof path !== "string" || !path.startsWith("/api/ai/")) {
-    throw new Error("AI requests must use the local Schemii API");
-  }
-  if (!postgresState.token) {
-    const sessionResponse = await fetch("/api/session");
-    const session = await sessionResponse.json().catch(() => ({}));
-    if (!sessionResponse.ok || !session.token) throw new Error(session.error?.message || "Could not start a local AI session");
-    postgresState.token = session.token;
-  }
-  const response = await fetch(path, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      "X-Schemii-Token": postgresState.token,
-      ...(options.headers || {})
-    }
+function aiRequest(path, options = {}) {
+  return sharedSessionClient.json(path, options, {
+    allowPath: value => typeof value === "string" && value.startsWith("/api/ai/"),
+    defaultMessage: "The AI service request failed"
   });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    if (payload.error?.code === "invalid_session" && retry) {
-      postgresState.token = null;
-      return aiRequest(path, options, false);
-    }
-    throw new Error(payload.error?.message || payload.error || "The AI service request failed");
-  }
-  return payload;
 }
 
-async function readAiActivity(sessionId, onEvent, signal, retry = true) {
+async function readAiActivity(sessionId, onEvent, signal) {
   const path = `/api/ai/sessions/${encodeURIComponent(sessionId)}/activity`;
-  if (!postgresState.token) {
-    const sessionResponse = await fetch("/api/session", { signal });
-    const session = await sessionResponse.json().catch(() => ({}));
-    if (!sessionResponse.ok || !session.token) throw new Error(session.error?.message || "Could not start local agent activity");
-    postgresState.token = session.token;
-  }
-  const response = await fetch(path, {
+  const response = await sharedSessionClient.fetch(path, {
     method: "GET",
     signal,
-    headers: { "X-Schemii-Token": postgresState.token }
+  }, {
+    allowPath: value => typeof value === "string" && value.startsWith("/api/ai/"),
+    defaultMessage: "Agent activity is unavailable"
   });
-  if (!response.ok) {
-    const payload = await response.json().catch(() => ({}));
-    if (payload.error?.code === "invalid_session" && retry) {
-      postgresState.token = null;
-      return readAiActivity(sessionId, onEvent, signal, false);
-    }
-    throw new Error(payload.error?.message || "Agent activity is unavailable");
-  }
   if (!response.body) throw new Error("Agent activity stream is unavailable");
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -1184,50 +1150,10 @@ function escapeHtml(value) {
   return String(value).replace(/[&<>'"]/g, character => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]);
 }
 
-function elementHasTruncatedText(element) {
-  if (!element || element.hidden) return false;
-  const style = getComputedStyle(element);
-  const lineClamp = Number.parseInt(style.webkitLineClamp, 10);
-  const truncates = style.textOverflow === "ellipsis" || (Number.isFinite(lineClamp) && lineClamp > 0);
-  if (!truncates) return false;
-  return element.scrollWidth > element.clientWidth + 1 || element.scrollHeight > element.clientHeight + 1;
-}
-
-function automaticTooltipText(element) {
-  const value = typeof element.value === "string" ? element.value : element.textContent;
-  return String(value ?? "").replace(/\s+/g, " ").trim();
-}
-
 function findAppTooltipTarget(start, includeDescendants = false) {
-  for (let target = start; target && target !== document.body; target = target.parentElement) {
-    const automatic = target.dataset?.tooltipAutomatic === "true";
-    if (!automatic && (target.dataset?.tooltip || target.getAttribute?.("title"))) return target;
-    const truncated = elementHasTruncatedText(target);
-    if (automatic) {
-      if (!truncated) {
-        delete target.dataset.tooltip;
-        delete target.dataset.tooltipAutomatic;
-      } else {
-        target.dataset.tooltip = automaticTooltipText(target);
-      }
-    }
-    if (target.dataset?.tooltip || target.getAttribute?.("title")) return target;
-    if (truncated) {
-      const text = automaticTooltipText(target);
-      if (text) {
-        target.dataset.tooltip = text;
-        target.dataset.tooltipAutomatic = "true";
-        return target;
-      }
-    }
-  }
-  if (includeDescendants) {
-    for (const target of start?.querySelectorAll?.("*") ?? []) {
-      const match = findAppTooltipTarget(target);
-      if (match) return match;
-    }
-  }
-  return null;
+  return window.SchemiiShared.findTooltipTarget(start, {
+    includeDescendants, automaticTruncation: true, boundary: document.body,
+  });
 }
 
 function showTooltip(target) {
@@ -1882,8 +1808,7 @@ function schemaLibraryConnection(schemaValue) {
 
 async function loadSchemaLibraryConnections() {
   try {
-    const payload = await postgresRequest("/api/postgres/profiles", { method: "GET" });
-    postgresState.profiles = payload.profiles ?? [];
+    postgresState.profiles = await postgresProfileRepository.list();
     renderSchemaLibrary();
   } catch {
     // Schema cards still show their saved database identity when profile metadata is unavailable.
@@ -3713,9 +3638,9 @@ function routineDeclarationIdentity(definition) {
 
 function setPostgresStatus(message = "", error = false, profileEditor = false) {
   const target = profileEditor ? elements.postgresProfileStatus : elements.postgresStatus;
-  target.textContent = message;
-  target.hidden = !message;
-  target.classList.toggle("error", error);
+  window.SchemiiShared.setControlStatus(target, message, {
+    state: error ? "error" : "info", hideWhenEmpty: true,
+  });
 }
 
 function updatePostgresControls() {
@@ -3759,9 +3684,9 @@ function renderPostgresProfiles() {
 }
 
 function renderNamespaceOptions() {
-  elements.postgresNamespaceSelect.innerHTML = postgresState.namespaces.length
-    ? postgresState.namespaces.map(namespace => `<option value="${escapeHtml(namespace)}" ${namespace === postgresState.namespace ? "selected" : ""}>${escapeHtml(namespace)}</option>`).join("")
-    : '<option value="">No user namespaces found</option>';
+  window.SchemiiShared.initializeNamespaceSelect(elements.postgresNamespaceSelect, postgresState.namespaces, {
+    preferred: postgresState.namespace,
+  });
   updatePostgresControls();
 }
 
@@ -3777,8 +3702,7 @@ function renderPostgresCatalogSummary() {
 async function loadPostgresProfiles() {
   setPostgresBusy(true, "Loading PostgreSQL connections...");
   try {
-    const payload = await postgresRequest("/api/postgres/profiles", { method: "GET" });
-    postgresState.profiles = payload.profiles ?? [];
+    postgresState.profiles = await postgresProfileRepository.list();
     if (!postgresState.profiles.some(profile => profile.id === postgresState.selectedProfileId)) {
       const sourceProfile = schema.postgres?.sourceProfileId;
       postgresState.selectedProfileId = postgresState.profiles.some(profile => profile.id === sourceProfile) ? sourceProfile : postgresState.profiles[0]?.id ?? null;
@@ -3803,8 +3727,7 @@ async function loadPostgresNamespaces() {
   if (!postgresState.selectedProfileId) return false;
   setPostgresBusy(true, "Connecting and loading namespaces...");
   try {
-    const payload = await postgresRequest(`/api/postgres/profiles/${encodeURIComponent(postgresState.selectedProfileId)}/namespaces`, { method: "GET" });
-    postgresState.namespaces = payload.namespaces ?? [];
+    postgresState.namespaces = await postgresProfileRepository.namespaces(postgresState.selectedProfileId);
     const preferred = schema.postgres?.sourceProfileId === postgresState.selectedProfileId ? schema.postgres.namespace : "public";
     if (!postgresState.namespaces.includes(postgresState.namespace)) {
       postgresState.namespace = postgresState.namespaces.includes(preferred) ? preferred : postgresState.namespaces[0] ?? "";
@@ -3827,41 +3750,24 @@ function openPostgresProfileEditor(profileId = null) {
   const profile = postgresState.profiles.find(item => item.id === profileId);
   postgresState.editingProfileId = profile?.id ?? null;
   elements.postgresProfileTitle.textContent = profile ? "Edit connection" : "New connection";
-  elements.postgresProfileName.value = profile?.name ?? "";
-  elements.postgresProfileHost.value = profile?.host ?? "127.0.0.1";
-  elements.postgresProfilePort.value = profile?.port ?? 5432;
-  elements.postgresProfileDatabase.value = profile?.dbname ?? "";
-  elements.postgresProfileUser.value = profile?.user ?? "";
-  elements.postgresProfilePassword.value = "";
-  elements.postgresProfileSslmode.value = profile?.sslmode ?? "prefer";
-  elements.postgresProfileTimeout.value = profile?.timeout ?? 10;
+  postgresProfileForm.fill(profile);
   setPostgresStatus("", false, true);
   if (elements.postgresDialog.open) elements.postgresDialog.close();
   elements.postgresProfileDialog.showModal();
 }
 
 function postgresProfilePayload() {
-  return {
-    name: elements.postgresProfileName.value.trim(),
-    host: elements.postgresProfileHost.value.trim(),
-    port: Number(elements.postgresProfilePort.value),
-    dbname: elements.postgresProfileDatabase.value.trim(),
-    user: elements.postgresProfileUser.value.trim(),
-    password: elements.postgresProfilePassword.value,
-    sslmode: elements.postgresProfileSslmode.value,
-    timeout: Number(elements.postgresProfileTimeout.value)
-  };
+  return postgresProfileForm.read();
 }
 
 async function savePostgresProfile(reopen = true) {
   const profileId = postgresState.editingProfileId;
-  const path = profileId ? `/api/postgres/profiles/${encodeURIComponent(profileId)}` : "/api/postgres/profiles";
   setPostgresStatus("Saving connection...", false, true);
   try {
-    const profile = await postgresRequest(path, { method: profileId ? "PUT" : "POST", body: JSON.stringify(postgresProfilePayload()) });
+    const profile = await postgresProfileRepository.save(profileId, postgresProfilePayload());
     postgresState.editingProfileId = profile.id;
     postgresState.selectedProfileId = profile.id;
-    elements.postgresProfilePassword.value = "";
+    postgresProfileForm.clearPassword();
     await loadPostgresProfiles();
     if (elements.postgresProfileDialog.open) elements.postgresProfileDialog.close();
     if (reopen && !elements.postgresDialog.open) elements.postgresDialog.showModal();
@@ -3875,7 +3781,7 @@ async function savePostgresProfile(reopen = true) {
 async function testPostgresProfile(profileId) {
   setPostgresBusy(true, "Testing PostgreSQL connection...");
   try {
-    const result = await postgresRequest(`/api/postgres/profiles/${encodeURIComponent(profileId)}/test`, { method: "POST", body: "{}" });
+    const result = await postgresProfileRepository.test(profileId);
     setPostgresStatus(`Connected to ${result.database}. ${result.serverVersion}`);
   } catch (error) {
     setPostgresStatus(error.message, true);
@@ -5220,8 +5126,7 @@ async function confirmAiNavigationAction(action, context, card, button) {
     return;
   }
   try {
-    const payload = await postgresRequest("/api/postgres/profiles", { method: "GET" });
-    const profiles = payload.profiles ?? [];
+    const profiles = await postgresProfileRepository.list();
     const profile = profiles.find(item => item.id === validated.payload.profileId);
     if (!profile || profile.name !== validated.payload.name || profile.dbname !== validated.payload.database) return detailAiActionError(card, "The saved connection identity changed. Ask for a fresh proposal.");
     if (!confirm(`Open saved connection “${profile.name}” for database “${profile.dbname}”? Schemii will contact PostgreSQL using the credentials already stored on this server.`)) return;
@@ -6201,6 +6106,8 @@ elements.projectName.addEventListener("blur", endHistoryGroup);
 
 const exportMenu = document.querySelector("#export-menu");
 const appMenu = document.querySelector("#app-menu");
+window.SchemiiShared.installDetailsMenu(exportMenu);
+window.SchemiiShared.installDetailsMenu(appMenu);
 document.querySelector("#export-json-button").addEventListener("click", () => {
   exportMenu.removeAttribute("open");
   exportFile(`${schema.projectName || "schema"}.json`, JSON.stringify(schema, null, 2), "application/json");
@@ -6345,7 +6252,7 @@ elements.postgresProfilesList.addEventListener("click", async event => {
     if (!confirm(`Delete PostgreSQL connection ${profile?.name ?? profileId}?`)) return;
     setPostgresBusy(true, "Deleting connection...");
     try {
-      await postgresRequest(`/api/postgres/profiles/${encodeURIComponent(profileId)}`, { method: "DELETE" });
+      await postgresProfileRepository.remove(profileId);
       if (postgresState.selectedProfileId === profileId) postgresState.selectedProfileId = null;
       await loadPostgresProfiles();
     } catch (error) {
@@ -6502,28 +6409,12 @@ elements.deleteFunctionButton.addEventListener("click", () => {
   renderInspector();
 });
 
-document.addEventListener("pointerover", event => {
-  const target = findAppTooltipTarget(event.target);
-  if (target && target !== tooltipController.activeTarget) showTooltip(target);
+window.SchemiiShared.installTooltipDelegation({
+  controller: tooltipController,
+  resolveTarget: findAppTooltipTarget,
+  hideOnClick: true,
+  onScroll: closeObjectIconMenu,
 });
-document.addEventListener("pointerout", event => {
-  if (!tooltipController.activeTarget || tooltipController.activeTarget.contains(event.relatedTarget)) return;
-  hideTooltip();
-});
-document.addEventListener("focusin", event => {
-  const target = findAppTooltipTarget(event.target, true);
-  if (target) showTooltip(target);
-});
-document.addEventListener("focusout", event => {
-  if (tooltipController.activeTarget?.contains(event.relatedTarget)) return;
-  hideTooltip();
-});
-document.addEventListener("pointerdown", hideTooltip);
-document.addEventListener("click", hideTooltip);
-document.addEventListener("scroll", () => {
-  hideTooltip();
-  closeObjectIconMenu();
-}, true);
 
 window.addEventListener("keydown", event => {
   const editing = ["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement.tagName) || document.activeElement.isContentEditable;

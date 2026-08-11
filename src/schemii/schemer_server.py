@@ -2,15 +2,20 @@ from __future__ import annotations
 
 import os
 import secrets
-import threading
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
 from .dashboard_store import DashboardStore, DashboardStoreError
 from .http_common import make_local_app_handler
-from .postgres_http import PostgresHttpMixin
+from .postgres_http import (
+    POSTGRES_CATALOG_CAPABILITY,
+    POSTGRES_PROFILE_CAPABILITY,
+    POSTGRES_RELATION_QUERY_CAPABILITY,
+    PostgresHttpMixin,
+)
 from .postgres_service import PostgresService
+from .server_runtime import begin_http_shutdown, parse_port, parse_proxy_setting, run_server, validate_static_directory
 
 
 def _paths() -> tuple[Path, Path, Path]:
@@ -34,6 +39,10 @@ def make_handler(
     )
 
     class SchemerHandler(PostgresHttpMixin, base_handler):
+        postgres_capabilities = frozenset({
+            POSTGRES_PROFILE_CAPABILITY, POSTGRES_CATALOG_CAPABILITY, POSTGRES_RELATION_QUERY_CAPABILITY,
+        })
+
         def _authorize_dashboard(self) -> bool:
             return self._authorize_local_api("Dashboard API", "Dashboard session token is missing or invalid")
 
@@ -78,10 +87,7 @@ def make_handler(
             if path == "/api/shutdown":
                 if not self._authorize_shutdown():
                     return
-                shutdown_thread = threading.Thread(target=self.server.shutdown, name="schemer-shutdown", daemon=True)
-                self.send_json(202, {"shuttingDown": True})
-                self.wfile.flush()
-                shutdown_thread.start()
+                begin_http_shutdown(self, "schemer-shutdown")
                 return
             if path == "/api/dashboards":
                 if not self._authorize_dashboard():
@@ -123,17 +129,11 @@ def make_handler(
 def main() -> None:
     web_dir, config_dir, dashboard_dir = _paths()
     host = os.environ.get("SCHEMER_HOST", "127.0.0.1")
-    proxy_setting = os.environ.get("SCHEMER_BEHIND_LOOPBACK_PROXY", "0")
-    if proxy_setting not in {"0", "1"}:
-        raise SystemExit("SCHEMER_BEHIND_LOOPBACK_PROXY must be 0 or 1")
-    try:
-        port = int(os.environ.get("SCHEMER_PORT", "8081"))
-    except ValueError as exc:
-        raise SystemExit("SCHEMER_PORT must be an integer") from exc
-    if not 1 <= port <= 65535:
-        raise SystemExit("SCHEMER_PORT must be from 1 to 65535")
-    if not web_dir.is_dir():
-        raise SystemExit(f"Static web directory does not exist: {web_dir}")
+    behind_loopback_proxy = parse_proxy_setting(
+        os.environ.get("SCHEMER_BEHIND_LOOPBACK_PROXY", "0"), "SCHEMER_BEHIND_LOOPBACK_PROXY",
+    )
+    port = parse_port(os.environ.get("SCHEMER_PORT", "8081"), "SCHEMER_PORT")
+    validate_static_directory(web_dir)
     service = PostgresService(config_dir)
     dashboard_store = DashboardStore(dashboard_dir)
     dashboard_store.initialize_once()
@@ -143,16 +143,9 @@ def main() -> None:
         dashboard_store,
         secrets.token_urlsafe(32),
         server_id=secrets.token_urlsafe(18),
-        behind_loopback_proxy=proxy_setting == "1",
+        behind_loopback_proxy=behind_loopback_proxy,
     )
-    server = ThreadingHTTPServer((host, port), handler)
-    print(f"Schemer running at http://{host}:{port}/")
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
+    run_server(host, port, handler, "Schemer", server_factory=ThreadingHTTPServer)
 
 
 if __name__ == "__main__":

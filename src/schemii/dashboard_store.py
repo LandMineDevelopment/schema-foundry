@@ -4,18 +4,17 @@ import json
 import os
 import re
 import secrets
-import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .atomic_json import write_json
+from .relation_source import RelationSourceValidationError, normalize_relation_source
 from .widget_query import QueryValidationError, is_searchable_text_type, normalize_number_format, normalize_query
 
 
 DASHBOARD_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
-PROFILE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
-FINGERPRINT_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 DASHBOARD_VERSION = 1
 MAX_WIDGETS = 100
 TABLE_PAGE_SIZES = {10, 25, 50, 100}
@@ -244,52 +243,10 @@ def _widget_configuration(value: Any, widget_id: str, widget_kind: str) -> dict[
         raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} presentation requires an aggregate report")
     if not value:
         return {}
-    source = value["source"]
-    identity_fields = {"profileId", "database", "namespace", "relation", "kind", "fingerprint"}
-    if not isinstance(source, dict) or set(source) not in (identity_fields, identity_fields | {"columns"}):
-        raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} source identity is invalid")
-    profile_id = source.get("profileId")
-    if not isinstance(profile_id, str) or not PROFILE_ID_PATTERN.fullmatch(profile_id):
-        raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} source profile is invalid")
-    kind = source.get("kind")
-    if kind not in {"table", "view", "materialized_view"}:
-        raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} source kind is invalid")
-    fingerprint = source.get("fingerprint")
-    if not isinstance(fingerprint, str) or not FINGERPRINT_PATTERN.fullmatch(fingerprint):
-        raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} source fingerprint is invalid")
-    normalized_source = {
-        "profileId": profile_id,
-        "database": _postgres_identifier(source.get("database"), "source database"),
-        "namespace": _postgres_identifier(source.get("namespace"), "source namespace"),
-        "relation": _postgres_identifier(source.get("relation"), "source relation"),
-        "kind": kind,
-        "fingerprint": fingerprint,
-    }
-    if "columns" in source:
-        columns = source["columns"]
-        if not isinstance(columns, list) or len(columns) > 1600:
-            raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} source columns are invalid")
-        normalized_columns = []
-        names = set()
-        ordinals = set()
-        for column in columns:
-            if not isinstance(column, dict) or set(column) != {"name", "type", "nullable", "ordinal"}:
-                raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} source column is invalid")
-            name = _postgres_identifier(column.get("name"), "source column")
-            ordinal = _integer(column.get("ordinal"), "source column ordinal", 1, 1600)
-            if name in names or ordinal in ordinals or not isinstance(column.get("nullable"), bool):
-                raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} source columns are duplicated or invalid")
-            names.add(name)
-            ordinals.add(ordinal)
-            normalized_columns.append({
-                "name": name,
-                "type": _bounded_text(column.get("type"), "source column type", 512),
-                "nullable": column["nullable"],
-                "ordinal": ordinal,
-            })
-        if [column["ordinal"] for column in normalized_columns] != sorted(ordinals):
-            raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} source columns must use ordinal order")
-        normalized_source["columns"] = normalized_columns
+    try:
+        normalized_source = normalize_relation_source(value["source"])
+    except RelationSourceValidationError as exc:
+        raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} source is invalid: {exc}") from exc
     normalized = {"source": normalized_source}
     if "query" in value:
         if "columns" not in normalized_source:
@@ -474,23 +431,10 @@ class DashboardStore:
 
     def _write(self, record: dict[str, Any]) -> dict[str, Any]:
         destination = self._path(record["id"])
-        temporary = None
         try:
-            descriptor, name = tempfile.mkstemp(prefix=f".{record['id']}.", suffix=".tmp", dir=self.dashboard_dir)
-            temporary = Path(name)
-            os.fchmod(descriptor, 0o600)
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                json.dump(record, handle, indent=2)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, destination)
-            os.chmod(destination, 0o600)
+            write_json(destination, record, mode=0o600)
         except OSError as exc:
             raise DashboardStoreError(500, "dashboard_store_error", "Dashboard file could not be saved") from exc
-        finally:
-            if temporary:
-                temporary.unlink(missing_ok=True)
         return json.loads(json.dumps(record))
 
     def create(self, title: Any, source_id: Any = None) -> dict[str, Any]:
