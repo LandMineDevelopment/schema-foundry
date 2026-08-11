@@ -60,7 +60,6 @@ const elements = {
   detailTitle: document.querySelector("#detail-report-title"),
   detailTimestamp: document.querySelector("#detail-report-timestamp"),
   detailFilters: document.querySelector("#detail-filter-chips"),
-  detailSearch: document.querySelector("#detail-search"),
   detailBody: document.querySelector("#detail-report-body"),
   detailCount: document.querySelector("#detail-report-count"),
   detailPage: document.querySelector("#detail-page"),
@@ -405,7 +404,7 @@ function reconcileTablePresentation(query, presentation = null) {
 function defaultDetailReport(source) {
   return {
     version: 1,
-    columns: (source?.columns ?? []).slice(0, 64).map(column => ({ sourceColumn: column.name, label: column.name, width: 160, hidden: false, searchable: textPostgresType(column.type), numberFormat: { style: "auto" } })),
+    columns: (source?.columns ?? []).slice(0, 64).map(column => ({ sourceColumn: column.name, label: column.name, width: 160, hidden: false, searchable: true, numberFormat: { style: "auto" } })),
     defaultSort: null,
     rowIdentifier: null,
     pageSize: 25
@@ -425,7 +424,7 @@ function reconcileDetailReport(source, detail = null) {
       label: typeof value?.label === "string" && value.label.trim() ? value.label.trim().slice(0, 128) : sourceColumn,
       width: Number.isInteger(value?.width) && value.width >= 64 && value.width <= 1024 ? value.width : 160,
       hidden: Boolean(value?.hidden),
-      searchable: Boolean(value?.searchable) && textPostgresType(sourceColumns.get(sourceColumn).type),
+      searchable: true,
       numberFormat: ["auto", "integer", "decimal", "currency", "percent"].includes(value?.numberFormat?.style) ? clone(value.numberFormat) : { style: "auto" }
     };
   });
@@ -852,11 +851,6 @@ function editorDetailSection(source) {
     shown.checked = !item.hidden;
     shown.disabled = !item.hidden && widgetDetailDraft.columns.filter(column => !column.hidden).length === 1;
     shown.addEventListener("change", () => { item.hidden = !shown.checked; });
-    const searchable = document.createElement("input");
-    searchable.type = "checkbox";
-    searchable.checked = item.searchable;
-    searchable.disabled = !textPostgresType(source?.columns?.find(column => column.name === item.sourceColumn)?.type ?? "");
-    searchable.addEventListener("change", () => { item.searchable = searchable.checked; });
     const sourceColumn = source?.columns?.find(column => column.name === item.sourceColumn);
     const numberFormat = querySelect(
       [["auto", "Automatic"], ["integer", "Integer"], ["decimal", "Decimal"], ["currency", "Currency"], ["percent", "Percent"]],
@@ -893,7 +887,7 @@ function editorDetailSection(source) {
       move.addEventListener("click", () => { widgetDetailDraft.columns.splice(index, 1); widgetDetailDraft.columns.splice(index + offset, 0, item); renderWidgetQueryDraft(); });
       order.append(move);
     }
-    row.append(sourceName, queryLabel("Display label", label), queryLabel("Width (px)", width), queryLabel("Show", shown), queryLabel("Searchable", searchable), ...formatControls, order);
+    row.append(sourceName, queryLabel("Display label", label), queryLabel("Width (px)", width), queryLabel("Show", shown), ...formatControls, order);
     rows.append(row);
   });
   const settings = document.createElement("div");
@@ -2723,6 +2717,26 @@ function detailRows(result) {
   return rows.map(row => Array.isArray(row) ? row : result.columns.map(column => row[column.sourceColumn ?? column.name ?? column.id]));
 }
 
+function requestColumnSearch(context, sourceColumn, value, immediate = false) {
+  if (value.trim()) context.searches[sourceColumn] = value;
+  else delete context.searches[sourceColumn];
+  context.activeSearchColumn = sourceColumn;
+  context.offset = 0;
+  clearTimeout(detailSearchTimer);
+  if (immediate) return requestDetailReport(context, true);
+  detailSearchTimer = setTimeout(() => {
+    if (detailContext === context) requestDetailReport(context, true);
+  }, 250);
+}
+
+function focusActiveDetailSearch(context) {
+  if (!context.activeSearchColumn) return;
+  const input = [...elements.detailBody.querySelectorAll("[data-search-column]")].find(item => item.dataset.searchColumn === context.activeSearchColumn);
+  if (!input || input.getAttribute("aria-hidden") === "true") return;
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+}
+
 function renderDetailTable(container, context) {
   container.replaceChildren();
   if (context.state !== "ready") {
@@ -2744,14 +2758,19 @@ function renderDetailTable(container, context) {
   const colgroup = document.createElement("colgroup");
   const head = document.createElement("thead");
   const headRow = document.createElement("tr");
+  const searchHeaders = new Map();
   for (const item of columns) {
     const col = document.createElement("col");
-    col.style.width = `${item.presentation?.width ?? 160}px`;
     colgroup.append(col);
     const cell = document.createElement("th");
+    cell.scope = "col";
+    const controls = document.createElement("div");
+    controls.className = "detail-column-head";
     const button = document.createElement("button");
     button.type = "button";
+    button.className = "detail-column-sort";
     const sourceColumn = item.column.sourceColumn ?? item.column.name;
+    const baseWidth = item.presentation?.width ?? 160;
     const activeSort = context.sort?.sourceColumn === sourceColumn ? context.sort : null;
     button.textContent = `${item.presentation?.label ?? item.column.label ?? sourceColumn}${activeSort ? activeSort.direction === "desc" ? " ↓" : " ↑" : ""}`;
     button.setAttribute("aria-label", `Sort by ${item.presentation?.label ?? sourceColumn}${activeSort ? activeSort.direction === "asc" ? " descending" : " ascending" : " ascending"}`);
@@ -2760,7 +2779,76 @@ function renderDetailTable(container, context) {
       context.offset = 0;
       requestDetailReport(context);
     });
-    cell.append(button);
+    const search = document.createElement("input");
+    search.type = "search";
+    search.className = "detail-column-search";
+    search.maxLength = 256;
+    search.placeholder = `Search ${item.presentation?.label ?? sourceColumn}`;
+    search.value = context.searches[sourceColumn] ?? "";
+    search.dataset.searchColumn = sourceColumn;
+    search.setAttribute("aria-label", `Search ${item.presentation?.label ?? sourceColumn}`);
+    const searchBox = document.createElement("span");
+    searchBox.className = "detail-column-search-box";
+    const clear = sharedIconButton({ icon: "close", label: `Clear ${item.presentation?.label ?? sourceColumn} search`, tooltip: "Clear search", placement: "bottom", className: "detail-column-search-clear" });
+    const searchValue = document.createElement("span");
+    searchValue.className = "detail-column-search-value";
+    const toggle = sharedIconButton({ icon: "search", label: `Search ${item.presentation?.label ?? sourceColumn}`, tooltip: `Search ${item.presentation?.label ?? sourceColumn}`, placement: "bottom", className: "detail-column-search-toggle" });
+    searchBox.append(search, clear);
+    const syncSearchValue = expanded => {
+      const value = search.value.trim();
+      searchValue.textContent = value;
+      searchValue.title = value ? `${item.presentation?.label ?? sourceColumn}: ${value}` : "";
+      searchValue.hidden = expanded || !value;
+      clear.hidden = !value;
+      clear.tabIndex = expanded && value ? 0 : -1;
+      toggle.classList.toggle("active", expanded || Boolean(value));
+    };
+    const setExpanded = (expanded, focus = false) => {
+      const previous = context.expandedSearchColumn;
+      if (expanded && previous && previous !== sourceColumn) searchHeaders.get(previous)?.setExpanded(false);
+      if (expanded) context.expandedSearchColumn = sourceColumn;
+      else if (context.expandedSearchColumn === sourceColumn) context.expandedSearchColumn = null;
+      cell.classList.toggle("search-expanded", expanded);
+      toggle.setAttribute("aria-expanded", String(expanded));
+      search.tabIndex = expanded ? 0 : -1;
+      search.setAttribute("aria-hidden", String(!expanded));
+      searchBox.setAttribute("aria-hidden", String(!expanded));
+      col.style.width = `${expanded ? Math.max(baseWidth, 300) : baseWidth}px`;
+      syncSearchValue(expanded);
+      if (expanded && focus) requestAnimationFrame(() => { search.focus(); search.setSelectionRange(search.value.length, search.value.length); });
+    };
+    searchHeaders.set(sourceColumn, { setExpanded });
+    toggle.addEventListener("click", () => setExpanded(context.expandedSearchColumn !== sourceColumn, true));
+    search.addEventListener("input", () => {
+      syncSearchValue(true);
+      requestColumnSearch(context, sourceColumn, search.value);
+    });
+    clear.addEventListener("click", event => {
+      event.stopPropagation();
+      search.value = "";
+      syncSearchValue(true);
+      requestColumnSearch(context, sourceColumn, "", true);
+    });
+    search.addEventListener("keydown", event => {
+      event.stopPropagation();
+      if (event.key === "Enter") {
+        event.preventDefault();
+        requestColumnSearch(context, sourceColumn, search.value, true);
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        if (search.value || context.searches[sourceColumn]) {
+          search.value = "";
+          syncSearchValue(true);
+          requestColumnSearch(context, sourceColumn, "", true);
+        } else {
+          setExpanded(false);
+          toggle.focus();
+        }
+      }
+    });
+    controls.append(button, searchValue, searchBox, toggle);
+    cell.append(controls);
+    setExpanded(context.expandedSearchColumn === sourceColumn);
     headRow.append(cell);
   }
   head.append(headRow);
@@ -2827,23 +2915,27 @@ function renderDetailReport() {
   elements.detailPage.textContent = `Page ${page} of ${pages}`;
   elements.detailPrevious.disabled = detailContext.state !== "ready" || detailContext.offset === 0;
   elements.detailNext.disabled = detailContext.state !== "ready" || !result?.hasMore;
-  elements.detailSearch.disabled = !detailContext.detail.columns.some(column => column.searchable);
   renderDetailTable(elements.detailBody, detailContext);
 }
 
-async function requestDetailReport(context) {
+async function requestDetailReport(context, preserveTable = false) {
+  clearTimeout(detailSearchTimer);
   const token = {};
   detailRequestToken = token;
   context.state = "loading";
   context.message = "Loading selected source rows...";
-  renderDetailReport();
+  if (!preserveTable) renderDetailReport();
   const detailColumns = context.detail.columns.map((column, index) => ({ id: `detail_column_${index + 1}`, label: column.label, column: column.sourceColumn, numberFormat: clone(column.numberFormat), searchable: column.searchable }));
   const sortColumnIndex = context.detail.columns.findIndex(column => column.sourceColumn === context.sort?.sourceColumn);
   const requestDetail = { version: 1, columns: detailColumns, rowIdentifier: context.detail.rowIdentifier };
   const requestSort = sortColumnIndex < 0 ? null : { targetId: detailColumns[sortColumnIndex].id, direction: context.sort.direction, nulls: context.sort.nulls };
+  const requestSearches = context.detail.columns.flatMap((column, index) => {
+    const value = (context.searches[column.sourceColumn] ?? "").trim();
+    return column.searchable && value ? [{ targetId: detailColumns[index].id, value }] : [];
+  });
   const request = {
     source: clone(context.source), query: clone(context.query), selection: clone(context.selection), detail: requestDetail,
-    offset: context.offset, limit: context.limit, sort: requestSort, search: context.search
+    offset: context.offset, limit: context.limit, sort: requestSort, searches: requestSearches
   };
   context.request = clone(request);
   try {
@@ -2855,6 +2947,7 @@ async function requestDetailReport(context) {
     context.result = result;
     context.message = "";
     renderDetailReport();
+    if (preserveTable) focusActiveDetailSearch(context);
   } catch (error) {
     if (detailContext !== context || detailRequestToken !== token) return;
     context.state = "error";
@@ -2880,9 +2973,8 @@ function openDetailReport(target, widgetId) {
     dashboardId: activeDashboard.id, widgetId: widget.id, widgetTitle: `${widget.title} details`, source: clone(widget.configuration.source),
     query: queryForVisualization(clone(widget.configuration.query), clone(widget.configuration.visualization)), selection, detail,
     dashboardQueriedAt: widgetQueryResults.get(widget.id)?.result?.queriedAt ?? null,
-    offset: 0, limit: detail.pageSize, sort: clone(detail.defaultSort), search: "", state: "loading", result: null, message: "Loading selected source rows..."
+    offset: 0, limit: detail.pageSize, sort: clone(detail.defaultSort), searches: {}, expandedSearchColumn: null, activeSearchColumn: null, state: "loading", result: null, message: "Loading selected source rows..."
   };
-  elements.detailSearch.value = "";
   elements.detailDrawer.classList.add("open");
   elements.widgetFocus.classList.add("detail-open");
   elements.detailDrawer.inert = false;
@@ -3038,7 +3130,7 @@ function appendQueryInputs(query, detail = null) {
     const detailList = document.createElement("dl");
     appendLineageField(detailList, "Clicked dimensions", selection);
     appendLineageField(detailList, "Selected measure", detail.selection?.measureId || "None");
-    appendLineageField(detailList, "Detail search", detail.search || "None");
+    appendLineageField(detailList, "Column searches", detail.searches?.map(item => `${item.targetId}: ${item.value}`).join(", ") || "None");
     appendLineageField(detailList, "Detail sort", detail.sort ? `${detail.sort.targetId} ${detail.sort.direction} NULLS ${detail.sort.nulls}` : "Default/none");
     appendLineageField(detailList, "Detail offset / limit", `${detail.offset} / ${detail.limit}`);
     body.append(detailList);
@@ -3485,7 +3577,7 @@ elements.widgetFocusContent.addEventListener("keydown", event => {
   inspectMetric(metric);
 });
 elements.detailDrawer.querySelector(".detail-report-head").addEventListener("click", event => {
-  if (event.target.closest("button")) return;
+  if (event.target.closest(".detail-report-actions button")) return;
   toggleDetailPane();
 });
 elements.widgetFocusContent.addEventListener("click", event => {
@@ -3499,15 +3591,6 @@ elements.widgetFocusContent.addEventListener("keydown", event => {
 });
 elements.detailPrevious.addEventListener("click", () => { if (detailContext) { detailContext.offset = Math.max(0, detailContext.offset - detailContext.limit); requestDetailReport(detailContext); } });
 elements.detailNext.addEventListener("click", () => { if (detailContext?.result?.hasMore) { detailContext.offset += detailContext.limit; requestDetailReport(detailContext); } });
-elements.detailSearch.addEventListener("input", () => {
-  clearTimeout(detailSearchTimer);
-  detailSearchTimer = setTimeout(() => {
-    if (!detailContext) return;
-    detailContext.search = elements.detailSearch.value;
-    detailContext.offset = 0;
-    requestDetailReport(detailContext);
-  }, 250);
-});
 document.querySelector("#view-detail-sql").addEventListener("click", openDetailSql);
 document.querySelector("#view-detail-lineage").addEventListener("click", () => {
   const widget = activeDashboard?.dashboard.widgets.find(item => item.id === detailContext?.widgetId);

@@ -681,7 +681,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         offset: Any,
         limit: Any,
         sort: Any,
-        search: Any,
+        searches: Any,
     ) -> dict[str, Any]:
         database, namespace, relation, kind, fingerprint, source_columns = self._validate_relation_source(profile_id, source)
         if source_columns is None:
@@ -689,7 +689,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         try:
             normalized_query = normalize_query(query, source_columns)
             normalized_request = normalize_detail_request(
-                selection, detail, offset, limit, sort, search, normalized_query, source_columns
+                selection, detail, offset, limit, sort, searches, normalized_query, source_columns
             )
         except QueryValidationError as exc:
             raise ValidationError(str(exc)) from exc
@@ -714,7 +714,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                 normalized_request = normalize_detail_request(
                     normalized_request["selection"], normalized_request["detail"],
                     normalized_request["offset"], normalized_request["limit"], normalized_request["sort"],
-                    normalized_request["search"], normalized_query, descriptor["columns"],
+                    normalized_request["searches"], normalized_query, descriptor["columns"],
                 )
             except QueryValidationError as exc:
                 raise ValidationError(str(exc)) from exc

@@ -246,7 +246,6 @@ class DashboardStoreTests(unittest.TestCase):
             {**DETAIL, "columns": [{**DETAIL["columns"][0], "hidden": 0}]},
             {**DETAIL, "columns": [{**column, "hidden": True} for column in DETAIL["columns"]]},
             {**DETAIL, "columns": [{**DETAIL["columns"][0], "searchable": "yes"}]},
-            {**DETAIL, "columns": [{**DETAIL["columns"][1], "searchable": True}]},
             {**DETAIL, "columns": [{**DETAIL["columns"][0], "label": ""}]},
             {**DETAIL, "columns": [{**DETAIL["columns"][0], "label": "x" * 129}]},
             {**DETAIL, "columns": [{**DETAIL["columns"][0], "extra": False}]},
@@ -296,7 +295,7 @@ class DashboardStoreTests(unittest.TestCase):
         record = self.store.get("dashboard_mercury")
         widget = record["dashboard"]["widgets"][0]
         widget["kind"] = "aggregate_report"
-        detail = {**DETAIL, "columns": [DETAIL["columns"][0]], "defaultSort": {"sourceColumn": "id", "direction": "asc", "nulls": "last"}}
+        detail = {**DETAIL, "columns": [{**DETAIL["columns"][0], "searchable": True}], "defaultSort": {"sourceColumn": "id", "direction": "asc", "nulls": "last"}}
         widget["configuration"] = {"source": {**SOURCE, "columns": SOURCE_COLUMNS}, "query": QUERY, "detail": detail}
         saved = self.store.save(record["id"], record)
         self.assertEqual(saved["dashboard"]["widgets"][0]["configuration"]["detail"], detail)

@@ -110,8 +110,8 @@ class FakePostgresService:
         self.calls.append(("execute_widget_query", profile_id, source, query))
         return {"columns": [{"label": "Rows"}], "rows": [[1]], "sql": "SELECT count(*)", "parameters": []}
 
-    def execute_relation_detail(self, profile_id, source, query, selection, detail, offset, limit, sort, search):
-        self.calls.append(("execute_relation_detail", profile_id, source, query, selection, detail, offset, limit, sort, search))
+    def execute_relation_detail(self, profile_id, source, query, selection, detail, offset, limit, sort, searches):
+        self.calls.append(("execute_relation_detail", profile_id, source, query, selection, detail, offset, limit, sort, searches))
         return {"columns": [], "rows": [], "matchingRowCount": 0, "offset": offset, "limit": limit, "hasMore": False}
 
     def catalog_status(self, profile_id, namespace):

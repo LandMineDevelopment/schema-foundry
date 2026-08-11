@@ -26,10 +26,6 @@ class QueryValidationError(ValueError):
     pass
 
 
-def is_searchable_text_type(value: Any) -> bool:
-    return isinstance(value, str) and bool(TEXT_TYPE_RE.fullmatch(value))
-
-
 def _text(value: Any, field: str, maximum: int = 128) -> str:
     if not isinstance(value, str) or not value or value != value.strip() or len(value) > maximum or any(ord(char) < 32 or ord(char) == 127 for char in value):
         raise QueryValidationError(f"{field} must be a trimmed string up to {maximum} characters")
@@ -241,7 +237,7 @@ def normalize_query(query: Any, source_columns: list[dict[str, Any]] | None = No
 
 
 def normalize_detail_request(
-    selection: Any, detail: Any, offset: Any, limit: Any, sort: Any, search: Any,
+    selection: Any, detail: Any, offset: Any, limit: Any, sort: Any, searches: Any,
     query: dict[str, Any], source_columns: list[dict[str, Any]],
 ) -> dict[str, Any]:
     columns_by_name = {column.get("name"): column for column in source_columns}
@@ -286,8 +282,6 @@ def normalize_detail_request(
         source_column = columns_by_name.get(column_name)
         if item_id in detail_ids or column_name in detail_source_columns or source_column is None or not isinstance(item.get("searchable"), bool):
             raise QueryValidationError("detail column identity or source binding is invalid or duplicated")
-        if item["searchable"] and not is_searchable_text_type(source_column.get("type")):
-            raise QueryValidationError("searchable detail columns must use PostgreSQL text columns")
         detail_ids.add(item_id)
         detail_source_columns.add(column_name)
         detail_columns.append({
@@ -301,10 +295,20 @@ def normalize_detail_request(
         raise QueryValidationError("offset must be an integer from 0 to 10000000")
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
         raise QueryValidationError("limit must be an integer from 1 to 100")
-    if not isinstance(search, str) or len(search) > 256 or any(ord(char) < 32 or ord(char) == 127 for char in search):
-        raise QueryValidationError("search must be a string up to 256 characters")
-    if search and not any(item["searchable"] for item in detail_columns):
-        raise QueryValidationError("search requires a configured searchable text column")
+    searchable_by_id = {item["id"]: item for item in detail_columns if item["searchable"]}
+    search_values = {}
+    for item in _bounded_list(searches, "detail searches", 0, 64):
+        if not isinstance(item, dict) or set(item) != {"targetId", "value"}:
+            raise QueryValidationError("detail search fields are invalid")
+        target_id = item.get("targetId")
+        value = item.get("value")
+        if target_id not in searchable_by_id or target_id in search_values:
+            raise QueryValidationError("detail search target is invalid or duplicated")
+        search_values[target_id] = _text(value, "detail search value", 256)
+    normalized_searches = [
+        {"targetId": item["id"], "value": search_values[item["id"]]}
+        for item in detail_columns if item["id"] in search_values
+    ]
     if sort is not None:
         if not isinstance(sort, dict) or set(sort) != {"targetId", "direction", "nulls"} or sort.get("targetId") not in detail_ids or sort.get("direction") not in {"asc", "desc"} or sort.get("nulls") not in {"first", "last"}:
             raise QueryValidationError("detail sort is invalid")
@@ -312,7 +316,7 @@ def normalize_detail_request(
     return {
         "selection": {"dimensions": normalized_selection, **({"measureId": measure_id} if "measureId" in selection else {})},
         "detail": {"version": 1, "columns": detail_columns, "rowIdentifier": row_identifier},
-        "offset": offset, "limit": limit, "sort": sort, "search": search,
+        "offset": offset, "limit": limit, "sort": sort, "searches": normalized_searches,
     }
 
 
@@ -392,11 +396,12 @@ def compile_detail_query(
     measure_id = request["selection"].get("measureId")
     if measure_id is not None and measures_by_id[measure_id]["aggregation"] != "count_rows":
         predicates.append(f'{quote(measures_by_id[measure_id]["column"])} IS NOT NULL')
-    searchable = [quote(item["column"]) for item in detail_columns if item["searchable"]]
-    if request["search"] and searchable:
-        escaped = request["search"].replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        predicates.append("(" + " OR ".join(f"{column} ILIKE %s ESCAPE E'\\\\'" for column in searchable) + ")")
-        parameters.extend(f"%{escaped}%" for _ in searchable)
+    detail_by_id = {item["id"]: item for item in detail_columns}
+    for search in request["searches"]:
+        column = quote(detail_by_id[search["targetId"]]["column"])
+        escaped = search["value"].replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        predicates.append(f"CAST({column} AS text) ILIKE %s ESCAPE E'\\\\'")
+        parameters.append(f"%{escaped}%")
     relation = f'{quote(source["namespace"])}.{quote(source["relation"])}'
     where = "\nWHERE\n    " + "\n    AND ".join(predicates) if predicates else ""
     count_sql = f'SELECT pg_catalog.count(*) AS {quote("__schemer_count")}\nFROM {relation}{where}'

@@ -142,8 +142,9 @@ class WidgetQueryTests(unittest.TestCase):
         detail = {
             "version": 1,
             "columns": [
-                {"id": "detail_customer", "label": "Customer", "column": "customer_id", "numberFormat": {"style": "integer"}, "searchable": False},
+                {"id": "detail_customer", "label": "Customer", "column": "customer_id", "numberFormat": {"style": "integer"}, "searchable": True},
                 {"id": "detail_publisher", "label": "Publisher", "column": "publisher", "numberFormat": {"style": "auto"}, "searchable": True},
+                {"id": "detail_format", "label": "Format", "column": "format", "numberFormat": {"style": "auto"}, "searchable": True},
             ],
             "rowIdentifier": "customer_id",
         }
@@ -154,7 +155,11 @@ class WidgetQueryTests(unittest.TestCase):
             ], "measureId": "measure_revenue"},
             detail, 20, 25,
             {"targetId": "detail_publisher", "direction": "desc", "nulls": "last"},
-            "50%_off", normalized, COLUMNS,
+            [
+                {"targetId": "detail_format", "value": "paper"},
+                {"targetId": "detail_publisher", "value": "50%_off"},
+                {"targetId": "detail_customer", "value": "42"},
+            ], normalized, COLUMNS,
         )
         compiled = compile_detail_query(
             {"namespace": "bookstore", "relation": "book sales"}, normalized, request, COLUMNS, quote_identifier
@@ -165,13 +170,16 @@ class WidgetQueryTests(unittest.TestCase):
             self.assertIn('"publisher" = %s', sql)
             self.assertIn('"format" IS NULL', sql)
             self.assertIn('"revenue" IS NOT NULL', sql)
-            self.assertIn('"publisher" ILIKE %s', sql)
+            self.assertIn('CAST("customer_id" AS text) ILIKE %s', sql)
+            self.assertIn('CAST("publisher" AS text) ILIKE %s', sql)
+            self.assertIn('CAST("format" AS text) ILIKE %s', sql)
+            self.assertNotIn('ILIKE %s ESCAPE E\'\\\\\' OR', sql)
             self.assertNotIn("O'Reilly", sql)
         self.assertIn('"__schemer_c1" DESC NULLS LAST', compiled["sql"])
         self.assertIn('"customer_id" ASC NULLS LAST', compiled["sql"])
         self.assertEqual(
             compiled["countParameters"],
-            ["paperback", "hardcover", "O'Reilly", "%50\\%\\_off%"],
+            ["paperback", "hardcover", "O'Reilly", "%42%", "%50\\%\\_off%", "%paper%"],
         )
         self.assertEqual(compiled["parameters"][-2:], [25, 20])
         self.assertIn("contains", compiled["columns"][1]["operators"])
@@ -189,17 +197,18 @@ class WidgetQueryTests(unittest.TestCase):
             {"targetId": "dimension_format", "value": "paperback"},
         ]}
         invalid = [
-            (valid_selection["dimensions"][:1], detail, 0, 20, None, ""),
-            ([valid_selection["dimensions"][0], valid_selection["dimensions"][0]], detail, 0, 20, None, ""),
-            (valid_selection["dimensions"], {**detail, "columns": [{**detail["columns"][0], "column": "missing"}]}, 0, 20, None, ""),
-            (valid_selection["dimensions"], {**detail, "columns": [{**detail["columns"][0], "column": "revenue"}]}, 0, 20, None, "search"),
-            (valid_selection["dimensions"], detail, -1, 20, None, ""),
-            (valid_selection["dimensions"], detail, 0, 101, None, ""),
-            (valid_selection["dimensions"], detail, 0, 20, {"targetId": "missing", "direction": "asc", "nulls": "last"}, ""),
+            (valid_selection["dimensions"][:1], detail, 0, 20, None, []),
+            ([valid_selection["dimensions"][0], valid_selection["dimensions"][0]], detail, 0, 20, None, []),
+            (valid_selection["dimensions"], {**detail, "columns": [{**detail["columns"][0], "column": "missing"}]}, 0, 20, None, []),
+            (valid_selection["dimensions"], detail, -1, 20, None, []),
+            (valid_selection["dimensions"], detail, 0, 101, None, []),
+            (valid_selection["dimensions"], detail, 0, 20, {"targetId": "missing", "direction": "asc", "nulls": "last"}, []),
+            (valid_selection["dimensions"], detail, 0, 20, None, [{"targetId": "missing", "value": "search"}]),
+            (valid_selection["dimensions"], detail, 0, 20, None, [{"targetId": "detail_publisher", "value": "search"}, {"targetId": "detail_publisher", "value": "again"}]),
         ]
-        for dimensions, candidate_detail, offset, limit, sort, search in invalid:
+        for dimensions, candidate_detail, offset, limit, sort, searches in invalid:
             with self.subTest(detail=candidate_detail, offset=offset, limit=limit), self.assertRaises(QueryValidationError):
-                normalize_detail_request({"dimensions": dimensions}, candidate_detail, offset, limit, sort, search, normalized, COLUMNS)
+                normalize_detail_request({"dimensions": dimensions}, candidate_detail, offset, limit, sort, searches, normalized, COLUMNS)
 
     def test_rejects_invalid_shapes_references_and_values(self):
         invalid = []

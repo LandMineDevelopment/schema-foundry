@@ -111,13 +111,13 @@ class PostgresHttpMixin:
         if body is None:
             return True
         if relation_detail_match:
-            fields = {"source", "query", "selection", "detail", "offset", "limit", "sort", "search"}
+            fields = {"source", "query", "selection", "detail", "offset", "limit", "sort", "searches"}
             if not isinstance(body, dict) or set(body) != fields:
                 self.send_json(400, {"error": {"code": "validation_error", "message": "detail request fields are invalid"}})
             else:
                 self._service_call(lambda: self.service.execute_relation_detail(
                     relation_detail_match.group(1), body["source"], body["query"], body["selection"],
-                    body["detail"], body["offset"], body["limit"], body["sort"], body["search"],
+                    body["detail"], body["offset"], body["limit"], body["sort"], body["searches"],
                 ))
         elif relation_query_match:
             if not isinstance(body, dict) or set(body) != {"source", "query"}:

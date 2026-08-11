@@ -110,7 +110,7 @@ class SchemerServerTests(unittest.TestCase):
         detail_request = {
             "source": preview_source, "query": query, "selection": {"dimensions": []},
             "detail": {"version": 1, "columns": [], "rowIdentifier": None},
-            "offset": 0, "limit": 20, "sort": None, "search": "",
+            "offset": 0, "limit": 20, "sort": None, "searches": [],
         }
         detail_path = "/api/postgres/profiles/shared/relation/detail"
         self.assertEqual(self.request(detail_path, "POST", detail_request)[0], 403)
@@ -119,9 +119,12 @@ class SchemerServerTests(unittest.TestCase):
         self.assertEqual(json.loads(body)["matchingRowCount"], 0)
         self.assertIn((
             "execute_relation_detail", "shared", preview_source, query, detail_request["selection"],
-            detail_request["detail"], 0, 20, None, "",
+            detail_request["detail"], 0, 20, None, [],
         ), self.service.calls)
         self.assertEqual(self.request(detail_path, "POST", {**detail_request, "extra": True}, True)[0], 400)
+        legacy_request = {key: value for key, value in detail_request.items() if key != "searches"}
+        legacy_request["search"] = "old global search"
+        self.assertEqual(self.request(detail_path, "POST", legacy_request, True)[0], 400)
         self.assertIn(("test_profile", "shared"), self.service.calls)
 
     def test_schema_design_routes_are_not_exposed(self):

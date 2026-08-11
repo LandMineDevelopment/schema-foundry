@@ -510,7 +510,8 @@ class PostgresServiceTests(unittest.TestCase):
         }
         result = service.execute_relation_detail(
             "local", source, query, selection, detail, 0, 2,
-            {"targetId": "detail_amount", "direction": "desc", "nulls": "last"}, "acme",
+            {"targetId": "detail_amount", "direction": "desc", "nulls": "last"},
+            [{"targetId": "detail_status", "value": "acme"}],
         )
         self.assertEqual(result["rows"], [["paid", "30.50"], ["paid", "12"]])
         self.assertEqual(result["matchingRowCount"], 3)
@@ -533,7 +534,7 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertTrue(query_connection.closed)
 
         with self.assertRaises(ValidationError):
-            service.execute_relation_detail("local", source, query, selection, detail, 0, 101, None, "")
+            service.execute_relation_detail("local", source, query, selection, detail, 0, 101, None, [])
 
     def test_relation_inspection_rejects_stale_kind_and_fingerprint(self):
         responses = {

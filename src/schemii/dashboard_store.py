@@ -11,7 +11,7 @@ from typing import Any
 
 from .atomic_json import write_json
 from .relation_source import RelationSourceValidationError, normalize_relation_source
-from .widget_query import QueryValidationError, is_searchable_text_type, normalize_number_format, normalize_query
+from .widget_query import QueryValidationError, normalize_number_format, normalize_query
 
 
 DASHBOARD_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
@@ -142,8 +142,6 @@ def _detail_configuration(value: Any, source_columns: list[dict[str, Any]], widg
             raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} detail source column is invalid or duplicated")
         if not isinstance(column.get("hidden"), bool) or not isinstance(column.get("searchable"), bool):
             raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} detail column behavior is invalid")
-        if column["searchable"] and not is_searchable_text_type(snapshot_columns[source_column]["type"]):
-            raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} searchable detail columns must use PostgreSQL text columns")
         configured_columns.add(source_column)
         try:
             number_format = normalize_number_format(column.get("numberFormat"))
