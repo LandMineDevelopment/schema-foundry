@@ -7,6 +7,7 @@ from .postgres_common import NotFoundError, PostgresServiceError, ValidationErro
 
 
 FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
+MAX_RELATION_DEFINITION_BYTES = 64 * 1024
 
 
 class PostgresCatalogMixin:
@@ -148,4 +149,13 @@ class PostgresCatalogMixin:
             raise PostgresServiceError(409, "relation_changed", "The PostgreSQL relation kind changed; reselect the widget source")
         if expected_fingerprint is not None and descriptor["fingerprint"] != expected_fingerprint:
             raise PostgresServiceError(409, "relation_changed", "The PostgreSQL relation definition changed; reselect the widget source")
+        view_definition = relation_row.get("view_definition")
+        if descriptor["kind"] not in {"view", "materialized_view"}:
+            descriptor["definition"] = {"status": "unavailable", "reason": "not_supported"}
+        elif not isinstance(view_definition, str) or not view_definition:
+            descriptor["definition"] = {"status": "unavailable", "reason": "not_permitted"}
+        elif len(view_definition.encode("utf-8")) > MAX_RELATION_DEFINITION_BYTES:
+            descriptor["definition"] = {"status": "unavailable", "reason": "too_large"}
+        else:
+            descriptor["definition"] = {"status": "available", "format": "query", "sql": view_definition}
         return descriptor

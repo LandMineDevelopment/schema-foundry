@@ -56,7 +56,7 @@
           </template>
         </section>
         <aside class="detail-drawer" id="detail-drawer" aria-label="Detail report" aria-hidden="true" inert>
-          <header class="detail-report-head"><button class="detail-report-heading" id="expand-detail-report" type="button" aria-expanded="true"><span class="eyebrow">Detail report</span><strong id="detail-report-title">Selected rows</strong><small id="detail-report-timestamp"></small></button><button id="view-detail-sql" type="button">View SQL</button><span class="shared-icon-button detail-close-spacer" aria-hidden="true"></span></header>
+          <header class="detail-report-head"><button class="detail-report-heading" id="expand-detail-report" type="button" aria-expanded="true"><span class="eyebrow">Detail report</span><strong id="detail-report-title">Selected rows</strong><small id="detail-report-timestamp"></small></button><div class="detail-report-actions"><button id="view-detail-lineage" type="button">Data lineage</button><button id="view-detail-sql" type="button">View SQL</button></div><span class="shared-icon-button detail-close-spacer" aria-hidden="true"></span></header>
           <div class="detail-report-controls"><div class="detail-filter-chips" id="detail-filter-chips" aria-label="Active detail filters"></div><label>Search<input id="detail-search" type="search" maxlength="256" placeholder="Search detail rows" /></label></div>
           <div class="detail-report-body" id="detail-report-body" aria-live="polite"></div>
           <footer class="detail-report-footer"><span id="detail-report-count"></span><div><button type="button" id="detail-previous">Previous</button><span id="detail-page"></span><button type="button" id="detail-next">Next</button></div></footer>
@@ -99,6 +99,12 @@
     <dialog class="executed-sql-dialog" id="executed-sql-dialog">
       <div class="dialog-head"><div><span class="eyebrow" id="executed-sql-context">Widget result</span><h2 id="executed-sql-title">Executed SQL</h2><p id="executed-sql-status"></p></div><button id="close-executed-sql" type="button" aria-label="Close executed SQL">x</button></div>
       <div class="executed-sql-body"><pre><code id="executed-sql-code"></code></pre><section id="executed-sql-parameters" hidden><strong>Bound parameters</strong><pre><code id="executed-sql-parameter-code"></code></pre></section></div>
+    </dialog>
+
+    <dialog class="lineage-dialog shared-dialog" id="lineage-dialog">
+      <div class="dialog-head shared-dialog-head"><div><span class="eyebrow">Verified execution</span><h2 id="lineage-title">Data Lineage</h2><p>Source metadata, filters, execution facts, SQL, and parameters for the displayed result.</p></div><button id="close-lineage" type="button" aria-label="Close data lineage">x</button></div>
+      <div class="lineage-body" id="lineage-body"></div>
+      <p class="lineage-status" id="lineage-status" role="status" aria-live="polite"></p>
     </dialog>
 
     <div class="app-tooltip" id="app-tooltip" role="tooltip" hidden></div>

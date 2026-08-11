@@ -220,6 +220,16 @@ assert.match(source, /detailContext\.query\.filters\.forEach[\s\S]*condition\.op
 assert.match(source, /dashboardQueriedAt[\s\S]*Dashboard [\s\S]*Detail /, "detail reports must distinguish the dashboard result time from the live detail query time");
 for (const field of ["matchingRowCount", "hasMore", "queriedAt", "queryDurationMs"]) assert.match(source, new RegExp(field), `detail results must consume server ${field}`);
 assert.match(source, /function openDetailSql\(\)[\s\S]*result\.sql[\s\S]*result\.parameters/, "detail results must expose SQL provenance");
+assert.match(html, /id="view-detail-lineage"[\s\S]*id="lineage-dialog"[\s\S]*id="lineage-body"/, "detail reports need a reusable Data Lineage dialog");
+assert.match(source, /widget\.configuration\?\.source \? sharedIconButton\(\{[\s\S]*action: "view-widget-lineage"/, "every sourced widget needs a Data Lineage action without claiming lineage for static previews");
+assert.match(source, /function openDataLineage\(widget[\s\S]*Profile label[\s\S]*Profile ID[\s\S]*Relation kind[\s\S]*Fingerprint[\s\S]*Verification/, "lineage must show the exact safe source identity");
+assert.match(source, /Dashboard slicers[\s\S]*dashboard slicers are deferred[\s\S]*Dimensions[\s\S]*Measures[\s\S]*lineage-filter-groups/, "lineage must distinguish deferred slicers from active widget inputs");
+assert.match(source, /Returned result rows[\s\S]*Matching detail rows[\s\S]*Result limit[\s\S]*Truncated[\s\S]*More detail rows/, "lineage must show result size, truncation, and detail execution facts");
+assert.match(source, /Aggregation SQL[\s\S]*Aggregation parameters[\s\S]*Detail count SQL[\s\S]*Detail count parameters/, "aggregation, detail page, detail count, and parameter provenance must remain separate");
+assert.match(source, /navigator\.clipboard\.writeText\(value\)/, "lineage copy controls must use an explicit user-initiated clipboard write");
+assert.match(source, /function appendLineageCode[\s\S]*code\.textContent = value/, "untrusted relation definitions and SQL must render only as text");
+assert.doesNotMatch(source.slice(source.indexOf("function copyLineageValue"), source.indexOf("function openDashboardForm")), /replace\([^)]*\$|interpolat|connectionString|password/, "lineage copy controls must not interpolate parameters or include credentials");
+assert.match(source, /lineageReturnFocus = document\.activeElement[\s\S]*lineageReturnFocus\?\.isConnected[\s\S]*\.focus\(\)/, "closing lineage must restore focus to its invoking control");
 assert.match(styles, /\.widget-focus\.detail-open \{[^}]*bottom: 74px[\s\S]*\.widget-focus\.detail-open\.detail-active \{[^}]*bottom: calc\(100vh - 104px\)[\s\S]*\.detail-drawer\.open \{[^}]*top: 112px[\s\S]*\.detail-drawer\.open\.collapsed \{[^}]*top: calc\(100vh - 66px\)/, "widget and detail panes must share vertical space and animate between expanded headers");
 assert.match(styles, /\.detail-drawer \{[^}]*right: 12px;[^}]*bottom: 8px;[^}]*left: 12px;[^}]*border: 1px solid[^}]*border-radius: 9px;[^}]*transform: translateY\(calc\(100% \+ 8px\)\)/, "the detail report needs the same inset bordered bubble treatment as the widget pane");
 assert.match(sharedStyles, /\.shared-icon-button, \.icon-button \{[^}]*width: 27px;[^}]*height: 27px;[^}]*border-radius: 5px;/, "Schemii and Schemer icon buttons must share one visual definition");

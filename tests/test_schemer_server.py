@@ -28,6 +28,7 @@ class SchemerServerTests(unittest.TestCase):
                 "profileId": "shared", "database": "schemii", "namespace": "bookstore", "relation": "orders",
                 "kind": "table", "columns": [{"name": "id", "type": "bigint", "nullable": False, "ordinal": 1, "suggestions": ["dimension", "identifier"]}],
                 "fingerprint": "catalog-fingerprint",
+                "definition": {"status": "unavailable", "reason": "not_supported"},
             },
             preview_rows=[{"id": 1}],
             test_result={"ok": True, "database": "schemii"},
@@ -78,6 +79,8 @@ class SchemerServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["columns"][0]["type"], "bigint")
         self.assertEqual(json.loads(body)["columns"][0]["suggestions"], ["dimension", "identifier"])
+        self.assertEqual(json.loads(body)["definition"], {"status": "unavailable", "reason": "not_supported"})
+        self.assertNotIn("password", body.decode())
         self.assertEqual(self.request("/api/postgres/profiles/shared/test", "POST", {}, True)[0], 200)
         self.assertIn(("list_namespaces", "shared"), self.service.calls)
         self.assertIn(("list_relations", "shared", "schemii", "bookstore"), self.service.calls)

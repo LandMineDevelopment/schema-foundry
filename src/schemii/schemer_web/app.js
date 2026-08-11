@@ -52,6 +52,10 @@ const elements = {
   sqlCode: document.querySelector("#executed-sql-code"),
   sqlParameters: document.querySelector("#executed-sql-parameters"),
   sqlParameterCode: document.querySelector("#executed-sql-parameter-code"),
+  lineageDialog: document.querySelector("#lineage-dialog"),
+  lineageTitle: document.querySelector("#lineage-title"),
+  lineageBody: document.querySelector("#lineage-body"),
+  lineageStatus: document.querySelector("#lineage-status"),
   detailDrawer: document.querySelector("#detail-drawer"),
   detailTitle: document.querySelector("#detail-report-title"),
   detailTimestamp: document.querySelector("#detail-report-timestamp"),
@@ -109,6 +113,7 @@ let detailRequestToken = null;
 let detailContext = null;
 let detailReturnFocus = null;
 let detailSearchTimer = null;
+let lineageReturnFocus = null;
 const sessionClient = window.SchemiiShared.createSessionClient({
   getToken: () => sessionToken,
   setToken: token => { sessionToken = token; }
@@ -150,10 +155,12 @@ for (const [id, label] of [
   ["close-dashboard-form", "Close dashboard form"],
   ["close-widget-editor", "Close widget editor"],
   ["close-executed-sql", "Close executed SQL"],
+  ["close-lineage", "Close data lineage"],
   ["close-widget-inspector", "Close selected population"],
 ]) replaceWithSharedIcon(id, { icon: "close", label, tooltip: label });
 replaceWithSharedIcon("view-inspector-sql", { icon: "sql", label: "View selected population SQL", tooltip: "View SQL" });
 replaceWithSharedIcon("view-detail-sql", { icon: "sql", label: "View detail report SQL", tooltip: "View SQL", className: "detail-sql-button" });
+replaceWithSharedIcon("view-detail-lineage", { icon: "database", label: "View detail report data lineage", tooltip: "Data lineage", className: "detail-lineage-button" });
 replaceWithSharedIcon("connections-button", { icon: "database", label: "Data sources", tooltip: "Data sources", placement: "bottom" });
 elements.editModeButton = replaceWithSharedIcon("edit-mode-button", { icon: "edit", label: "Edit dashboard", tooltip: "Edit dashboard", placement: "bottom" });
 elements.addWidgetButton = replaceWithSharedIcon("add-widget-button", { icon: "add", label: "Add widget", tooltip: "Add widget", placement: "bottom" });
@@ -2042,7 +2049,9 @@ async function executeWidgetQuery(widget, query = widget.configuration?.query, {
     if (activeDashboard?.id !== dashboardId || widgetQueryExecutionTokens.get(tokenKey) !== executionToken || !sourceCurrent || !queryCurrent) throw new Error("Query execution was superseded; run it again");
     if (publish) {
       widgetTablePages.set(widget.id, 0);
-      widgetQueryResults.set(widget.id, { state: "ready", result });
+      widgetQueryResults.set(widget.id, {
+        state: "ready", result, source: sourceSnapshot, query: executionQuerySnapshot,
+      });
       executedSqlByResult.set(`${widget.id}:widget`, { sql: result.sql, parameters: result.parameters });
     }
     if (publish && render) renderDashboard();
@@ -2128,6 +2137,10 @@ function dashboardWidgetElement(widget) {
   oldMenu?.remove();
   const viewSql = sharedIconButton({ icon: "sql", label: `View SQL for ${widget.title}`, tooltip: "View SQL", className: "widget-sql-button" });
   viewSql.dataset.action = "view-widget-sql";
+  const viewLineage = widget.configuration?.source ? sharedIconButton({
+    icon: "database", label: `View data lineage for ${widget.title}`, tooltip: "Data lineage",
+    className: "widget-lineage-button", dataset: { action: "view-widget-lineage" },
+  }) : null;
   const controls = document.createElement("div");
   controls.className = "widget-edit-controls";
   const widgetIndex = activeDashboard?.dashboard.widgets.findIndex(item => item.id === widget.id) ?? -1;
@@ -2139,7 +2152,7 @@ function dashboardWidgetElement(widget) {
   const duplicate = sharedIconButton({ icon: "duplicate", label: `Duplicate ${widget.title}`, tooltip: "Duplicate widget", dataset: { action: "duplicate-widget" } });
   const remove = sharedIconButton({ icon: "delete", label: `Delete ${widget.title}`, tooltip: "Delete widget", className: "danger", dataset: { action: "delete-widget" } });
   controls.append(edit, moveEarlier, moveLater, duplicate, remove);
-  card.querySelector("header")?.append(viewSql, controls);
+  card.querySelector("header")?.append(...[viewLineage, viewSql, controls].filter(Boolean));
   renderQueryResult(card, widget);
   applyWidgetLayout(card, widget);
   return card;
@@ -2832,6 +2845,7 @@ async function requestDetailReport(context) {
     source: clone(context.source), query: clone(context.query), selection: clone(context.selection), detail: requestDetail,
     offset: context.offset, limit: context.limit, sort: requestSort, search: context.search
   };
+  context.request = clone(request);
   try {
     const result = await postgres.request(`/api/postgres/profiles/${encodeURIComponent(context.source.profileId)}/relation/detail`, { method: "POST", body: JSON.stringify(request) });
     const widget = activeDashboard?.dashboard.widgets.find(item => item.id === context.widgetId);
@@ -2915,6 +2929,190 @@ function openExecutedSql(widget, population = false) {
   elements.sqlParameters.hidden = !execution || execution.parameters === undefined;
   elements.sqlParameterCode.textContent = execution?.parameters === undefined ? "" : JSON.stringify(execution.parameters, null, 2);
   elements.sqlDialog.showModal();
+}
+
+function lineageSection(title) {
+  const section = document.createElement("section");
+  section.className = "lineage-section";
+  const heading = document.createElement("h3");
+  heading.textContent = title;
+  const body = document.createElement("div");
+  section.append(heading, body);
+  elements.lineageBody.append(section);
+  return body;
+}
+
+function appendLineageField(list, label, value) {
+  const term = document.createElement("dt");
+  term.textContent = label;
+  const detail = document.createElement("dd");
+  detail.textContent = value == null || value === "" ? "None" : String(value);
+  list.append(term, detail);
+}
+
+function lineageFields(title, fields) {
+  const body = lineageSection(title);
+  const list = document.createElement("dl");
+  for (const [label, value] of fields) appendLineageField(list, label, value);
+  body.append(list);
+  return body;
+}
+
+async function copyLineageValue(value, label) {
+  elements.lineageStatus.textContent = `Copying ${label}...`;
+  try {
+    await navigator.clipboard.writeText(value);
+    elements.lineageStatus.textContent = `${label} copied.`;
+  } catch (_error) {
+    elements.lineageStatus.textContent = `${label} could not be copied.`;
+  }
+}
+
+function appendLineageCode(body, title, value, copyLabel) {
+  const panel = document.createElement("section");
+  panel.className = "lineage-code-panel";
+  const header = document.createElement("header");
+  const heading = document.createElement("strong");
+  heading.textContent = title;
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "button button-ghost";
+  copy.textContent = `Copy ${copyLabel}`;
+  copy.addEventListener("click", () => copyLineageValue(value, copyLabel));
+  const pre = document.createElement("pre");
+  const code = document.createElement("code");
+  code.textContent = value;
+  pre.append(code);
+  header.append(heading, copy);
+  panel.append(header, pre);
+  body.append(panel);
+}
+
+function appendRelationColumns(body, columns) {
+  const table = document.createElement("table");
+  table.className = "lineage-columns";
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const label of ["#", "Column", "PostgreSQL type", "Nullability"]) {
+    const cell = document.createElement("th");
+    cell.textContent = label;
+    headRow.append(cell);
+  }
+  head.append(headRow);
+  const rows = document.createElement("tbody");
+  for (const column of columns ?? []) {
+    const row = document.createElement("tr");
+    for (const value of [column.ordinal, column.name, column.type, column.nullable ? "Nullable" : "Required"]) {
+      const cell = document.createElement("td");
+      cell.textContent = String(value);
+      row.append(cell);
+    }
+    rows.append(row);
+  }
+  table.append(head, rows);
+  body.append(table);
+}
+
+function appendQueryInputs(query, detail = null) {
+  const body = lineageFields("Query inputs", [
+    ["Dashboard slicers", "None applied (dashboard slicers are deferred)"],
+    ["Dimensions", query?.dimensions?.map(item => `${item.label} (${item.column})`).join(", ") || "None"],
+    ["Measures", query?.measures?.map(item => `${item.label} (${item.aggregation}${item.distinct ? " distinct" : ""}${item.column ? ` ${item.column}` : ""})`).join(", ") || "None"],
+    ["Result sort", query?.sort?.map(item => `${item.targetId} ${item.direction} NULLS ${item.nulls}`).join(", ") || "None"],
+  ]);
+  const filters = document.createElement("ol");
+  filters.className = "lineage-filter-groups";
+  for (const [groupIndex, group] of (query?.filters ?? []).entries()) {
+    const item = document.createElement("li");
+    item.textContent = `Group ${groupIndex + 1}: ${group.conditions.map(condition => `${condition.column} ${condition.operator} ${condition.values.map(value => value === null ? "NULL" : String(value)).join(", ")}`).join(" AND ")}`;
+    filters.append(item);
+  }
+  if (!filters.children.length) {
+    const item = document.createElement("li");
+    item.textContent = "No widget filters";
+    filters.append(item);
+  }
+  body.append(filters);
+  if (detail) {
+    const selection = detail.selection?.dimensions?.map(item => `${item.targetId} = ${item.value === null ? "NULL" : String(item.value)}`).join(", ") || "All aggregate rows";
+    const detailList = document.createElement("dl");
+    appendLineageField(detailList, "Clicked dimensions", selection);
+    appendLineageField(detailList, "Selected measure", detail.selection?.measureId || "None");
+    appendLineageField(detailList, "Detail search", detail.search || "None");
+    appendLineageField(detailList, "Detail sort", detail.sort ? `${detail.sort.targetId} ${detail.sort.direction} NULLS ${detail.sort.nulls}` : "Default/none");
+    appendLineageField(detailList, "Detail offset / limit", `${detail.offset} / ${detail.limit}`);
+    body.append(detailList);
+  }
+}
+
+function openDataLineage(widget, { detail = null } = {}) {
+  if (!widget?.configuration?.source) return;
+  const execution = detail ? detail.result : widgetQueryResults.get(widget.id)?.result;
+  const executionState = detail ? detail.state : widgetQueryResults.get(widget.id)?.state;
+  const source = execution?.source ?? widget.configuration.source;
+  const profile = execution?.provenance?.profile ?? {
+    id: source.profileId,
+    label: profiles.find(item => item.id === source.profileId)?.name ?? "Saved profile",
+  };
+  const relation = execution?.provenance?.relation ?? {
+    database: source.database, namespace: source.namespace, name: source.relation,
+    kind: source.kind, fingerprint: source.fingerprint, columns: source.columns ?? [],
+    definition: { status: "unavailable", reason: "not_loaded" },
+  };
+  elements.lineageTitle.textContent = `${widget.title} Data Lineage`;
+  elements.lineageStatus.textContent = "";
+  elements.lineageBody.replaceChildren();
+  lineageFields("Source", [
+    ["Profile label", profile.label], ["Profile ID", profile.id], ["Database", relation.database],
+    ["Namespace", relation.namespace], ["Relation", relation.name], ["Relation kind", relation.kind.replaceAll("_", " ")],
+    ["Fingerprint", relation.fingerprint], ["Verification", sourceVerification.get(widget.id)?.state ?? executionState ?? "unverified"],
+  ]);
+  const definitionBody = lineageSection("Relation definition");
+  appendRelationColumns(definitionBody, relation.columns);
+  if (relation.definition?.status === "available") {
+    appendLineageCode(definitionBody, `${relation.kind.replaceAll("_", " ")} query`, relation.definition.sql, "definition query");
+  } else {
+    const unavailable = document.createElement("p");
+    const reasons = {
+      not_supported: "PostgreSQL does not expose one authoritative complete table-creation statement. Ordered catalog columns are shown above.",
+      not_permitted: "The relation query definition is not available to this connection.",
+      too_large: "The relation query definition exceeds the safe response limit.",
+      not_loaded: "Run or refresh this widget to load its verified relation definition.",
+    };
+    unavailable.textContent = reasons[relation.definition?.reason] ?? "The relation definition is unavailable.";
+    definitionBody.append(unavailable);
+  }
+  const query = detail?.request?.query ?? widgetQueryResults.get(widget.id)?.query ?? widget.configuration.query;
+  appendQueryInputs(query, detail?.request ?? null);
+  const resultRows = detail && execution ? detailRows(execution).length : execution?.rowCount;
+  lineageFields("Execution", [
+    ["State", executionState ?? "not run"], ["Refreshed", execution?.queriedAt ? new Date(execution.queriedAt).toLocaleString() : "Not run"],
+    ["Server duration", execution?.queryDurationMs == null ? "Not available" : `${execution.queryDurationMs} ms`],
+    [detail ? "Returned page rows" : "Returned result rows", resultRows ?? "Not available"],
+    ["Matching detail rows", detail && execution ? execution.matchingRowCount : "Not applicable"],
+    ["Result limit", execution?.limit ?? query?.limit ?? "Not available"],
+    ["Truncated", execution?.truncated == null ? "Not applicable" : execution.truncated ? "Yes" : "No"],
+    ["More detail rows", detail && execution ? execution.hasMore ? "Yes" : "No" : "Not applicable"],
+  ]);
+  const sqlBody = lineageSection("SQL and bound parameters");
+  if (!execution?.sql) {
+    const unavailable = document.createElement("p");
+    unavailable.textContent = "No live SQL is available for this result.";
+    sqlBody.append(unavailable);
+  } else {
+    appendLineageCode(sqlBody, detail ? "Detail page SQL" : "Aggregation SQL", execution.sql, detail ? "detail page SQL" : "aggregation SQL");
+    appendLineageCode(sqlBody, detail ? "Detail page parameters" : "Aggregation parameters", JSON.stringify(execution.parameters ?? [], null, 2), detail ? "detail page parameters" : "aggregation parameters");
+    if (detail && execution.countSql) {
+      appendLineageCode(sqlBody, "Detail count SQL", execution.countSql, "detail count SQL");
+      appendLineageCode(sqlBody, "Detail count parameters", JSON.stringify(execution.countParameters ?? [], null, 2), "detail count parameters");
+    }
+  }
+  lineageReturnFocus = document.activeElement;
+  elements.lineageDialog.showModal();
+}
+
+function closeDataLineage() {
+  if (elements.lineageDialog.open) elements.lineageDialog.close();
 }
 
 function openDashboardForm(action) {
@@ -3134,7 +3332,9 @@ document.querySelector("#apply-widget-query").addEventListener("click", async ev
     widgetDetailDraft = clone(detailDraft);
     widgetQueryExecutionTokens.set(`${widget.id}:publish`, {});
     widgetTablePages.set(widget.id, 0);
-    widgetQueryResults.set(widget.id, { state: "ready", result });
+    widgetQueryResults.set(widget.id, {
+      state: "ready", result, source, query: queryForVisualization(draft, visualizationDraft),
+    });
     executedSqlByResult.set(`${widget.id}:widget`, { sql: result.sql, parameters: result.parameters });
     markDashboardChanged(true);
     elements.widgetQueryStatus.textContent = "Query ran successfully. Saving the dashboard...";
@@ -3171,6 +3371,7 @@ elements.canvas.addEventListener("click", event => {
   const action = event.target.closest("[data-action]")?.dataset.action;
   const widgetId = event.target.closest(".widget")?.dataset.widgetId;
   if (action === "view-widget-sql") return openExecutedSql(activeDashboard?.dashboard.widgets.find(widget => widget.id === widgetId));
+  if (action === "view-widget-lineage") return openDataLineage(activeDashboard?.dashboard.widgets.find(widget => widget.id === widgetId));
   if (action === "edit-widget") return openWidgetEditor(widgetId);
   if (action === "move-widget-earlier") return moveWidget(widgetId, -1);
   if (action === "move-widget-later") return moveWidget(widgetId, 1);
@@ -3254,12 +3455,18 @@ elements.canvas.addEventListener("keydown", event => {
 document.querySelector("#close-widget-inspector").addEventListener("click", closeWidgetInspector);
 document.querySelector("#view-inspector-sql").addEventListener("click", () => openExecutedSql(activeDashboard?.dashboard.widgets.find(widget => widget.id === focusedWidgetId), true));
 document.querySelector("#close-executed-sql").addEventListener("click", () => elements.sqlDialog.close());
+document.querySelector("#close-lineage").addEventListener("click", closeDataLineage);
+elements.lineageDialog.addEventListener("close", () => {
+  if (lineageReturnFocus?.isConnected) lineageReturnFocus.focus();
+  lineageReturnFocus = null;
+});
 elements.widgetFocusContent.addEventListener("click", event => {
   if (event.target.closest(".focused-widget-close")) {
     if (detailContext) closeDetailReport(false);
     return closeWidgetFocus();
   }
   if (event.target.closest('[data-action="view-widget-sql"]')) return openExecutedSql(activeDashboard?.dashboard.widgets.find(widget => widget.id === focusedWidgetId));
+  if (event.target.closest('[data-action="view-widget-lineage"]')) return openDataLineage(activeDashboard?.dashboard.widgets.find(widget => widget.id === focusedWidgetId));
   const drillTarget = event.target.closest("[data-drill-lineage]");
   if (drillTarget && openDetailReport(drillTarget, focusedWidgetId)) return;
   const metric = event.target.closest("[data-inspect-metric]");
@@ -3278,7 +3485,7 @@ elements.widgetFocusContent.addEventListener("keydown", event => {
   inspectMetric(metric);
 });
 elements.detailDrawer.querySelector(".detail-report-head").addEventListener("click", event => {
-  if (event.target.closest("#view-detail-sql")) return;
+  if (event.target.closest("button")) return;
   toggleDetailPane();
 });
 elements.widgetFocusContent.addEventListener("click", event => {
@@ -3302,6 +3509,10 @@ elements.detailSearch.addEventListener("input", () => {
   }, 250);
 });
 document.querySelector("#view-detail-sql").addEventListener("click", openDetailSql);
+document.querySelector("#view-detail-lineage").addEventListener("click", () => {
+  const widget = activeDashboard?.dashboard.widgets.find(item => item.id === detailContext?.widgetId);
+  if (widget && detailContext) openDataLineage(widget, { detail: detailContext });
+});
 elements.workspace.addEventListener("scroll", () => {
   if (!activeDashboard || !editMode || focusedWidgetId) return;
   const mode = isMobileLayout() ? "mobile" : "desktop";

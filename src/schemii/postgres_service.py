@@ -499,6 +499,24 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             normalized["kind"], normalized["fingerprint"], normalized.get("columns"),
         )
 
+    @staticmethod
+    def _query_provenance(profile_id: str, profile: dict[str, Any], descriptor: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "profile": {"id": profile_id, "label": profile["name"]},
+            "relation": {
+                "database": descriptor["database"],
+                "namespace": descriptor["namespace"],
+                "name": descriptor["relation"],
+                "kind": descriptor["kind"],
+                "fingerprint": descriptor["fingerprint"],
+                "columns": [
+                    {key: column[key] for key in ("name", "type", "nullable", "ordinal")}
+                    for column in descriptor["columns"]
+                ],
+                "definition": dict(descriptor["definition"]),
+            },
+        }
+
     def verify_relation_source(self, profile_id: str, source: Any) -> dict[str, Any]:
         database, namespace, relation, kind, fingerprint, expected_columns = self._validate_relation_source(profile_id, source)
         connection = self._connect(profile_id)
@@ -628,6 +646,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                 "parameters": [self._json_cell(value) for value in compiled["parameters"]],
                 "queryDurationMs": max(0, round((time.perf_counter() - started) * 1000)),
                 "queriedAt": _utc_now(),
+                "provenance": self._query_provenance(profile_id, profile, descriptor),
                 "lineage": {
                     "dimensions": [{"id": item["id"], "sourceColumn": item["column"]} for item in normalized_query["dimensions"]],
                     "measures": [{"id": item["id"], "sourceColumn": item["column"], "aggregation": item["aggregation"], "distinct": item["distinct"]} for item in normalized_query["measures"]],
@@ -725,6 +744,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                 "countParameters": [self._json_cell(value) for value in compiled["countParameters"]],
                 "queryDurationMs": duration_ms,
                 "queriedAt": _utc_now(),
+                "provenance": self._query_provenance(profile_id, profile, descriptor),
             }
         except PostgresServiceError:
             try:

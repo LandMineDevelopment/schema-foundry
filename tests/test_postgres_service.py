@@ -220,6 +220,9 @@ class PostgresServiceTests(unittest.TestCase):
         ])
         self.assertEqual(len(first["fingerprint"]), 64)
         self.assertEqual(first["fingerprint"], second["fingerprint"])
+        self.assertEqual(first["definition"], {
+            "status": "available", "format": "query", "sql": "SELECT id, total FROM orders",
+        })
 
         changed = {**responses, "a.attname AS column_name": [
             responses["a.attname AS column_name"][0],
@@ -227,6 +230,50 @@ class PostgresServiceTests(unittest.TestCase):
         ]}
         changed_service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: Connection(responses=changed))
         self.assertNotEqual(first["fingerprint"], changed_service.inspect_relation("local", "demo", "reporting", "order_summary")["fingerprint"])
+        changed_definition = {**responses, "c.relkind AS catalog_kind": [{
+            "catalog_kind": "v", "relation_kind": "view", "view_definition": "SELECT id, total, tax FROM orders",
+        }]}
+        definition_service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: Connection(responses=changed_definition))
+        self.assertNotEqual(first["fingerprint"], definition_service.inspect_relation("local", "demo", "reporting", "order_summary")["fingerprint"])
+
+    def test_relation_definitions_are_bounded_and_tables_do_not_claim_complete_ddl(self):
+        base = {
+            "SELECT current_database() AS database": [{"database": "demo"}],
+            "a.attname AS column_name": [],
+        }
+        table_service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: Connection(responses={
+            **base, "c.relkind AS catalog_kind": [{"catalog_kind": "r", "relation_kind": "table", "view_definition": None}],
+        }))
+        self.assertEqual(table_service.inspect_relation("local", "demo", "public", "orders")["definition"], {
+            "status": "unavailable", "reason": "not_supported",
+        })
+        view_service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: Connection(responses={
+            **base, "c.relkind AS catalog_kind": [{"catalog_kind": "v", "relation_kind": "view", "view_definition": "x" * (64 * 1024 + 1)}],
+        }))
+        self.assertEqual(view_service.inspect_relation("local", "demo", "public", "orders")["definition"], {
+            "status": "unavailable", "reason": "too_large",
+        })
+        for catalog_kind, relation_kind in (("v", "view"), ("m", "materialized_view")):
+            with self.subTest(kind=relation_kind):
+                permitted_service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: Connection(responses={
+                    **base, "c.relkind AS catalog_kind": [{
+                        "catalog_kind": catalog_kind, "relation_kind": relation_kind, "view_definition": "SELECT 1",
+                    }],
+                }))
+                self.assertEqual(permitted_service.inspect_relation("local", "demo", "public", "orders")["definition"], {
+                    "status": "available", "format": "query", "sql": "SELECT 1",
+                })
+        unavailable_service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: Connection(responses={
+            **base, "c.relkind AS catalog_kind": [{"catalog_kind": "v", "relation_kind": "view", "view_definition": None}],
+        }))
+        self.assertEqual(unavailable_service.inspect_relation("local", "demo", "public", "orders")["definition"], {
+            "status": "unavailable", "reason": "not_permitted",
+        })
+        untrusted = '</code><script>throw new Error("unsafe")</script>'
+        untrusted_service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: Connection(responses={
+            **base, "c.relkind AS catalog_kind": [{"catalog_kind": "v", "relation_kind": "view", "view_definition": untrusted}],
+        }))
+        self.assertEqual(untrusted_service.inspect_relation("local", "demo", "public", "orders")["definition"]["sql"], untrusted)
 
     def test_relation_inspection_rejects_missing_relation(self):
         connection = Connection(responses={
@@ -397,6 +444,9 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertTrue(result["queriedAt"].endswith("Z"))
         self.assertEqual(result["lineage"]["measures"][0]["sourceColumn"], "amount")
         self.assertEqual(result["lineage"]["filterGroups"][0]["conditions"][0]["operator"], "neq")
+        self.assertEqual(result["provenance"]["profile"], {"id": "local", "label": "Local"})
+        self.assertNotIn("password", json.dumps(result["provenance"]))
+        self.assertEqual(result["provenance"]["relation"]["definition"]["reason"], "not_supported")
         query_connection = connections[-1]
         self.assertEqual(query_connection.executed[0][0], "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         self.assertIn(('LOCK TABLE "public"."orders" IN ACCESS SHARE MODE', ()), query_connection.executed)
@@ -469,6 +519,8 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertEqual(result["countParameters"], ["cancelled", "paid", "%acme%"])
         self.assertIsInstance(result["queryDurationMs"], int)
         self.assertTrue(result["queriedAt"].endswith("Z"))
+        self.assertEqual(result["provenance"]["profile"], {"id": "local", "label": "Local"})
+        self.assertNotIn("host", result["provenance"]["profile"])
         query_connection = connections[-1]
         self.assertEqual(query_connection.executed[0][0], "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         self.assertIn(('LOCK TABLE "public"."orders" IN ACCESS SHARE MODE', ()), query_connection.executed)

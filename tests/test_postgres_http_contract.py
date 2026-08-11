@@ -47,9 +47,12 @@ class PostgresHttpContractTests(unittest.TestCase):
                         self.assertEqual(running.request(
                             "/api/postgres/profiles/shared/relations?database=demo&namespace=public", authorized=True,
                         )[0], 200)
-                        self.assertEqual(running.request(
+                        status, body, _ = running.request(
                             "/api/postgres/profiles/shared/relation?database=demo&namespace=public&relation=orders", authorized=True,
-                        )[0], 200)
+                        )
+                        self.assertEqual(status, 200)
+                        self.assertEqual(json.loads(body)["definition"], {"status": "unavailable", "reason": "not_supported"})
+                        self.assertNotIn("password", body.decode())
                         self.assertEqual(running.request(
                             "/api/postgres/profiles/shared/test", "POST", {}, authorized=True,
                         )[0], 200)

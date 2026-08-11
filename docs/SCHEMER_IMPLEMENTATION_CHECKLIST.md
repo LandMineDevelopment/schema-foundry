@@ -158,15 +158,17 @@ Acceptance criteria: clicking a chart mark or aggregate cell opens the logically
 
 Approval required before implementation.
 
-- [ ] Add a Data Lineage action to every widget and detail report.
-- [ ] Show exact profile label, database, namespace, relation, relation kind, and fingerprint.
-- [ ] Show the PostgreSQL table/view/materialized-view definition when permitted.
-- [ ] Show generated aggregation SQL separately from bound parameter values.
-- [ ] Show generated detail SQL and its parameter values.
-- [ ] Show active slicers, widget filters, query duration, result row count, truncation, and refresh time.
-- [ ] Add copy-query controls that do not include credentials.
+Core approved and implemented. Read-only `EXPLAIN` remains separately deferred.
+
+- [x] Add a Data Lineage action to every widget and detail report.
+- [x] Show exact profile label, database, namespace, relation, relation kind, and fingerprint.
+- [x] Show the PostgreSQL table/view/materialized-view definition when permitted.
+- [x] Show generated aggregation SQL separately from bound parameter values.
+- [x] Show generated detail SQL and its parameter values.
+- [x] Show active slicers, widget filters, query duration, result row count, truncation, and refresh time.
+- [x] Add copy-query controls that do not include credentials.
 - [ ] Add optional read-only `EXPLAIN` later only after separate approval.
-- [ ] Add redaction and untrusted-definition rendering tests.
+- [x] Add redaction and untrusted-definition rendering tests.
 
 Acceptance criteria: users can explain where every displayed value came from without exposing passwords or interpolating parameter values.
 
