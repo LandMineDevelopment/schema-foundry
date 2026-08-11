@@ -39,6 +39,7 @@ class PostgresHttpMixin:
         "max_result_bytes": 1024 * 1024,
     }
     postgres_relation_query_context_fields = frozenset()
+    postgres_relation_detail_context_fields = frozenset()
 
     def _has_postgres_capability(self, capability: str) -> bool:
         return capability in self.postgres_capabilities
@@ -124,14 +125,24 @@ class PostgresHttpMixin:
         if body is None:
             return True
         if relation_detail_match:
-            fields = {"source", "query", "selection", "detail", "offset", "limit", "sort", "searches"}
-            if not isinstance(body, dict) or set(body) != fields:
+            base_fields = {"source", "query", "selection", "detail", "offset", "limit", "sort", "searches"}
+            contextual_fields = base_fields | set(self.postgres_relation_detail_context_fields)
+            if not isinstance(body, dict) or set(body) not in (base_fields, contextual_fields):
                 self.send_json(400, {"error": {"code": "validation_error", "message": "detail request fields are invalid"}})
             else:
-                self._service_call(lambda: self.service.execute_relation_detail(
-                    relation_detail_match.group(1), body["source"], body["query"], body["selection"],
-                    body["detail"], body["offset"], body["limit"], body["sort"], body["searches"],
-                ))
+                def execute_detail():
+                    guard = getattr(self, "_postgres_relation_detail_guard", None)
+                    if guard is None or set(body) == base_fields:
+                        return self.service.execute_relation_detail(
+                            relation_detail_match.group(1), body["source"], body["query"], body["selection"],
+                            body["detail"], body["offset"], body["limit"], body["sort"], body["searches"],
+                        )
+                    with guard(body):
+                        return self.service.execute_relation_detail(
+                            relation_detail_match.group(1), body["source"], body["query"], body["selection"],
+                            body["detail"], body["offset"], body["limit"], body["sort"], body["searches"],
+                        )
+                self._service_call(execute_detail)
         elif relation_query_match:
             base_fields = {"source", "query"}
             contextual_fields = base_fields | set(self.postgres_relation_query_context_fields)

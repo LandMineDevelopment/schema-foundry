@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from schemii.postgres_http import PostgresHttpMixin
 from schemii.ai_http import ai_context_fingerprint
 from schemii.dashboard_store import DashboardStore
+from schemii.schemer_examples import MERCURY_PROFILE_ID
 from schemii.schemer_server import _ai_catalog_sources, make_handler
 from tests.http_test_support import FakePostgresService, RunningHttpServer
 from tests.test_server import FakeAIService
@@ -129,6 +130,10 @@ class SchemerServerTests(unittest.TestCase):
             "execute_relation_detail", "shared", preview_source, query, detail_request["selection"],
             detail_request["detail"], 0, 20, None, [],
         ), self.service.calls)
+        revision = self.dashboard_store.get("dashboard_mercury")["revision"]
+        guarded_detail = {**detail_request, "dashboardId": "dashboard_mercury", "expectedRevision": revision}
+        self.assertEqual(self.request(detail_path, "POST", guarded_detail, True)[0], 200)
+        self.assertEqual(self.request(detail_path, "POST", {**guarded_detail, "expectedRevision": revision + 1}, True)[0], 409)
         self.assertEqual(self.request(detail_path, "POST", {**detail_request, "extra": True}, True)[0], 400)
         legacy_request = {key: value for key, value in detail_request.items() if key != "searches"}
         legacy_request["search"] = "old global search"
@@ -260,6 +265,38 @@ class SchemerServerTests(unittest.TestCase):
         created = json.loads(body)
         self.assertEqual(created["dashboard"]["widgets"], [])
         self.assertEqual(self.request(f"/api/dashboards/{created['id']}", "DELETE", authorized=True)[0], 200)
+
+    def test_mercury_reset_uses_live_view_and_preserves_layout(self):
+        columns = [
+            {"name": name, "type": column_type, "nullable": nullable, "ordinal": index + 1}
+            for index, (name, column_type, nullable) in enumerate([
+                ("order_id", "bigint", False), ("customer_id", "bigint", False),
+                ("customer_name", "character varying(160)", False), ("status", "character varying(20)", False),
+                ("ordered_at", "timestamp with time zone", False), ("shipped_at", "timestamp with time zone", True),
+                ("order_date", "date", False), ("item_count", "bigint", True), ("order_total", "numeric(14,2)", True),
+            ])
+        ]
+        self.service.profiles = [{
+            "id": MERCURY_PROFILE_ID, "name": "Mercury", "host": "postgres", "port": 5432,
+            "dbname": "schemii", "user": "schemii", "sslmode": "disable", "timeout": 10,
+        }]
+        self.service.descriptor = {
+            "profileId": MERCURY_PROFILE_ID, "database": "schemii", "namespace": "bookstore",
+            "relation": "order_summary", "kind": "view", "fingerprint": "c" * 64, "columns": columns,
+            "definition": {"status": "available", "sql": "SELECT ..."},
+        }
+        record = self.dashboard_store.get("dashboard_mercury")
+        record["dashboard"]["widgets"][0]["layout"]["desktop"]["x"] = 1
+        record = self.dashboard_store.save(record["id"], record)
+        path = "/api/examples/mercury/reset"
+        self.assertEqual(self.request(path, "POST", {"expectedRevision": record["revision"]})[0], 403)
+        status, body, _ = self.request(path, "POST", {"expectedRevision": record["revision"]}, True)
+        self.assertEqual(status, 200)
+        restored = json.loads(body)
+        self.assertEqual(restored["dashboard"]["widgets"][0]["layout"]["desktop"]["x"], 1)
+        self.assertEqual({widget["kind"] for widget in restored["dashboard"]["widgets"]}, {"aggregate_report"})
+        self.assertIn(("inspect_relation", MERCURY_PROFILE_ID, "schemii", "bookstore", "order_summary", "view", None), self.service.calls)
+        self.assertEqual(self.request(path, "POST", {"expectedRevision": record["revision"]}, True)[0], 409)
 
 
 if __name__ == "__main__":

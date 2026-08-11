@@ -88,6 +88,15 @@ class ExampleInstallerTests(unittest.TestCase):
             self.assertIn(relationship["fromColumnId"], columns)
             self.assertIn(relationship["toColumnId"], columns)
 
+    def test_bookstore_seed_adds_idempotent_order_summary_view(self):
+        seed = (ROOT / "examples/postgres/001_bookstore.sql").read_text()
+        self.assertIn("CREATE OR REPLACE VIEW bookstore.order_summary AS", seed)
+        self.assertIn("orders.ordered_at::date AS order_date", seed)
+        self.assertIn("sum(order_items.quantity)", seed)
+        self.assertIn("sum(order_items.line_total)", seed)
+        self.assertIn("Schemii tutorial dataset v3", seed)
+        self.assertLess(seed.index("expand_bookstore"), seed.index("add_dashboard_view"))
+
     def test_first_run_marker_respects_deletion_until_explicit_restore(self):
         installer = ExampleInstaller(self.service, self.store, self.root / "config", "local")
         first = installer.initialize_once()

@@ -4,6 +4,9 @@ services:
       context: .
       target: schemer-runtime
     image: ${SCHEMER_IMAGE:-schemer:local}
+    depends_on:
+      schemii:
+        condition: service_healthy
     ports:
       - "127.0.0.1:${SCHEMER_HOST_PORT:-8081}:8081"
     environment:

@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from schemii.dashboard_store import DashboardStore, DashboardStoreError, mercury_dashboard_record
+from schemii.schemer_examples import build_mercury_dashboard
 
 
 SOURCE = {
@@ -63,6 +64,19 @@ DETAIL = {
     "rowIdentifier": "id",
     "pageSize": 25,
 }
+MERCURY_COLUMNS = [
+    {"name": name, "type": column_type, "nullable": nullable, "ordinal": index + 1}
+    for index, (name, column_type, nullable) in enumerate([
+        ("order_id", "bigint", False), ("customer_id", "bigint", False),
+        ("customer_name", "character varying(160)", False), ("status", "character varying(20)", False),
+        ("ordered_at", "timestamp with time zone", False), ("shipped_at", "timestamp with time zone", True),
+        ("order_date", "date", False), ("item_count", "bigint", True), ("order_total", "numeric(14,2)", True),
+    ])
+]
+MERCURY_DESCRIPTOR = {
+    "profileId": "schemii_example_postgres", "database": "schemii", "namespace": "bookstore",
+    "relation": "order_summary", "kind": "view", "fingerprint": "b" * 64, "columns": MERCURY_COLUMNS,
+}
 
 
 class DashboardStoreTests(unittest.TestCase):
@@ -82,6 +96,73 @@ class DashboardStoreTests(unittest.TestCase):
         self.store.delete("dashboard_mercury")
         self.store.initialize_once()
         self.assertEqual(self.store.list(), [])
+
+    def test_live_mercury_template_has_six_executable_widgets(self):
+        record = build_mercury_dashboard(MERCURY_DESCRIPTOR)
+        widgets = record["dashboard"]["widgets"]
+        self.assertEqual([widget["kind"] for widget in widgets], ["aggregate_report"] * 6)
+        self.assertEqual({widget["configuration"]["source"]["relation"] for widget in widgets}, {"order_summary"})
+        self.assertEqual([widget["configuration"]["visualization"]["mode"] for widget in widgets], ["kpi", "kpi", "kpi", "line", "donut", "table"])
+        self.assertEqual(widgets[-1]["configuration"]["query"]["limit"], 10)
+
+    def test_mercury_reset_preserves_layout_viewport_and_custom_widgets(self):
+        self.store.initialize_once()
+        current = self.store.get("dashboard_mercury")
+        current["dashboard"]["widgets"][0]["layout"]["desktop"]["x"] = 1
+        current["dashboard"]["viewport"]["desktop"] = {"x": 42, "y": 73}
+        current["dashboard"]["widgets"].append({
+            "id": "widget_custom", "kind": "placeholder", "title": "Custom",
+            "layout": {"desktop": {"x": 0, "y": 20, "w": 4, "h": 3}, "mobile": {"order": 9, "h": 3}},
+            "configuration": {},
+        })
+        current = self.store.save(current["id"], current)
+        restored = self.store.restore_mercury(build_mercury_dashboard(MERCURY_DESCRIPTOR), current["revision"])
+        self.assertEqual(restored["dashboard"]["widgets"][0]["layout"]["desktop"]["x"], 1)
+        self.assertEqual(restored["dashboard"]["viewport"]["desktop"], {"x": 42, "y": 73})
+        self.assertEqual(restored["dashboard"]["widgets"][-1]["id"], "widget_custom")
+        self.assertTrue(all(widget["kind"] == "aggregate_report" for widget in restored["dashboard"]["widgets"][:6]))
+        with self.assertRaises(DashboardStoreError) as error:
+            self.store.restore_mercury(build_mercury_dashboard(MERCURY_DESCRIPTOR), current["revision"])
+        self.assertEqual(error.exception.payload["error"]["code"], "dashboard_changed")
+
+    def test_mercury_reset_places_missing_widgets_without_layout_collisions(self):
+        self.store.initialize_once()
+        current = self.store.get("dashboard_mercury")
+        current["dashboard"]["widgets"] = [widget for widget in current["dashboard"]["widgets"] if widget["id"] != "widget_revenue"]
+        current["dashboard"]["widgets"].append({
+            "id": "widget_custom", "kind": "placeholder", "title": "Custom",
+            "layout": {"desktop": {"x": 0, "y": 0, "w": 4, "h": 3}, "mobile": {"order": 10, "h": 3}},
+            "configuration": {},
+        })
+        current = self.store.save(current["id"], current)
+        restored = self.store.restore_mercury(build_mercury_dashboard(MERCURY_DESCRIPTOR), current["revision"])
+        widgets = restored["dashboard"]["widgets"]
+        revenue = next(widget for widget in widgets if widget["id"] == "widget_revenue")
+        self.assertNotEqual(revenue["layout"]["desktop"], {"x": 0, "y": 0, "w": 4, "h": 3})
+        self.assertEqual(revenue["layout"]["mobile"]["order"], 11)
+        for index, widget in enumerate(widgets):
+            left = widget["layout"]["desktop"]
+            for other in widgets[index + 1:]:
+                right = other["layout"]["desktop"]
+                self.assertTrue(left["x"] + left["w"] <= right["x"] or right["x"] + right["w"] <= left["x"] or left["y"] + left["h"] <= right["y"] or right["y"] + right["h"] <= left["y"])
+
+    def test_legacy_mercury_upgrade_preserves_layout_but_not_configured_widgets(self):
+        self.store.initialize_once()
+        current = self.store.get("dashboard_mercury")
+        current["dashboard"]["widgets"][0]["layout"]["desktop"]["x"] = 1
+        configured = current["dashboard"]["widgets"][1]
+        configured["kind"] = "aggregate_report"
+        configured["configuration"] = build_mercury_dashboard(MERCURY_DESCRIPTOR)["dashboard"]["widgets"][1]["configuration"]
+        configured["title"] = "My configured orders"
+        current["dashboard"]["widgets"][2]["title"] = "My renamed preview"
+        current = self.store.save(current["id"], current)
+        upgraded = self.store.upgrade_mercury_example(build_mercury_dashboard(MERCURY_DESCRIPTOR))
+        self.assertEqual(upgraded["dashboard"]["widgets"][0]["layout"]["desktop"]["x"], 1)
+        self.assertEqual(upgraded["dashboard"]["widgets"][0]["kind"], "aggregate_report")
+        self.assertEqual(upgraded["dashboard"]["widgets"][1]["title"], "My configured orders")
+        self.assertEqual(upgraded["dashboard"]["widgets"][2]["kind"], "placeholder")
+        self.assertEqual(upgraded["dashboard"]["widgets"][2]["title"], "My renamed preview")
+        self.assertEqual(self.store.upgrade_mercury_example(build_mercury_dashboard(MERCURY_DESCRIPTOR))["revision"], upgraded["revision"])
 
     def test_create_duplicate_and_permissions(self):
         self.store.initialize_once()

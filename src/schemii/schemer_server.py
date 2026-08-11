@@ -30,6 +30,7 @@ from .schemer_ai import (
     proposal_manifest_fallback,
     validated_query_result,
 )
+from .schemer_examples import mercury_dashboard_from_service
 from .server_runtime import begin_http_shutdown, parse_port, parse_proxy_setting, run_server, validate_static_directory
 
 
@@ -115,6 +116,7 @@ def make_handler(
             "max_result_bytes": 256 * 1024,
         }
         postgres_relation_query_context_fields = frozenset({"dashboardId", "expectedRevision"})
+        postgres_relation_detail_context_fields = frozenset({"dashboardId", "expectedRevision"})
 
         def _authorize_dashboard(self) -> bool:
             return self._authorize_local_api("Dashboard API", "Dashboard session token is missing or invalid")
@@ -134,6 +136,7 @@ def make_handler(
 
         _postgres_read_sql_guard = _postgres_dashboard_revision_guard
         _postgres_relation_query_guard = _postgres_dashboard_revision_guard
+        _postgres_relation_detail_guard = _postgres_dashboard_revision_guard
 
         def _dashboard_call(self, callback, status: int = 200):
             try:
@@ -194,6 +197,20 @@ def make_handler(
                 body = self._body_or_error()
                 if body is not None:
                     self._dashboard_call(lambda: dashboard_store.create(body.get("title"), body.get("sourceId")), 201)
+                return
+            if path == "/api/examples/mercury/reset":
+                if not self._authorize_dashboard():
+                    return
+                body = self._body_or_error()
+                if body is None:
+                    return
+                if not isinstance(body, dict) or set(body) != {"expectedRevision"}:
+                    return self.send_json(400, {"error": {"code": "validation_error", "message": "Mercury reset fields are invalid"}})
+                try:
+                    template = mercury_dashboard_from_service(service)
+                    self.send_json(200, dashboard_store.restore_mercury(template, body.get("expectedRevision")))
+                except (DashboardStoreError, PostgresServiceError) as error:
+                    self.send_json(error.status, error.payload)
                 return
             if ai_router.handle_post(self, path):
                 return
@@ -306,7 +323,13 @@ def main() -> None:
     validate_static_directory(web_dir)
     service = PostgresService(config_dir)
     dashboard_store = DashboardStore(dashboard_dir)
-    dashboard_store.initialize_once()
+    try:
+        mercury_template = mercury_dashboard_from_service(service)
+    except PostgresServiceError:
+        mercury_template = None
+    dashboard_store.initialize_once(mercury_template)
+    if mercury_template is not None:
+        dashboard_store.upgrade_mercury_example(mercury_template)
     ai_service = OpenCodeService(
         os.environ.get("SCHEMER_OPENCODE_URL", ""),
         os.environ.get("SCHEMER_OPENCODE_USERNAME", "opencode"),

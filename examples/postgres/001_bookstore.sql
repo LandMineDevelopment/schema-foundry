@@ -181,6 +181,7 @@ COMMIT;
 SELECT CASE WHEN
     to_regnamespace('bookstore') IS NOT NULL
     AND obj_description(to_regnamespace('bookstore'), 'pg_namespace') IS DISTINCT FROM 'Schemii tutorial dataset v2'
+    AND obj_description(to_regnamespace('bookstore'), 'pg_namespace') IS DISTINCT FROM 'Schemii tutorial dataset v3'
     AND (
         SELECT count(*) = 9
         FROM pg_catalog.pg_class c
@@ -322,6 +323,42 @@ SELECT setval(pg_get_serial_sequence('bookstore.orders', 'id'), (SELECT max(id) 
 SELECT setval(pg_get_serial_sequence('bookstore.reviews', 'id'), (SELECT max(id) FROM bookstore.reviews));
 
 COMMENT ON SCHEMA bookstore IS 'Schemii tutorial dataset v2';
+
+COMMIT;
+
+\endif
+
+SELECT CASE WHEN
+    to_regnamespace('bookstore') IS NOT NULL
+    AND (
+        obj_description(to_regnamespace('bookstore'), 'pg_namespace') IS DISTINCT FROM 'Schemii tutorial dataset v3'
+        OR to_regclass('bookstore.order_summary') IS NULL
+    )
+    AND to_regclass('bookstore.orders') IS NOT NULL
+    AND to_regclass('bookstore.customers') IS NOT NULL
+    AND to_regclass('bookstore.order_items') IS NOT NULL
+THEN 'true' ELSE 'false' END AS add_dashboard_view \gset
+\if :add_dashboard_view
+
+BEGIN;
+
+CREATE OR REPLACE VIEW bookstore.order_summary AS
+SELECT orders.id AS order_id,
+       orders.customer_id,
+       customers.full_name AS customer_name,
+       orders.status,
+       orders.ordered_at,
+       orders.shipped_at,
+       orders.ordered_at::date AS order_date,
+       COALESCE(sum(order_items.quantity), 0)::bigint AS item_count,
+       COALESCE(sum(order_items.line_total), 0)::numeric(14,2) AS order_total
+FROM bookstore.orders
+JOIN bookstore.customers ON customers.id = orders.customer_id
+LEFT JOIN bookstore.order_items ON order_items.order_id = orders.id
+GROUP BY orders.id, customers.full_name;
+
+COMMENT ON VIEW bookstore.order_summary IS 'One row per Mercury Books order for resettable Schemer examples';
+COMMENT ON SCHEMA bookstore IS 'Schemii tutorial dataset v3';
 
 COMMIT;
 

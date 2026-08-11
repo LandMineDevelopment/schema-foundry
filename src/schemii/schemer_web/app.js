@@ -39,7 +39,6 @@ const elements = {
   dashboardFormCopy: document.querySelector("#dashboard-form-copy"),
   dashboardFormStatus: document.querySelector("#dashboard-form-status"),
   dashboardName: document.querySelector("#dashboard-name"),
-  previewTemplates: document.querySelector("#preview-widget-templates"),
   widgetFocus: document.querySelector("#widget-focus"),
   widgetFocusContent: document.querySelector("#widget-focus-content"),
   widgetInspector: document.querySelector("#widget-inspector"),
@@ -2025,6 +2024,7 @@ function renderQueryResult(card, widget) {
 async function executeWidgetQuery(widget, query = widget.configuration?.query, { render = true, publish = true, visualization = widget.configuration?.visualization } = {}) {
   if (!widget.configuration?.source || !query) return null;
   const dashboardId = activeDashboard?.id;
+  const dashboardRevision = activeDashboard?.revision;
   const sourceSnapshot = clone(widget.configuration.source);
   const querySnapshot = clone(query);
   const executionQuerySnapshot = queryForVisualization(querySnapshot, visualization);
@@ -2035,12 +2035,12 @@ async function executeWidgetQuery(widget, query = widget.configuration?.query, {
   if (publish && render) renderDashboard();
   try {
     const result = await postgres.request(`/api/postgres/profiles/${encodeURIComponent(widget.configuration.source.profileId)}/relation/query`, {
-      method: "POST", body: JSON.stringify({ source: sourceSnapshot, query: executionQuerySnapshot })
+      method: "POST", body: JSON.stringify({ source: sourceSnapshot, query: executionQuerySnapshot, dashboardId, expectedRevision: dashboardRevision })
     });
     const currentWidget = activeDashboard?.dashboard.widgets.find(item => item.id === widget.id);
     const sourceCurrent = currentWidget === widget && JSON.stringify(widget.configuration?.source) === JSON.stringify(sourceSnapshot);
     const queryCurrent = !publish || JSON.stringify(widget.configuration?.query) === JSON.stringify(querySnapshot);
-    if (activeDashboard?.id !== dashboardId || widgetQueryExecutionTokens.get(tokenKey) !== executionToken || !sourceCurrent || !queryCurrent) throw new Error("Query execution was superseded; run it again");
+    if (activeDashboard?.id !== dashboardId || activeDashboard.revision !== dashboardRevision || widgetQueryExecutionTokens.get(tokenKey) !== executionToken || !sourceCurrent || !queryCurrent) throw new Error("Query execution was superseded; run it again");
     if (publish) {
       widgetTablePages.set(widget.id, 0);
       widgetQueryResults.set(widget.id, {
@@ -2078,24 +2078,17 @@ async function executeDashboardQueries() {
 }
 
 function dashboardWidgetElement(widget) {
-  let card = null;
-  if (widget.kind === "preview") {
-    const template = elements.previewTemplates.content.querySelector(`[data-preview-id="${widget.id}"]`);
-    if (template) card = template.cloneNode(true);
-  }
-  if (!card) {
-    card = document.createElement("article");
-    card.className = widget.kind === "aggregate_report" ? "widget table-widget aggregate-report-widget" : "widget metric-widget placeholder-widget";
-    const header = document.createElement("header");
-    const title = document.createElement("span");
-    title.textContent = widget.title;
-    header.append(title);
-    const mark = document.createElement("strong");
-    mark.textContent = "--";
-    const copy = document.createElement("p");
-    copy.textContent = "Assign a source and query in Edit mode";
-    card.append(header, mark, copy);
-  }
+  const card = document.createElement("article");
+  card.className = widget.kind === "aggregate_report" ? "widget table-widget aggregate-report-widget" : "widget metric-widget placeholder-widget";
+  const header = document.createElement("header");
+  const headingTitle = document.createElement("span");
+  headingTitle.textContent = widget.title;
+  header.append(headingTitle);
+  const mark = document.createElement("strong");
+  mark.textContent = "--";
+  const copy = document.createElement("p");
+  copy.textContent = "Assign a source and query in Edit mode";
+  card.append(header, mark, copy);
   card.dataset.widgetId = widget.id;
   if (widget.configuration?.query) {
     card.classList.add("aggregate-report-widget", "table-widget");
@@ -2464,125 +2457,6 @@ function widgetType(widget) {
   return "Metric";
 }
 
-const DATE_BUCKETS = ["Jun 1–4", "Jun 5–8", "Jun 9–12", "Jun 13–16", "Jun 17–20", "Jun 21–24", "Jun 25–27", "Jun 28–30"];
-const KPI_SERIES = {
-  widget_revenue: ["$2,940", "$4,380", "$3,720", "$5,460", "$4,810", "$6,220", "$5,570", "$9,760"],
-  widget_orders: ["34", "48", "42", "61", "55", "72", "68", "120"],
-  widget_average: ["$86.47", "$91.25", "$88.57", "$89.51", "$87.45", "$86.39", "$81.91", "$81.33"]
-};
-const PREVIEW_POPULATION = [
-  ["#500", "Harper Jones", "Pending", "2", "$91.40", "Jun 29, 20:00", 29],
-  ["#499", "Casey Khan", "Cancelled", "4", "$148.75", "Jun 25, 05:00", 25],
-  ["#498", "Morgan Foster", "Shipped", "3", "$76.20", "Jun 22, 14:00", 22],
-  ["#497", "Blair Evans", "Packed", "2", "$63.95", "Jun 18, 23:00", 18],
-  ["#496", "Alex Rivera", "Paid", "1", "$42.10", "Jun 15, 17:00", 15],
-  ["#495", "Jamie Chen", "Paid", "5", "$185.30", "Jun 10, 11:00", 10],
-  ["#494", "Taylor Smith", "Pending", "2", "$58.80", "Jun 6, 09:00", 6],
-  ["#493", "Jordan Lee", "Shipped", "3", "$97.45", "Jun 2, 16:00", 2]
-];
-
-function markMetricTarget(target, metric, filters) {
-  target.dataset.inspectMetric = metric;
-  target.dataset.inspectFilters = JSON.stringify(filters);
-  target.tabIndex = 0;
-  target.setAttribute("role", "button");
-  target.setAttribute("aria-label", `Inspect ${metric}`);
-}
-
-function markInspectableMetrics(card, widget) {
-  const value = card.classList.contains("metric-widget") ? card.querySelector("strong") : null;
-  if (value) markMetricTarget(value, widget.title, [{ field: "Order date", value: "Jun 1–30" }, { field: "Displayed value", value: value.textContent.trim() }]);
-  card.querySelectorAll(".metric-sparkline i").forEach((bar, index) => {
-    const date = DATE_BUCKETS[index];
-    const amount = KPI_SERIES[widget.id]?.[index] || "Preview value";
-    bar.dataset.barLabel = date;
-    bar.dataset.barValue = amount;
-    bar.title = `${widget.title}: ${amount} for ${date}`;
-    markMetricTarget(bar, widget.title, [{ field: "Order date", value: date }, { field: "Bucket value", value: amount }]);
-  });
-  const series = card.querySelector(".chart-area svg");
-  if (series) markMetricTarget(series, widget.title, [{ field: "Order date", value: "Jun 1–30" }, { field: "Series", value: "Daily gross sales" }]);
-  const donut = card.querySelector(".donut");
-  if (donut) markMetricTarget(donut, widget.title, [{ field: "Order date", value: "Jun 1–30" }, { field: "Orders", value: "500" }]);
-  card.querySelectorAll(".status-legend > span").forEach(status => {
-    const label = status.childNodes[1]?.textContent.trim() || status.textContent.trim().split(/\s+/)[0];
-    const count = status.querySelector("b")?.textContent.trim() || "100";
-    markMetricTarget(status, widget.title, [{ field: "Status", value: label }, { field: "Orders", value: count }]);
-  });
-  if (card.classList.contains("table-widget")) card.querySelectorAll("tbody tr").forEach(row => markMetricTarget(row, widget.title, [{ field: "Order", value: row.cells[0]?.textContent.trim() || "row" }]));
-}
-
-function populationRows(filters) {
-  const status = filters.find(filter => filter.field === "Status")?.value;
-  const order = filters.find(filter => filter.field === "Order")?.value;
-  const date = filters.find(filter => filter.field === "Order date")?.value;
-  const dates = date?.match(/Jun (\d+)[–-](\d+)/);
-  return PREVIEW_POPULATION.filter(row =>
-    (!status || row[2] === status) &&
-    (!order || row[0] === order) &&
-    (!dates || row[6] >= Number(dates[1]) && row[6] <= Number(dates[2]))
-  );
-}
-
-function populationTable(filters) {
-  const container = document.createElement("div");
-  container.className = "population-view";
-  const filter = document.createElement("div");
-  filter.className = "population-filter";
-  const filterLabel = document.createElement("span");
-  filterLabel.textContent = "Applied filters";
-  filter.append(filterLabel);
-  for (const applied of filters) {
-    const row = document.createElement("div");
-    row.className = "population-filter-row";
-    const field = document.createElement("span");
-    field.textContent = applied.field;
-    const value = document.createElement("strong");
-    value.textContent = applied.value;
-    row.append(field, value);
-    filter.append(row);
-  }
-  const tableScroll = document.createElement("div");
-  tableScroll.className = "population-table-scroll";
-  tableScroll.tabIndex = 0;
-  tableScroll.setAttribute("role", "region");
-  tableScroll.setAttribute("aria-label", "Selected population rows");
-  const table = document.createElement("table");
-  table.className = "population-table";
-  const head = document.createElement("thead");
-  const headRow = document.createElement("tr");
-  for (const label of ["Order", "Customer", "Status", "Items", "Total", "Ordered"]) {
-    const cell = document.createElement("th");
-    cell.textContent = label;
-    headRow.append(cell);
-  }
-  head.append(headRow);
-  const body = document.createElement("tbody");
-  const rows = populationRows(filters);
-  for (const values of rows) {
-    const row = document.createElement("tr");
-    for (const value of values.slice(0, 6)) {
-      const cell = document.createElement("td");
-      cell.textContent = value;
-      row.append(cell);
-    }
-    body.append(row);
-  }
-  if (!rows.length) {
-    const row = document.createElement("tr");
-    const cell = document.createElement("td");
-    cell.colSpan = 6;
-    cell.className = "population-empty";
-    cell.textContent = "No preview rows match this selection.";
-    row.append(cell);
-    body.append(row);
-  }
-  table.append(head, body);
-  tableScroll.append(table);
-  container.append(filter, tableScroll);
-  return container;
-}
-
 function openWidgetFocus(widgetId) {
   const widget = activeDashboard?.dashboard.widgets.find(item => item.id === widgetId);
   if (!widget) return;
@@ -2618,7 +2492,6 @@ function openWidgetFocus(widgetId) {
   body.className = "focused-widget-body";
   while (header?.nextSibling) body.append(header.nextSibling);
   card.append(body);
-  markInspectableMetrics(card, widget);
   elements.widgetFocusContent.replaceChildren(card);
   elements.widgetInspector.classList.add("dismissed");
   elements.widgetInspector.inert = true;
@@ -2701,7 +2574,10 @@ function openWidgetInspector(metricName, filters = []) {
   const widget = activeDashboard?.dashboard.widgets.find(item => item.id === focusedWidgetId);
   if (!widget) return;
   elements.widgetInspectorTitle.textContent = metricName || widget.title;
-  elements.widgetInspectorBody.replaceChildren(populationTable(filters));
+  const guidance = document.createElement("p");
+  guidance.className = "population-empty";
+  guidance.textContent = "Configure a live detail report for this widget to inspect its underlying rows.";
+  elements.widgetInspectorBody.replaceChildren(guidance);
   elements.widgetInspector.classList.remove("dismissed");
   elements.widgetInspector.inert = false;
   elements.widgetInspector.removeAttribute("aria-hidden");
@@ -2935,13 +2811,14 @@ async function requestDetailReport(context, preserveTable = false) {
   });
   const request = {
     source: clone(context.source), query: clone(context.query), selection: clone(context.selection), detail: requestDetail,
-    offset: context.offset, limit: context.limit, sort: requestSort, searches: requestSearches
+    offset: context.offset, limit: context.limit, sort: requestSort, searches: requestSearches,
+    dashboardId: context.dashboardId, expectedRevision: context.revision,
   };
   context.request = clone(request);
   try {
     const result = await postgres.request(`/api/postgres/profiles/${encodeURIComponent(context.source.profileId)}/relation/detail`, { method: "POST", body: JSON.stringify(request) });
     const widget = activeDashboard?.dashboard.widgets.find(item => item.id === context.widgetId);
-    const current = detailContext === context && detailRequestToken === token && activeDashboard?.id === context.dashboardId && widget && JSON.stringify(widget.configuration?.source) === JSON.stringify(context.source) && JSON.stringify(queryForVisualization(widget.configuration.query, widget.configuration.visualization)) === JSON.stringify(context.query) && JSON.stringify(reconcileDetailReport(widget.configuration.source, widget.configuration.detail)) === JSON.stringify(context.detail);
+    const current = detailContext === context && detailRequestToken === token && activeDashboard?.id === context.dashboardId && activeDashboard.revision === context.revision && widget && JSON.stringify(widget.configuration?.source) === JSON.stringify(context.source) && JSON.stringify(queryForVisualization(widget.configuration.query, widget.configuration.visualization)) === JSON.stringify(context.query) && JSON.stringify(reconcileDetailReport(widget.configuration.source, widget.configuration.detail)) === JSON.stringify(context.detail);
     if (!current) return;
     context.state = "ready";
     context.result = result;
@@ -2970,7 +2847,7 @@ function openDetailReport(target, widgetId) {
   };
   detailReturnFocus = target;
   detailContext = {
-    dashboardId: activeDashboard.id, widgetId: widget.id, widgetTitle: `${widget.title} details`, source: clone(widget.configuration.source),
+    dashboardId: activeDashboard.id, revision: activeDashboard.revision, widgetId: widget.id, widgetTitle: `${widget.title} details`, source: clone(widget.configuration.source),
     query: queryForVisualization(clone(widget.configuration.query), clone(widget.configuration.visualization)), selection, detail,
     dashboardQueriedAt: widgetQueryResults.get(widget.id)?.result?.queriedAt ?? null,
     offset: 0, limit: detail.pageSize, sort: clone(detail.defaultSort), searches: {}, expandedSearchColumn: null, activeSearchColumn: null, state: "loading", result: null, message: "Loading selected source rows..."
@@ -3016,8 +2893,8 @@ function openExecutedSql(widget, population = false) {
   const execution = executedSqlByResult.get(`${widget.id}:${population ? "population" : "widget"}`);
   elements.sqlContext.textContent = population ? "Population result" : "Widget result";
   elements.sqlTitle.textContent = `${widget.title} SQL`;
-  elements.sqlStatus.textContent = execution ? "The parameterized statement used for the currently displayed result." : "No SQL was executed for this static preview result.";
-  elements.sqlCode.textContent = execution?.sql || "-- Preview data is embedded in Schemer; no database query was run.";
+  elements.sqlStatus.textContent = execution ? "The parameterized statement used for the currently displayed result." : "No live SQL has run for this widget.";
+  elements.sqlCode.textContent = execution?.sql || "-- No database query has run for this widget.";
   elements.sqlParameters.hidden = !execution || execution.parameters === undefined;
   elements.sqlParameterCode.textContent = execution?.parameters === undefined ? "" : JSON.stringify(execution.parameters, null, 2);
   elements.sqlDialog.showModal();
@@ -3276,6 +3153,26 @@ async function deleteDashboard() {
   await dashboardRequest(`/api/dashboards/${encodeURIComponent(dashboardId)}`, { method: "DELETE" });
   activeDashboard = null;
   await loadDashboards();
+}
+
+async function restoreMercuryDashboard() {
+  document.querySelector("#dashboard-menu").removeAttribute("open");
+  try {
+    await flushPendingSave();
+    const existing = dashboards.find(record => record.id === "dashboard_mercury");
+    if (!confirm(`${existing ? "Restore" : "Create"} the Mercury Books demo from the included PostgreSQL bookstore data?\n\nThe six bundled widget definitions will be restored. Existing widget layouts, viewport, and unrelated custom widgets will be preserved.`)) return;
+    setSaveStatus("Restoring Mercury...", "saving");
+    const restored = await sessionClient.json("/api/examples/mercury/reset", {
+      method: "POST",
+      body: JSON.stringify({ expectedRevision: existing?.revision ?? null }),
+    }, {
+      allowPath: path => path === "/api/examples/mercury/reset",
+      defaultMessage: "Mercury dashboard could not be restored",
+    });
+    await loadDashboards(restored.id);
+  } catch (error) {
+    setSaveStatus(error.message, "error");
+  }
 }
 
 function schemerAiTarget() {
@@ -3700,6 +3597,7 @@ elements.mobileDashboardSelect.addEventListener("change", async () => {
 document.querySelector("#rename-dashboard").addEventListener("click", () => openDashboardForm("rename"));
 document.querySelector("#duplicate-dashboard").addEventListener("click", () => openDashboardForm("duplicate"));
 document.querySelector("#archive-dashboard").addEventListener("click", archiveDashboard);
+document.querySelector("#restore-mercury").addEventListener("click", restoreMercuryDashboard);
 document.querySelector("#delete-dashboard").addEventListener("click", deleteDashboard);
 document.querySelector("#show-active-dashboards").addEventListener("click", () => { showArchived = false; renderDashboardList(); });
 document.querySelector("#show-archived-dashboards").addEventListener("click", () => { showArchived = true; renderDashboardList(); });

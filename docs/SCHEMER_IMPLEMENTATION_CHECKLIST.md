@@ -11,6 +11,7 @@ This file is the durable implementation sequence for Schemer. Use it after a los
 - [x] Bind actions to exact dashboard IDs, revisions, widget IDs/titles, captured snapshots, confirmation, successful save, and rollback.
 - [x] Keep rows and SQL outside metadata/dashboard disclosure; allow only separately confirmed, bounded read-only analytic SQL in data mode. Keep hosts/users/passwords, schema tools, migrations, shell, filesystem, web, tasks, and MCP outside the Schemer agent boundary.
 - [x] Create complete widgets from bounded live-verified catalog descriptors, execute revision-guarded structured queries before mutation, generate IDs/layout/presentation in Schemer, persist once, and reconcile ambiguous saves.
+- [x] Replace Mercury preview values with six resettable live widgets backed by the included `bookstore.order_summary` view while preserving saved layouts and unrelated custom widgets.
 
 ## Approval Protocol
 

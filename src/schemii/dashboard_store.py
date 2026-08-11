@@ -358,7 +358,7 @@ def mercury_dashboard_record() -> dict[str, Any]:
     for widget_id, (x, y, width, height, order) in layouts.items():
         widgets.append({
             "id": widget_id,
-            "kind": "preview",
+            "kind": "placeholder",
             "title": titles[widget_id],
             "layout": {
                 "desktop": {"x": x, "y": y, "w": width, "h": height},
@@ -486,6 +486,89 @@ class DashboardStore:
             record["updatedAt"] = _utc_now()
             return self._write(record)
 
+    def restore_mercury(self, template: Any, expected_revision: Any) -> dict[str, Any]:
+        template = validate_dashboard_record(template, "dashboard_mercury")
+        with self._lock:
+            path = self._path("dashboard_mercury")
+            current = self._read(path) if path.is_file() else None
+            if current is None:
+                if expected_revision is not None:
+                    raise DashboardStoreError(409, "dashboard_changed", "Mercury was deleted before it could be restored")
+                restored = template
+                restored["revision"] = 1
+            else:
+                if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or current["revision"] != expected_revision:
+                    raise DashboardStoreError(409, "dashboard_changed", "Mercury changed before it could be restored")
+                defaults = {widget["id"]: widget for widget in template["dashboard"]["widgets"]}
+                widgets = []
+                restored_ids = set()
+                for widget in current["dashboard"]["widgets"]:
+                    replacement = defaults.get(widget["id"])
+                    if replacement is None:
+                        widgets.append(widget)
+                        continue
+                    replacement = json.loads(json.dumps(replacement))
+                    replacement["layout"] = widget["layout"]
+                    widgets.append(replacement)
+                    restored_ids.add(widget["id"])
+                for widget_id, widget in defaults.items():
+                    if widget_id in restored_ids:
+                        continue
+                    widget = json.loads(json.dumps(widget))
+                    layout = widget["layout"]
+                    placed = False
+                    for y in range(1000):
+                        for x in range(13 - layout["desktop"]["w"]):
+                            if all(
+                                x + layout["desktop"]["w"] <= existing["layout"]["desktop"]["x"]
+                                or existing["layout"]["desktop"]["x"] + existing["layout"]["desktop"]["w"] <= x
+                                or y + layout["desktop"]["h"] <= existing["layout"]["desktop"]["y"]
+                                or existing["layout"]["desktop"]["y"] + existing["layout"]["desktop"]["h"] <= y
+                                for existing in widgets
+                            ):
+                                layout["desktop"]["x"] = x
+                                layout["desktop"]["y"] = y
+                                placed = True
+                                break
+                        if placed:
+                            break
+                    if not placed:
+                        raise DashboardStoreError(409, "dashboard_layout_full", "No non-overlapping space is available for a restored Mercury widget")
+                    layout["mobile"]["order"] = max((existing["layout"]["mobile"]["order"] for existing in widgets), default=-1) + 1
+                    widgets.append(widget)
+                restored = template
+                restored["dashboard"]["widgets"] = widgets
+                restored["dashboard"]["viewport"] = current["dashboard"]["viewport"]
+                restored["revision"] = current["revision"] + 1
+            restored["updatedAt"] = _utc_now()
+            return self._write(validate_dashboard_record(restored, "dashboard_mercury"))
+
+    def upgrade_mercury_example(self, template: Any) -> dict[str, Any] | None:
+        template = validate_dashboard_record(template, "dashboard_mercury")
+        with self._lock:
+            path = self._path("dashboard_mercury")
+            if not path.is_file():
+                return None
+            current = self._read(path)
+            defaults = {widget["id"]: widget for widget in template["dashboard"]["widgets"]}
+            if not any(
+                widget["id"] in defaults and widget["title"] == defaults[widget["id"]]["title"]
+                and not widget["configuration"] and widget["kind"] in {"preview", "placeholder"}
+                for widget in current["dashboard"]["widgets"]
+            ):
+                return current
+            upgraded = json.loads(json.dumps(current))
+            for index, widget in enumerate(upgraded["dashboard"]["widgets"]):
+                replacement = defaults.get(widget["id"])
+                if replacement is None or widget["title"] != replacement["title"] or widget["configuration"] or widget["kind"] not in {"preview", "placeholder"}:
+                    continue
+                replacement = json.loads(json.dumps(replacement))
+                replacement["layout"] = widget["layout"]
+                upgraded["dashboard"]["widgets"][index] = replacement
+            upgraded["revision"] = current["revision"] + 1
+            upgraded["updatedAt"] = _utc_now()
+            return self._write(validate_dashboard_record(upgraded, "dashboard_mercury"))
+
     def delete(self, dashboard_id: str) -> dict[str, str]:
         dashboard_id = self.validate_id(dashboard_id)
         with self._lock:
@@ -495,12 +578,12 @@ class DashboardStore:
                 raise DashboardStoreError(500, "dashboard_store_error", "Dashboard file could not be deleted") from exc
         return {"deleted": dashboard_id}
 
-    def initialize_once(self) -> None:
+    def initialize_once(self, template: Any = None) -> None:
         with self._lock:
             if self.marker_path.exists():
                 return
             if not self.list():
-                record = mercury_dashboard_record()
+                record = validate_dashboard_record(template) if template is not None else mercury_dashboard_record()
                 record["revision"] = 1
                 record["updatedAt"] = _utc_now()
                 self._write(validate_dashboard_record(record))
