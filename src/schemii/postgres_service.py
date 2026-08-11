@@ -46,6 +46,19 @@ try:
 except ImportError:  # pragma: no cover - direct Windows use has one process per profile store.
     fcntl = None
 
+
+def _profile_context_fingerprint(profile_id: str, profile: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        [profile_id, profile.get("host"), profile.get("port"), profile.get("dbname"), profile.get("user"), profile.get("sslmode")],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    value = 1469598103934665603
+    for character in encoded:
+        value ^= ord(character)
+        value = value * 1099511628211 & ((1 << 64) - 1)
+    return f"{value:016x}"
+
 PROFILE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
 NAME_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,128}$")
@@ -842,46 +855,106 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         finally:
             self._close(connection)
 
-    def execute_read_only_sql(self, profile_id: str, namespace: str, statement: Any) -> dict[str, Any]:
+    def execute_read_only_sql(
+        self,
+        profile_id: str,
+        namespace: str,
+        statement: Any,
+        *,
+        database: Any = None,
+        expected_profile_fingerprint: Any = None,
+        reject_privileged_role: bool = False,
+        allow_explain: bool = True,
+        max_rows: int = 500,
+        max_columns: int = 100,
+        max_result_bytes: int = 1024 * 1024,
+    ) -> dict[str, Any]:
         namespace = self._validate_namespace(namespace)
+        profile = self._profile(profile_id)
+        if expected_profile_fingerprint is not None and expected_profile_fingerprint != _profile_context_fingerprint(profile_id, profile):
+            raise PostgresServiceError(409, "profile_changed", "The saved PostgreSQL profile changed after query confirmation")
+        database = profile["dbname"] if database is None else self._validate_database(database)
+        if profile["dbname"] != database:
+            raise PostgresServiceError(409, "database_changed", "The saved profile database does not match the requested database")
+        if not isinstance(allow_explain, bool):
+            raise ValueError("allow_explain must be boolean")
+        if not isinstance(reject_privileged_role, bool):
+            raise ValueError("reject_privileged_role must be boolean")
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 1 for value in (max_rows, max_columns, max_result_bytes)):
+            raise ValueError("SQL result limits must be positive integers")
         if not isinstance(statement, str) or not statement.strip():
             raise ValidationError("sql must be a non-empty string")
         if "\x00" in statement or len(statement) > 100_000:
             raise ValidationError("sql must be at most 100000 characters and contain no null bytes")
         statement = _single_sql_statement(statement, "SQL query")
-        if not re.match(r"^\s*(?:SELECT|WITH|VALUES|TABLE|EXPLAIN)\b", statement, re.I):
-            raise ValidationError("Only read-only SELECT, WITH, VALUES, TABLE, or EXPLAIN queries are allowed")
+        allowed_prefixes = "SELECT|WITH|VALUES|TABLE" + ("|EXPLAIN" if allow_explain else "")
+        if not re.match(rf"^\s*(?:{allowed_prefixes})\b", statement, re.I):
+            suffix = ", or EXPLAIN" if allow_explain else ""
+            raise ValidationError(f"Only read-only SELECT, WITH, VALUES, or TABLE{suffix} queries are allowed")
 
-        connection = self._connect(profile_id)
+        connection = self._connect_profile(profile)
         cursor = None
         try:
             cursor = connection.cursor()
             cursor.execute("SET TRANSACTION READ ONLY")
             cursor.execute(f"SET LOCAL statement_timeout = '{self._statement_timeout_ms}ms'")
             cursor.execute(
+                "SELECT current_database() AS database, role.rolsuper, role.rolbypassrls "
+                "FROM pg_catalog.pg_roles AS role WHERE role.rolname = current_user"
+            )
+            current_rows = cursor.fetchall()
+            current_database = current_rows[0]["database"] if current_rows and isinstance(current_rows[0], dict) else current_rows[0][0]
+            if current_database != database:
+                raise PostgresServiceError(409, "database_changed", "The connected PostgreSQL database does not match the requested database")
+            if reject_privileged_role and isinstance(current_rows[0], dict) and (current_rows[0].get("rolsuper") is True or current_rows[0].get("rolbypassrls") is True):
+                raise PostgresServiceError(403, "unsafe_database_role", "Read-only analytics require a non-superuser PostgreSQL role that does not bypass row security")
+            cursor.execute("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = %s) AS exists", (namespace,))
+            namespace_rows = cursor.fetchall()
+            namespace_exists = namespace_rows[0]["exists"] if namespace_rows and isinstance(namespace_rows[0], dict) else namespace_rows[0][0]
+            if not namespace_exists:
+                raise NotFoundError("Namespace was not found")
+            cursor.execute(
                 "SELECT pg_catalog.set_config('search_path', %s, true)",
-                (f"{quote_identifier(namespace)}, pg_catalog",),
+                (f"pg_catalog, {quote_identifier(namespace)}",),
             )
             cursor.execute(statement)
             if cursor.description is None:
                 raise ValidationError("The SQL query did not return a result set")
             names = [item.name if hasattr(item, "name") else item[0] for item in cursor.description]
+            if len(names) > max_columns:
+                raise PostgresServiceError(422, "sql_result_too_wide", f"SQL result exceeds the {max_columns}-column limit")
             fetchmany = getattr(cursor, "fetchmany", None)
-            raw_rows = fetchmany(501) if fetchmany else cursor.fetchall()[:501]
-            truncated = len(raw_rows) > 500
-            raw_rows = raw_rows[:500]
+            raw_rows = fetchmany(max_rows + 1) if fetchmany else cursor.fetchall()[:max_rows + 1]
+            truncated = len(raw_rows) > max_rows
+            raw_rows = raw_rows[:max_rows]
             rows = []
-            for row in raw_rows:
-                values = [row.get(name) for name in names] if isinstance(row, dict) else list(row)
-                rows.append([self._json_cell(value) for value in values])
-            return {
+            base = {
+                "profileId": profile_id,
+                "database": database,
                 "namespace": namespace,
                 "columns": [{"name": name} for name in names],
                 "rows": rows,
-                "rowCount": len(rows),
+                "rowCount": 0,
                 "truncated": truncated,
-                "maxRows": 500,
+                "maxRows": max_rows,
+                "maxColumns": max_columns,
+                "maxResultBytes": max_result_bytes,
             }
+            for row in raw_rows:
+                values = [row.get(name) for name in names] if isinstance(row, dict) else list(row)
+                candidate = [self._json_cell(value) for value in values]
+                base["rows"] = [*rows, candidate]
+                base["rowCount"] = len(rows) + 1
+                if len(json.dumps(base, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")) > max_result_bytes:
+                    truncated = True
+                    break
+                rows.append(candidate)
+            base["rows"] = rows
+            base["rowCount"] = len(rows)
+            base["truncated"] = truncated
+            if len(json.dumps(base, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")) > max_result_bytes:
+                raise PostgresServiceError(422, "sql_result_too_large", "SQL result metadata exceeds the byte limit")
+            return base
         except PostgresServiceError:
             raise
         except Exception as exc:

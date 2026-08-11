@@ -119,6 +119,8 @@ Each Aggregate Report also stores a version-1 detail-report presentation tied to
 
 Every sourced widget and active detail report includes a **Data Lineage** action. One reusable dialog shows the redacted profile label and ID, exact database/namespace/relation identity, relation kind, fingerprint, ordered PostgreSQL columns, verification state, widget filters, clicked dimensions, selected measure, column searches and sort, query duration, row counts, truncation, and refresh time. Views and materialized views show their bounded PostgreSQL query definition when available; tables show their authoritative ordered catalog columns and explicitly state that PostgreSQL does not expose one complete creation statement. Aggregation SQL, detail-page SQL, detail-count SQL, and each parameter list remain separate. Copy controls operate only on the explicitly selected statement or parameter JSON and never interpolate values or include connection credentials. Dashboard slicers are shown as not applied while Phase 6 remains deferred. Read-only `EXPLAIN` remains a separately approved future extension.
 
+Schemer can use the same private OpenCode service and provider subscriptions as Schemii while retaining its own `/workspace-schemer` chat history, instructions, skills, and proposal tools. Provider API keys and OAuth/subscription credentials remain in the existing `schemii-opencode-data` volume, so connecting through either app makes that provider available to both without credential re-entry. Both apps use the same left-side assistant drawer, activity timeline, reasoning/tool cards, provider settings, and history controls. Metadata and dashboard disclosure modes remain row-free. Data mode requires an exact profile, database, and namespace and may enable only the inert `schemer_read_query` proposal tool; every query requires browser confirmation and only a strictly validated, bounded result is returned to the model. Analytic SQL may join relations when necessary, while persisted widget configuration remains single-relation and caller-SQL-free. Schemer's other confirmation-gated tools can create or open dashboards and create, rename, duplicate, or delete widgets while preserving existing source/query configuration and user-owned layout. Schemii schema and migration tools are unavailable in Schemer, and Schemer tools are unavailable in Schemii.
+
 Schemer verifies every persisted widget source against live PostgreSQL when a dashboard opens and when the catalog is refreshed. Refresh uses the lightweight exact-database relation listing rather than Schemii's full namespace introspection, then verifies each saved relation kind, fingerprint, and column snapshot. Mismatches return `relation_changed` and block the widget rather than silently adopting new metadata. Missing or unreachable sources are also blocked. The strict singular source shape has no join or cross-relation column-reference fields, and the dashboard validator rejects attempts to add them.
 
 Relation columns include advisory role suggestions derived from PostgreSQL type categories. Numeric values are suggested as measures, temporal values as dates, text/enums/booleans as dimensions, and UUID or conservatively named `id`/`*_id` values as identifiers. Suggestions are displayed as labels only: they are not persisted, do not select a role, and are excluded from relation fingerprints.
@@ -131,6 +133,12 @@ Aggregate execution uses a dedicated endpoint that accepts only the saved single
 
 ```bash
 docker compose -f compose.yaml -f compose.postgres.yaml -f compose.schemer.yaml up --build -d
+```
+
+To run both applications with one shared OpenCode service, set `SCHEMII_OPENCODE_PASSWORD` and include both AI overrides:
+
+```bash
+docker compose -f compose.yaml -f compose.postgres.yaml -f compose.ai.yaml -f compose.schemer.yaml -f compose.schemer.ai.yaml up --build -d
 ```
 
 Open Schemii at `http://127.0.0.1:8080/` and Schemer at `http://127.0.0.1:8081/`. Saved PostgreSQL profiles are shared through the existing `schemii-config` volume; passwords remain server-side and are never returned to either browser. Versioned dashboard records are stored separately in the owner-only `schemer-dashboards` volume and survive container replacement or restart. Deleting that volume permanently deletes the saved dashboards. Direct launches use `SCHEMER_DASHBOARD_DIR`, which defaults to `~/.local/share/schemer/dashboards`.
@@ -331,7 +339,7 @@ Most users do not need configuration. These launcher and Compose variables are t
 | `SCHEMII_POSTGRES_DB` | Included PostgreSQL database name |
 | `SCHEMII_POSTGRES_USER` | Included PostgreSQL user |
 | `SCHEMII_POSTGRES_PASSWORD` | Included PostgreSQL password |
-| `SCHEMII_OPENCODE_TIMEOUT` | AI request timeout, default `45` seconds |
+| `SCHEMII_OPENCODE_TIMEOUT` | AI request timeout, default `120` seconds; accepted range `1`–`300` |
 
 Native application variables include `SCHEMII_HOST`, `SCHEMII_PORT`, `SCHEMII_CONFIG_DIR`, `SCHEMII_SCHEMA_DIR`, and `SCHEMII_BEHIND_LOOPBACK_PROXY`. Container launchers set these automatically.
 
@@ -387,7 +395,7 @@ The opt-in live model contract test is documented in [`docs/AI_ASSISTANT.md`](do
 
 ## API
 
-The browser uses same-origin local APIs for saved designs, PostgreSQL, examples, AI, and shutdown. PostgreSQL, AI, example-restoration, and shutdown routes require a local origin plus the `X-Schemii-Token` returned by `/api/session`. The shared session client acquires this token lazily and retries one expired session once. Schemii mounts profile, catalog, and schema-design PostgreSQL capabilities; Schemer mounts profile, catalog, and relation-query capabilities. Schema writes additionally use revision and layout-token checks.
+The browser uses same-origin local APIs for saved designs, PostgreSQL, examples, AI, and shutdown. PostgreSQL, AI, example-restoration, and shutdown routes require a local origin plus the `X-Schemii-Token` returned by `/api/session`. The shared session client acquires this token lazily and retries one expired session once. Schemii mounts profile, catalog, schema-design, and read-SQL capabilities; Schemer mounts profile, catalog, relation-query, and the separate read-SQL capability without exposing schema introspection, preview, or migration surfaces. Schemer's SQL request is exactly `{database, namespace, sql}`, rejects unknown fields and `EXPLAIN`, and returns at most 100 rows, 50 columns, and 256 KiB of complete JSON values. Schemii temporarily accepts its legacy `{namespace, sql}` request as well as the exact-database form. Schema writes additionally use revision and layout-token checks.
 
 See `src/schemii/server.py` and the focused server tests for the current route contract. Do not expose these APIs beyond the loopback-only application boundary.
 

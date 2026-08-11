@@ -962,39 +962,6 @@ async function restoreExamples() {
   }
 }
 
-function aiRequest(path, options = {}) {
-  return sharedSessionClient.json(path, options, {
-    allowPath: value => typeof value === "string" && value.startsWith("/api/ai/"),
-    defaultMessage: "The AI service request failed"
-  });
-}
-
-async function readAiActivity(sessionId, onEvent, signal) {
-  const path = `/api/ai/sessions/${encodeURIComponent(sessionId)}/activity`;
-  const response = await sharedSessionClient.fetch(path, {
-    method: "GET",
-    signal,
-  }, {
-    allowPath: value => typeof value === "string" && value.startsWith("/api/ai/"),
-    defaultMessage: "Agent activity is unavailable"
-  });
-  if (!response.body) throw new Error("Agent activity stream is unavailable");
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  while (true) {
-    const { value, done } = await reader.read();
-    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() || "";
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      try { onEvent(JSON.parse(line)); } catch { /* Ignore malformed or unknown activity records. */ }
-    }
-    if (done) break;
-  }
-}
-
 async function checkPostgresDrift() {
   const source = schema?.postgres;
   if (!source?.sourceProfileId || !source.namespace || !source.fingerprint || document.hidden || postgresState.busy || postgresState.driftChecking) return;
@@ -4449,562 +4416,16 @@ async function applyAiSchemaAction(action) {
   }
 }
 
-const AI_MODEL_STORAGE_KEY = "schemii.ai.lastModel";
-
-function normalizeStoredAiModel(value) {
-  if (typeof value !== "string" || !value || value.length > 1024) return "";
-  try {
-    const model = JSON.parse(value);
-    if (!model || typeof model !== "object" || Array.isArray(model) || Object.keys(model).sort().join(",") !== "modelId,providerId") return "";
-    if (typeof model.providerId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(model.providerId)) return "";
-    if (typeof model.modelId !== "string" || !model.modelId || model.modelId !== model.modelId.trim() || model.modelId.length > 256 || /[\x00-\x1f\x7f]/.test(model.modelId)) return "";
-    return JSON.stringify({ providerId: model.providerId, modelId: model.modelId });
-  } catch {
-    return "";
-  }
-}
-
-function storedAiModel() {
-  try { return normalizeStoredAiModel(localStorage.getItem(AI_MODEL_STORAGE_KEY)); } catch { return ""; }
-}
-
-function rememberAiModel(value) {
-  const normalized = normalizeStoredAiModel(value);
-  if (!normalized) return;
-  try { localStorage.setItem(AI_MODEL_STORAGE_KEY, normalized); } catch { /* Model preference persistence is optional. */ }
-}
-
-function setAiPanelOpen(open) {
-  elements.mainLayout.classList.toggle("ai-open", open);
-  elements.toolRail.inert = open;
-  elements.toolRail.setAttribute("aria-hidden", String(open));
-  elements.aiPanel.classList.toggle("open", open);
-  elements.aiPanel.setAttribute("aria-hidden", String(!open));
-  elements.aiButton.classList.toggle("active", open);
-  elements.aiButton.setAttribute("aria-expanded", String(open));
-  if (open) {
-    loadAiStatus();
-    requestAnimationFrame(() => elements.aiInput.focus());
-  }
-}
-
-function setAiBusy(busy) {
-  aiState.busy = busy;
-  elements.aiSendButton.disabled = busy || !aiState.available || !elements.aiModelSelect.value;
-  elements.aiInput.disabled = busy || !aiState.available || !elements.aiModelSelect.value;
-  elements.aiNewChat.disabled = busy;
-  elements.aiHistoryButton.disabled = busy;
-  elements.aiModelSelect.disabled = busy || !elements.aiModelSelect.value;
-  elements.aiAccessSelect.disabled = busy;
-  elements.aiSqlPolicy.disabled = busy;
-  elements.aiSendButton.textContent = busy ? "Working..." : "Send";
-}
-
-function renderAiModels() {
-  const previous = normalizeStoredAiModel(elements.aiModelSelect.value) || storedAiModel();
-  elements.aiModelSelect.replaceChildren();
-  for (const provider of aiState.providers.filter(item => item.connected && item.models?.length)) {
-    const group = document.createElement("optgroup");
-    group.label = provider.name;
-    for (const model of provider.models) {
-      const option = document.createElement("option");
-      option.value = JSON.stringify({ providerId: provider.id, modelId: model.id });
-      option.textContent = model.name;
-      group.append(option);
-    }
-    elements.aiModelSelect.append(group);
-  }
-  if (previous && [...elements.aiModelSelect.options].some(option => option.value === previous)) elements.aiModelSelect.value = previous;
-  elements.aiModelSelect.disabled = !elements.aiModelSelect.options.length;
-  if (!elements.aiModelSelect.options.length) {
-    const option = document.createElement("option");
-    option.textContent = "Connect a provider in settings";
-    option.value = "";
-    elements.aiModelSelect.append(option);
-  }
-  const hasModel = Boolean(elements.aiModelSelect.value);
-  elements.aiInput.placeholder = hasModel ? "Ask about this schema..." : "Connect a provider in settings to start chatting";
-  if (elements.aiEmptyCopy) {
-    elements.aiEmptyCopy.textContent = hasModel
-      ? "Ask about the active design. Proposed changes and database operations always wait for your confirmation."
-      : "Connect OpenAI, GitHub Copilot, GitLab, or an API-key provider in settings to start chatting.";
-  }
-  setAiBusy(aiState.busy);
-}
-
-function aiAuthMethods(providerId) {
-  const methods = aiState.authMethods?.[providerId] ?? [];
-  if (Array.isArray(methods)) return methods.map(method => typeof method === "string" ? { id: method, name: method } : method);
-  return Object.entries(methods).map(([id, method]) => typeof method === "string" ? { id, name: method } : { id, ...method });
-}
-
-function renderAiProviders() {
-  elements.aiProviders.replaceChildren();
-  for (const provider of aiState.providers) {
-    const card = document.createElement("article");
-    card.className = "ai-provider-card";
-    const heading = document.createElement("div");
-    heading.className = "ai-provider-heading";
-    const name = document.createElement("strong");
-    name.textContent = provider.name;
-    const indicator = document.createElement("span");
-    indicator.className = provider.connected ? "connected" : "";
-    const anonymousFreeAccess = provider.connected && provider.authenticated === false;
-    indicator.textContent = anonymousFreeAccess ? "Free access" : provider.connected ? "Connected" : "Not connected";
-    heading.append(name, indicator);
-    card.append(heading);
-    if (provider.connected && !anonymousFreeAccess) {
-      const disconnect = document.createElement("button");
-      disconnect.type = "button";
-      disconnect.className = "button button-ghost";
-      disconnect.textContent = "Disconnect";
-      disconnect.addEventListener("click", async () => {
-        if (!confirm(`Disconnect ${provider.name}?`)) return;
-        await aiRequest(`/api/ai/auth/${encodeURIComponent(provider.id)}`, { method: "DELETE" });
-        await loadAiStatus(true);
-      });
-      card.append(disconnect);
-    } else {
-      const methods = aiAuthMethods(provider.id);
-      for (const method of methods) card.append(buildAiAuthForm(provider, method));
-      if (!methods.length) {
-        const note = document.createElement("p");
-        note.textContent = "This provider did not advertise a supported authentication method.";
-        card.append(note);
-      }
-    }
-    elements.aiProviders.append(card);
-  }
-}
-
-function buildAiAuthForm(provider, method) {
-  const form = document.createElement("form");
-  form.className = "ai-auth-form";
-  const methodId = Number(method.id);
-  const apiKeyMethod = method.type === "api" || /api.?key/i.test(method.name ?? method.label ?? "");
-  const label = document.createElement("strong");
-  label.textContent = method.name ?? (apiKeyMethod ? "API key" : "OAuth");
-  form.append(label);
-  if (method.helpUrl) {
-    try {
-      const helpUrl = new URL(method.helpUrl);
-      if (["http:", "https:"].includes(helpUrl.protocol)) {
-        const help = document.createElement("a");
-        help.className = "ai-auth-help";
-        help.href = helpUrl.href;
-        help.target = "_blank";
-        help.rel = "noopener noreferrer";
-        help.textContent = method.helpLabel || "Create provider key";
-        form.append(help);
-      }
-    } catch { /* Ignore invalid provider help links. */ }
-  }
-  const appendProviderInputs = () => {
-    for (const inputDefinition of method.inputs ?? method.prompts ?? []) {
-      const inputName = inputDefinition.id ?? inputDefinition.key ?? inputDefinition.name;
-      let input;
-      if (inputDefinition.type === "select") {
-        input = document.createElement("select");
-        for (const item of inputDefinition.options ?? []) {
-          const option = document.createElement("option");
-          option.value = item.value;
-          option.textContent = item.label || item.value;
-          input.append(option);
-        }
-      } else {
-        input = document.createElement("input");
-        input.placeholder = inputDefinition.label ?? inputDefinition.message ?? inputName;
-        input.autocomplete = "off";
-      }
-      input.name = inputName;
-      input.required = inputDefinition.required !== false;
-      form.append(input);
-    }
-  };
-  if (apiKeyMethod) {
-    const input = document.createElement("input");
-    input.type = "password";
-    input.name = "key";
-    input.autocomplete = "off";
-    input.placeholder = "API key";
-    input.required = true;
-    form.append(input);
-    appendProviderInputs();
-  } else {
-    appendProviderInputs();
-  }
-  const submit = document.createElement("button");
-  submit.type = "submit";
-  submit.className = "button button-primary";
-  submit.textContent = apiKeyMethod ? "Connect" : "Start authorization";
-  form.append(submit);
-  form.addEventListener("submit", async event => {
-    event.preventDefault();
-    submit.disabled = true;
-    try {
-      if (apiKeyMethod) {
-        const keyInput = form.elements.key;
-        const inputs = Object.fromEntries([...new FormData(form)].filter(([name]) => name && name !== "key"));
-        await aiRequest("/api/ai/auth/api", { method: "POST", body: JSON.stringify({ providerId: provider.id, key: keyInput.value, inputs }) });
-        keyInput.value = "";
-        await loadAiStatus(true);
-      } else {
-        const inputs = Object.fromEntries([...new FormData(form)].filter(([name]) => name));
-        const authorization = await aiRequest("/api/ai/auth/oauth/authorize", { method: "POST", body: JSON.stringify({ providerId: provider.id, method: methodId, inputs }) });
-        aiState.oauth = { providerId: provider.id, method: methodId, flow: authorization.method };
-        renderAiOauthCompletion(authorization);
-        if (authorization.url) {
-          try {
-            const url = new URL(authorization.url);
-            if (["http:", "https:"].includes(url.protocol)) window.open(url.href, "_blank", "noopener,noreferrer");
-          } catch { /* Instructions and callback completion remain available without a valid link. */ }
-        }
-      }
-    } catch (error) {
-      elements.aiSettingsStatus.textContent = error.message;
-    } finally {
-      submit.disabled = false;
-    }
-  });
-  return form;
-}
-
-function renderAiOauthCompletion(authorization) {
-  const box = document.createElement("form");
-  box.className = "ai-oauth-completion";
-  const instructions = document.createElement("p");
-  instructions.textContent = authorization.instructions || "Complete authorization in the opened page, then enter the returned code if requested.";
-  const link = document.createElement("a");
-  link.textContent = "Open authorization page";
-  const authorizationUrl = (() => {
-    try {
-      const parsed = new URL(authorization.url);
-      return ["http:", "https:"].includes(parsed.protocol) ? parsed.href : "";
-    } catch { return ""; }
-  })();
-  link.href = authorizationUrl || "#";
-  link.target = "_blank";
-  link.rel = "noopener noreferrer";
-  const code = document.createElement("input");
-  code.name = "code";
-  code.autocomplete = "off";
-  code.placeholder = "Callback code (if provided)";
-  const finish = document.createElement("button");
-  finish.className = "button button-primary";
-  finish.type = "submit";
-  finish.textContent = "Complete connection";
-  box.append(instructions);
-  if (authorizationUrl) box.append(link);
-  box.append(code, finish);
-  box.addEventListener("submit", async event => {
-    event.preventDefault();
-    const oauth = aiState.oauth;
-    if (!oauth) return;
-    try {
-      await aiRequest("/api/ai/auth/oauth/callback", { method: "POST", body: JSON.stringify({ providerId: oauth.providerId, method: oauth.method, ...(code.value.trim() ? { code: code.value.trim() } : {}) }) });
-      code.value = "";
-      aiState.oauth = null;
-      await loadAiStatus(true);
-    } catch (error) {
-      elements.aiSettingsStatus.textContent = error.message;
-    }
-  });
-  elements.aiSettingsStatus.replaceChildren(box);
-}
-
-async function loadAiStatus(renderSettings = false) {
-  elements.aiStatusPill.textContent = "Checking";
-  try {
-    const status = await aiRequest("/api/ai/status", { method: "GET" });
-    Object.assign(aiState, { loaded: true, available: status.available === true || status.healthy === true, version: status.version ?? "", providers: status.providers ?? [], authMethods: status.authMethods ?? {}, skills: status.skills ?? [] });
-    const connected = aiState.providers.filter(provider => provider.connected).length;
-    elements.aiStatusPill.textContent = aiState.available ? `${connected} connected` : "Unavailable";
-    elements.aiStatusPill.classList.toggle("available", aiState.available);
-    elements.aiRailStatus.classList.toggle("available", aiState.available);
-    elements.aiSettingsStatus.textContent = aiState.available ? `OpenCode ${aiState.version || "available"}` : "OpenCode is unavailable. Schema design remains fully usable without AI.";
-    renderAiModels();
-    if (renderSettings || elements.aiSettingsDialog.open) renderAiProviders();
-  } catch (error) {
-    Object.assign(aiState, { loaded: true, available: false, providers: [] });
-    elements.aiStatusPill.textContent = "Offline";
-    elements.aiSettingsStatus.textContent = `AI unavailable: ${error.message}`;
-    renderAiModels();
-    if (renderSettings || elements.aiSettingsDialog.open) renderAiProviders();
-  }
-}
-
 function appendAiMessage(role, text) {
-  elements.aiMessages.querySelector(".ai-empty-state")?.remove();
-  const message = document.createElement("article");
-  message.className = `ai-message ${role}`;
-  const label = document.createElement("span");
-  label.textContent = role === "assistant" ? "Assistant" : role === "tool" ? "Query result" : "You";
-  const body = document.createElement("p");
-  body.textContent = String(text ?? "");
-  message.append(label, body);
-  elements.aiMessages.append(message);
-  elements.aiMessages.scrollTop = elements.aiMessages.scrollHeight;
-  return message;
+  return aiAssistant.appendMessage(role, text);
 }
 
 function appendAiQueryResult(result) {
-  elements.aiMessages.querySelector(".ai-empty-state")?.remove();
-  const columns = (result.columns ?? []).map(column => column.name ?? String(column));
-  const rows = result.rows ?? [];
-  const message = document.createElement("article");
-  message.className = "ai-message tool ai-query-result";
-  const label = document.createElement("span");
-  label.textContent = "Query result";
-  const card = document.createElement("div");
-  card.className = "ai-query-result-card";
-  const meta = document.createElement("div");
-  meta.className = "ai-query-result-meta";
-  const count = document.createElement("strong");
-  count.textContent = `${rows.length} row${rows.length === 1 ? "" : "s"}`;
-  const status = document.createElement("span");
-  status.textContent = result.truncated ? "Limited to 500 rows" : "Complete result";
-  meta.append(count, status);
-  card.append(meta);
-  if (columns.length) {
-    const scroll = document.createElement("div");
-    scroll.className = "ai-query-result-scroll";
-    scroll.tabIndex = 0;
-    scroll.setAttribute("aria-label", `Query result with ${rows.length} row${rows.length === 1 ? "" : "s"}`);
-    const table = document.createElement("table");
-    table.className = "ai-query-result-table";
-    const head = document.createElement("thead");
-    const headingRow = document.createElement("tr");
-    for (const column of columns) {
-      const heading = document.createElement("th");
-      heading.scope = "col";
-      heading.textContent = column;
-      headingRow.append(heading);
-    }
-    head.append(headingRow);
-    const body = document.createElement("tbody");
-    for (const row of rows) {
-      const tableRow = document.createElement("tr");
-      columns.forEach((column, index) => {
-        const cell = document.createElement("td");
-        const value = tableDataValue(Array.isArray(row) ? row[index] : row[column]);
-        cell.textContent = value.text;
-        if (value.className) cell.className = value.className;
-        cell.title = value.text;
-        tableRow.append(cell);
-      });
-      body.append(tableRow);
-    }
-    table.append(head, body);
-    scroll.append(table);
-    card.append(scroll);
-  }
-  if (!rows.length) {
-    const empty = document.createElement("p");
-    empty.className = "ai-query-result-empty";
-    empty.textContent = "Query returned no rows.";
-    card.append(empty);
-  }
-  message.append(label, card);
-  elements.aiMessages.append(message);
-  elements.aiMessages.scrollTop = elements.aiMessages.scrollHeight;
-  return message;
-}
-
-function formatAiDuration(milliseconds) {
-  const seconds = Math.max(0, milliseconds) / 1000;
-  return seconds < 10 ? `${seconds.toFixed(1)}s` : `${Math.round(seconds)}s`;
-}
-
-function beginAiActivity(modelName) {
-  elements.aiMessages.querySelector(".ai-empty-state")?.remove();
-  const startedAt = performance.now();
-  const details = document.createElement("details");
-  details.className = "ai-run active";
-  details.open = true;
-  details.setAttribute("role", "status");
-  const summary = document.createElement("summary");
-  const indicator = document.createElement("span");
-  indicator.className = "ai-progress-grid";
-  indicator.setAttribute("aria-hidden", "true");
-  for (let index = 0; index < 25; index += 1) {
-    const dot = document.createElement("i");
-    dot.style.setProperty("--dot-index", index);
-    indicator.append(dot);
-  }
-  const title = document.createElement("span");
-  title.className = "ai-run-title shimmer";
-  title.textContent = "Starting assistant";
-  const elapsed = document.createElement("time");
-  elapsed.className = "ai-run-time";
-  elapsed.textContent = "0.0s";
-  summary.append(indicator, title, elapsed);
-  const steps = document.createElement("div");
-  steps.className = "ai-run-steps";
-  details.append(summary, steps);
-  elements.aiMessages.append(details);
-  elements.aiMessages.scrollTop = elements.aiMessages.scrollHeight;
-
-  const stageElements = new Map();
-  let retryAt = null;
-  let finished = false;
-  const setStage = (key, label, state = "running") => {
-    const safeState = ["running", "completed", "error"].includes(state) ? state : "running";
-    let row = stageElements.get(key);
-    if (!row) {
-      row = document.createElement("div");
-      row.className = "ai-run-step";
-      const marker = document.createElement("span");
-      marker.className = "ai-run-step-marker";
-      marker.setAttribute("aria-hidden", "true");
-      const copy = document.createElement("span");
-      copy.className = "ai-run-step-copy";
-      row.append(marker, copy);
-      steps.append(row);
-      stageElements.set(key, row);
-    }
-    row.className = `ai-run-step ${safeState}`;
-    row.querySelector(".ai-run-step-copy").textContent = label;
-    return row;
-  };
-  setStage("request", `Opening ${modelName || "selected model"}`);
-
-  const tick = () => {
-    elapsed.textContent = formatAiDuration(performance.now() - startedAt);
-    if (retryAt) {
-      const remaining = Math.max(0, Math.ceil((retryAt - Date.now()) / 1000));
-      title.textContent = `Retrying in ${remaining}s`;
-    }
-  };
-  const timer = setInterval(tick, 100);
-
-  return {
-    details,
-    update(event) {
-      if (finished || !event || typeof event !== "object") return;
-      if (event.type === "part") setStage("model", "Model started", "completed");
-      if (event.type === "connection") {
-        if (event.state === "connected") {
-          title.textContent = "Waiting for model";
-          setStage("request", `Connected to ${modelName || "selected model"}`, "completed");
-        } else {
-          title.textContent = "Working without live updates";
-          setStage("stream", "Live activity disconnected", "error");
-        }
-      } else if (event.type === "session" && event.state === "busy") {
-        retryAt = null;
-        title.textContent = "Agent is working";
-        setStage("model", "Model started", "running");
-      } else if (event.type === "session" && event.state === "retry") {
-        retryAt = Number.isFinite(event.retryAt) ? event.retryAt : null;
-        title.textContent = "Retrying provider";
-        setStage("retry", `Provider retry ${Number.isInteger(event.attempt) ? event.attempt : ""}`.trim(), "running");
-      } else if (event.type === "session" && event.state === "error") {
-        title.textContent = "Provider reported an issue";
-        setStage("provider-error", "Provider issue detected", "error");
-      } else if (event.type === "session" && event.state === "idle") {
-        retryAt = null;
-        title.textContent = "Finalizing response";
-        setStage("model", "Model finished", "completed");
-      } else if (event.type === "compaction") {
-        title.textContent = "Compacting context";
-        setStage("compaction", "Context compacted", event.state === "completed" ? "completed" : "running");
-      } else if (event.type === "part" && event.kind === "reasoning") {
-        title.textContent = event.state === "completed" ? "Preparing response" : "Reasoning";
-        setStage(event.key, "Reasoning", event.state);
-      } else if (event.type === "part" && event.kind === "text") {
-        title.textContent = "Writing response";
-        setStage(event.key, "Writing response", event.state);
-      } else if (event.type === "part" && event.kind === "tool" && AI_TOOL_LABELS[event.tool]) {
-        title.textContent = AI_TOOL_LABELS[event.tool];
-        setStage(event.key, AI_TOOL_LABELS[event.tool], event.state);
-      } else if (event.type === "part" && event.kind === "skill" && AI_SKILL_LABELS[event.skill]) {
-        title.textContent = `Loading ${AI_SKILL_LABELS[event.skill]}`;
-        setStage(event.key, AI_SKILL_LABELS[event.skill], event.state);
-      }
-      elements.aiMessages.scrollTop = elements.aiMessages.scrollHeight;
-    },
-    finish(outcome) {
-      if (finished) return;
-      clearInterval(timer);
-      retryAt = null;
-      tick();
-      finished = true;
-      const failed = outcome === "error";
-      details.classList.remove("active");
-      details.classList.add(failed ? "failed" : "completed");
-      title.classList.remove("shimmer");
-      title.textContent = failed ? "Agent stopped" : "Completed";
-      setStage("model", failed ? "Response failed" : "Model finished", failed ? "error" : "completed");
-      if (!failed) setStage("delivered", "Response delivered", "completed");
-      if (!failed) setTimeout(() => { details.open = false; }, 650);
-    }
-  };
-}
-
-function startAiActivityStream(sessionId, activity) {
-  const controller = new AbortController();
-  let resolveReady;
-  let readyResolved = false;
-  const ready = new Promise(resolve => { resolveReady = resolve; });
-  const markReady = () => {
-    if (readyResolved) return;
-    readyResolved = true;
-    resolveReady();
-  };
-  const done = readAiActivity(sessionId, event => {
-    if (event?.type === "connection") markReady();
-    activity.update(event);
-  }, controller.signal).catch(error => {
-    markReady();
-    if (error.name !== "AbortError") activity.update({ type: "connection", state: "disconnected" });
-  }).finally(markReady);
-  return { ready, done, abort: () => controller.abort() };
-}
-
-function renderAiReasoning(part) {
-  if (!part.text) return;
-  const details = document.createElement("details");
-  details.className = "ai-reasoning";
-  const summary = document.createElement("summary");
-  summary.textContent = `Thought${Number.isFinite(part.durationMs) ? ` / ${formatAiDuration(part.durationMs)}` : ""}`;
-  const body = document.createElement("p");
-  body.textContent = part.text;
-  details.append(summary, body);
-  elements.aiMessages.append(details);
-}
-
-function renderAiToolPart(part) {
-  const label = part.type === "skill" ? AI_SKILL_LABELS[part.skill] : AI_TOOL_LABELS[part.tool];
-  if (!label) return;
-  const safeStatus = ["pending", "running", "completed", "error"].includes(part.status) ? part.status : "completed";
-  const card = document.createElement("div");
-  card.className = `ai-tool-part ${safeStatus}`;
-  const marker = document.createElement("span");
-  marker.className = "ai-tool-marker";
-  marker.setAttribute("aria-hidden", "true");
-  const name = document.createElement("strong");
-  name.textContent = label;
-  const status = document.createElement("span");
-  status.textContent = safeStatus;
-  card.append(marker, name, status);
-  elements.aiMessages.append(card);
+  return aiAssistant.appendQueryResult(result);
 }
 
 function renderAiResponse(response, context) {
-  let renderedText = false;
-  for (const part of response.parts ?? []) {
-    if (part?.type === "text" && part.text) {
-      appendAiMessage("assistant", part.text);
-      renderedText = true;
-    } else if (part?.type === "reasoning") {
-      renderAiReasoning(part);
-    } else if (part?.type === "tool" || part?.type === "skill") {
-      renderAiToolPart(part);
-    }
-  }
-  if (!renderedText && response.text) appendAiMessage("assistant", response.text);
-  for (const action of response.actions ?? []) renderAiAction(action, context);
-  elements.aiMessages.scrollTop = elements.aiMessages.scrollHeight;
+  return aiAssistant.renderResponse(response, context);
 }
 
 function aiActionSummary(action) {
@@ -5160,10 +4581,7 @@ function detailAiActionError(card, message) {
 }
 
 function boundedAiQueryResult(result) {
-  const columns = (result.columns ?? []).slice(0, 50).map(column => column.name ?? String(column));
-  const rows = (result.rows ?? []).slice(0, 50).map(row => Array.isArray(row) ? row.slice(0, 50) : row);
-  const serialized = JSON.stringify({ columns, rows, truncated: Boolean(result.truncated || (result.rows?.length ?? 0) > rows.length) });
-  return serialized.length > 24000 ? `${serialized.slice(0, 24000)}…` : serialized;
+  return JSON.stringify(window.SchemiiShared.boundedAiQueryResult(result));
 }
 
 function currentAiPostgresTarget() {
@@ -5197,184 +4615,8 @@ async function executeAiReadQuery(action, context, card, button) {
   }
 }
 
-async function ensureAiSession(model) {
-  if (aiState.sessionId) return aiState.sessionId;
-  const session = await aiRequest("/api/ai/sessions", { method: "POST", body: JSON.stringify({ title: schema.projectName || "Schemii chat", model }) });
-  aiState.sessionId = session.id;
-  return session.id;
-}
-
 async function sendAiMessage(text, renderedRole = "user") {
-  if (!text.trim() || aiState.busy) return;
-  let model;
-  try {
-    model = JSON.parse(elements.aiModelSelect.value);
-  } catch {
-    return showToast("Connect and select an AI model first");
-  }
-  const modelName = elements.aiModelSelect.selectedOptions[0]?.textContent || model.modelId || "selected model";
-  const requestGeneration = ++aiState.requestGeneration;
-  if (renderedRole === "user") appendAiMessage("user", text);
-  const postgresTarget = currentAiPostgresTarget();
-  const accessLevel = elements.aiAccessSelect.value;
-  const context = {
-    schemaId: activeSchemaId,
-    schemaSnapshot: JSON.stringify(schema),
-    accessLevel,
-    profileId: postgresTarget.profileId || undefined,
-    namespace: postgresTarget.namespace || undefined
-  };
-  const activity = beginAiActivity(modelName);
-  let activityStream = null;
-  setAiBusy(true);
-  try {
-    const sessionId = await ensureAiSession(model);
-    if (requestGeneration !== aiState.requestGeneration) return;
-    activityStream = startAiActivityStream(sessionId, activity);
-    await Promise.race([
-      activityStream.ready,
-      new Promise(resolve => setTimeout(resolve, 1500))
-    ]);
-    const response = await aiRequest(`/api/ai/sessions/${encodeURIComponent(sessionId)}/messages`, {
-      method: "POST",
-      body: JSON.stringify({
-        text, model, schemaId: activeSchemaId, accessLevel,
-        ...(context.profileId ? { profileId: context.profileId } : {}),
-        ...(context.profileId && context.namespace ? { namespace: context.namespace } : {})
-      })
-    });
-    if (requestGeneration !== aiState.requestGeneration) return;
-    if (activityStream) {
-      await Promise.race([
-        activityStream.done,
-        new Promise(resolve => setTimeout(resolve, 750))
-      ]);
-    }
-    renderAiResponse(response, context);
-    activity.finish("completed");
-  } catch (error) {
-    if (requestGeneration === aiState.requestGeneration) {
-      activity.finish("error");
-      appendAiMessage("assistant", `AI unavailable: ${error.message}`);
-    }
-  } finally {
-    activityStream?.abort();
-    if (requestGeneration === aiState.requestGeneration) setAiBusy(false);
-  }
-}
-
-async function startNewAiChat() {
-  if (aiState.busy) return showToast("Wait for the current response to finish");
-  aiState.requestGeneration += 1;
-  aiState.sessionId = null;
-  aiState.sqlPolicyDeliberatelySelected = false;
-  elements.aiSqlPolicy.value = "disabled";
-  elements.aiMessages.replaceChildren();
-  const empty = document.createElement("div");
-  empty.className = "ai-empty-state";
-  const title = document.createElement("strong");
-  title.textContent = "New conversation";
-  const copy = document.createElement("p");
-  copy.textContent = "Proposals will use the currently active design.";
-  empty.append(title, copy);
-  elements.aiMessages.append(empty);
-}
-
-function formatAiHistoryDate(value) {
-  if (!Number.isFinite(value)) return "Saved conversation";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "Saved conversation" : date.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
-}
-
-function renderAiHistory(sessions) {
-  elements.aiHistoryList.replaceChildren();
-  if (!sessions.length) {
-    const empty = document.createElement("p");
-    empty.className = "ai-history-empty";
-    empty.textContent = "No saved conversations yet.";
-    elements.aiHistoryList.append(empty);
-    return;
-  }
-  for (const session of sessions) {
-    const item = document.createElement("article");
-    item.className = `ai-history-item${session.id === aiState.sessionId ? " current" : ""}`;
-    const copy = document.createElement("div");
-    copy.className = "ai-history-copy";
-    const title = document.createElement("strong");
-    title.textContent = session.title || "Untitled chat";
-    const date = document.createElement("span");
-    date.textContent = `${formatAiHistoryDate(session.updatedAt ?? session.createdAt)}${session.id === aiState.sessionId ? " / Current" : ""}`;
-    copy.append(title, date);
-    const open = document.createElement("button");
-    open.type = "button";
-    open.className = "button button-ghost";
-    open.textContent = session.id === aiState.sessionId ? "Reopen" : "Open";
-    open.addEventListener("click", () => restoreAiSession(session.id));
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "button button-ghost ai-history-delete";
-    remove.textContent = "Delete";
-    remove.addEventListener("click", () => deleteAiHistorySession(session.id, session.title));
-    item.append(copy, open, remove);
-    elements.aiHistoryList.append(item);
-  }
-}
-
-async function openAiHistory() {
-  if (aiState.busy) return showToast("Wait for the current response to finish");
-  elements.aiHistoryList.replaceChildren();
-  const loading = document.createElement("p");
-  loading.className = "ai-history-empty";
-  loading.textContent = "Loading conversations...";
-  elements.aiHistoryList.append(loading);
-  elements.aiHistoryDialog.showModal();
-  try {
-    const history = await aiRequest("/api/ai/sessions", { method: "GET" });
-    renderAiHistory(history.sessions ?? []);
-  } catch (error) {
-    loading.textContent = `Could not load chat history: ${error.message}`;
-  }
-}
-
-async function restoreAiSession(sessionId) {
-  if (aiState.busy) return;
-  try {
-    const history = await aiRequest(`/api/ai/sessions/${encodeURIComponent(sessionId)}/messages`, { method: "GET" });
-    aiState.requestGeneration += 1;
-    aiState.sessionId = sessionId;
-    aiState.sqlPolicyDeliberatelySelected = false;
-    elements.aiSqlPolicy.value = "disabled";
-    elements.aiMessages.replaceChildren();
-    for (const message of history.messages ?? []) {
-      if (message.role === "user") appendAiMessage("user", message.text);
-      if (message.role === "assistant") renderAiResponse({ parts: message.parts ?? [], text: message.text ?? "", actions: [] }, null);
-    }
-    if (!elements.aiMessages.children.length) appendAiMessage("assistant", "This saved conversation has no displayable messages.");
-    const modelValue = normalizeStoredAiModel(JSON.stringify(history.model ?? {}));
-    if (modelValue && [...elements.aiModelSelect.options].some(option => option.value === modelValue)) {
-      elements.aiModelSelect.value = modelValue;
-      rememberAiModel(modelValue);
-    }
-    setAiBusy(false);
-    elements.aiHistoryDialog.close();
-    setAiPanelOpen(true);
-    elements.aiMessages.scrollTop = elements.aiMessages.scrollHeight;
-    elements.aiInput.focus();
-  } catch (error) {
-    showToast(`Could not open chat: ${error.message}`);
-  }
-}
-
-async function deleteAiHistorySession(sessionId, title) {
-  if (!confirm(`Permanently delete chat “${title || "Untitled chat"}”?`)) return;
-  try {
-    await aiRequest(`/api/ai/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
-    if (aiState.sessionId === sessionId) await startNewAiChat();
-    const history = await aiRequest("/api/ai/sessions", { method: "GET" });
-    renderAiHistory(history.sessions ?? []);
-  } catch (error) {
-    showToast(`Could not delete chat: ${error.message}`);
-  }
+  return aiAssistant.sendMessage(text, renderedRole);
 }
 
 function updateAiAccessDisclosure() {
@@ -5391,6 +4633,57 @@ function updateAiAccessDisclosure() {
       ? "The active schema definition is disclosed to the selected external AI provider; database rows are not included."
       : "Schema context and explicitly approved query results may be disclosed to the selected external AI provider. Queries use the selected UI profile only.";
 }
+
+const aiAssistant = window.SchemiiShared.createAiAssistant({
+  sessionClient: sharedSessionClient,
+  root: elements.aiPanel,
+  trigger: elements.aiButton,
+  settingsDialog: elements.aiSettingsDialog,
+  historyDialog: elements.aiHistoryDialog,
+  storageKey: "schemii.ai.lastModel",
+  state: aiState,
+  getContext: () => {
+    const postgresTarget = currentAiPostgresTarget();
+    return {
+      schemaId: activeSchemaId,
+      schemaSnapshot: JSON.stringify(schema),
+      accessLevel: elements.aiAccessSelect.value,
+      profileId: postgresTarget.profileId || undefined,
+      namespace: postgresTarget.namespace || undefined,
+    };
+  },
+  contextKey: (context, accessLevel) => context
+    ? `${context.schemaId}:${accessLevel}${accessLevel === "data" ? `:${window.SchemiiShared.aiContextFingerprint([context.profileId, context.namespace])}` : ""}`
+    : null,
+  createSessionTitle: (context, accessLevel) => `SCHEMII_CONTEXT:${context.schemaId}:${accessLevel}${accessLevel === "data" ? `:${window.SchemiiShared.aiContextFingerprint([context.profileId, context.namespace])}` : ""} ${(schema.projectName || "Schemii chat").slice(0, 80)}`,
+  parseSession: session => {
+    const match = /^SCHEMII_CONTEXT:([A-Za-z0-9_.:-]{1,128}):(metadata|schema|data)(?::([a-f0-9]{16}))?\s+/.exec(session.title || "");
+    return match ? { key: `${match[1]}:${match[2]}${match[3] ? `:${match[3]}` : ""}`, accessLevel: match[2], title: session.title.slice(match[0].length) || "Schema chat" } : { key: "unbound", accessLevel: null, title: session.title || "Schema chat" };
+  },
+  canViewSession: (binding, currentKey) => binding.accessLevel !== "data" || binding.key === currentKey,
+  buildMessagePayload: ({ text, model, capture, accessLevel }) => ({
+    text, model, schemaId: capture.schemaId, accessLevel,
+    ...(capture.profileId ? { profileId: capture.profileId } : {}),
+    ...(capture.profileId && capture.namespace ? { namespace: capture.namespace } : {}),
+  }),
+  renderAction: (action, context) => renderAiAction(action, context),
+  toolLabels: AI_TOOL_LABELS,
+  skillLabels: AI_SKILL_LABELS,
+  labels: { trigger: "AI schema assistant", prompt: "Ask about this schema...", newChatCopy: "Proposals will use the currently active design." },
+  onOpenChange: open => {
+    elements.mainLayout.classList.toggle("ai-open", open);
+    for (const background of [elements.toolRail, elements.workspace, elements.inspector]) {
+      background.inert = open;
+      background.setAttribute("aria-hidden", String(open));
+    }
+  },
+  onAccessChange: updateAiAccessDisclosure,
+  onNewChat: () => {
+    aiState.sqlPolicyDeliberatelySelected = false;
+    elements.aiSqlPolicy.value = "disabled";
+  },
+  extraBusyControls: [elements.aiSqlPolicy],
+});
 
 elements.tablesLayer.addEventListener("pointerdown", event => {
   if (wheelZoomTimer !== null) finishWheelZoom();
@@ -6194,35 +5487,8 @@ elements.postgresButton.addEventListener("click", async () => {
   elements.postgresDialog.showModal();
   await loadPostgresProfiles();
 });
-elements.aiButton.addEventListener("click", () => setAiPanelOpen(!elements.aiPanel.classList.contains("open")));
-document.querySelector("#ai-close-button").addEventListener("click", () => setAiPanelOpen(false));
-elements.aiNewChat.addEventListener("click", startNewAiChat);
-elements.aiHistoryButton.addEventListener("click", openAiHistory);
-document.querySelector("#ai-history-close").addEventListener("click", () => elements.aiHistoryDialog.close());
-document.querySelector("#ai-settings-button").addEventListener("click", async () => {
-  elements.aiSettingsDialog.showModal();
-  await loadAiStatus(true);
-});
-document.querySelector("#ai-settings-close").addEventListener("click", () => elements.aiSettingsDialog.close());
-elements.aiAccessSelect.addEventListener("change", updateAiAccessDisclosure);
-elements.aiModelSelect.addEventListener("change", () => {
-  rememberAiModel(elements.aiModelSelect.value);
-  setAiBusy(aiState.busy);
-});
 elements.aiSqlPolicy.addEventListener("change", () => {
   aiState.sqlPolicyDeliberatelySelected = true;
-});
-elements.aiComposer.addEventListener("submit", event => {
-  event.preventDefault();
-  const text = elements.aiInput.value.trim();
-  if (!text) return;
-  elements.aiInput.value = "";
-  sendAiMessage(text);
-});
-elements.aiInput.addEventListener("keydown", event => {
-  if (event.key !== "Enter" || event.shiftKey) return;
-  event.preventDefault();
-  elements.aiComposer.requestSubmit();
 });
 document.querySelector("#close-postgres-dialog").addEventListener("click", () => elements.postgresDialog.close());
 document.querySelector("#add-postgres-profile-button").addEventListener("click", () => openPostgresProfileEditor());

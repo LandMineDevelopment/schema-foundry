@@ -140,7 +140,7 @@ class Client:
             data = json.dumps(body, separators=(",", ":")).encode()
         request = Request(self.base_url + path, data=data, headers=headers, method=method)
         try:
-            with urlopen(request, timeout=90) as response:
+            with urlopen(request, timeout=135) as response:
                 raw = response.read()
         except HTTPError as error:
             raw = error.read()

@@ -5,6 +5,7 @@ import os
 import re
 import secrets
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -426,6 +427,14 @@ class DashboardStore:
             if not path.is_file():
                 raise DashboardStoreError(404, "not_found", "Dashboard was not found")
             return self._read(path)
+
+    @contextmanager
+    def guard_revision(self, dashboard_id: str, expected_revision: int):
+        with self._lock:
+            record = self.get(dashboard_id)
+            if record["revision"] != expected_revision:
+                raise DashboardStoreError(409, "dashboard_changed", "Dashboard changed before the operation could run")
+            yield record
 
     def _write(self, record: dict[str, Any]) -> dict[str, Any]:
         destination = self._path(record["id"])

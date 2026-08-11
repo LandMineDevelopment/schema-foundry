@@ -6,13 +6,14 @@
     <meta name="theme-color" content="#0d1117" />
     <title>Schemer</title>
     <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="/shared/ai-assistant.css" />
   </head>
   <body>
     <div class="app-shell">
       <header class="topbar">
         <div class="topbar-leading"><div class="brand"><div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div><div><strong>Schemer</strong><span class="brand-subtitle">PostgreSQL dashboard studio</span></div></div><div class="mobile-dashboard-nav"><select id="mobile-dashboard-select" aria-label="Current dashboard"></select><button id="mobile-new-dashboard" type="button" aria-label="Create dashboard">+</button></div></div>
         <div class="dashboard-title"><span class="status-dot" aria-hidden="true"></span><strong id="top-dashboard-title">Loading dashboard</strong><span id="save-status">Loading...</span></div>
-        <div class="top-actions"><button class="button button-ghost" id="connections-button" type="button">Data source</button><button class="button button-ghost" id="edit-mode-button" type="button">Edit dashboard</button><button class="button button-primary" id="add-widget-button" type="button" hidden>+ Widget</button><details class="dashboard-menu shared-menu" id="dashboard-menu"><summary class="button button-ghost" aria-label="Dashboard actions">...</summary><div class="shared-menu-surface"><button id="rename-dashboard" type="button">Rename</button><button id="duplicate-dashboard" type="button">Duplicate</button><button id="archive-dashboard" type="button">Archive</button><button class="danger" id="delete-dashboard" type="button">Delete</button></div></details></div>
+        <div class="top-actions"><button class="button button-ghost" id="ai-button" type="button" aria-label="AI dashboard assistant" aria-expanded="false"></button><button class="button button-ghost" id="connections-button" type="button">Data source</button><button class="button button-ghost" id="edit-mode-button" type="button">Edit dashboard</button><button class="button button-primary" id="add-widget-button" type="button" hidden>+ Widget</button><details class="dashboard-menu shared-menu" id="dashboard-menu"><summary class="button button-ghost" aria-label="Dashboard actions">...</summary><div class="shared-menu-surface"><button id="rename-dashboard" type="button">Rename</button><button id="duplicate-dashboard" type="button">Duplicate</button><button id="archive-dashboard" type="button">Archive</button><button class="danger" id="delete-dashboard" type="button">Delete</button></div></details></div>
       </header>
 
       <main class="schemer-layout">
@@ -63,6 +64,16 @@
       </main>
     </div>
 
+    <aside class="ai-panel" id="ai-panel" aria-label="Schemer AI assistant" aria-hidden="true" inert>
+      <header class="ai-panel-head"><div><span class="eyebrow">Schemer copilot</span><h2>Dashboard assistant</h2></div><span class="ai-status-pill" data-ai="status" role="status" aria-live="polite">Checking</span><button type="button" data-ai="history"></button><button type="button" data-ai="new-chat"></button><button type="button" data-ai="settings"></button><button type="button" data-ai="close"></button></header>
+      <div class="ai-context-bar"><label>Model<select data-ai="model" aria-label="AI model" disabled><option value="">Connect a provider</option></select></label><label>Access<select data-ai="access" aria-label="AI disclosure level"><option value="metadata">Metadata</option><option value="dashboard">Dashboard</option><option value="data">Data</option></select></label><p data-ai="disclosure">Dashboard metadata is sent to the selected external AI provider. Choose Dashboard to include widget configuration.</p><p class="ai-function-caveat" data-ai-query-warning hidden>Every query requires confirmation. Read-only PostgreSQL functions can still have effects outside the database.</p></div>
+      <div class="ai-messages" data-ai="messages" aria-live="polite"><div class="ai-empty-state"><span class="ai-empty-mark">AI</span><strong>Build dashboards with a second set of eyes</strong><p data-ai-empty-copy>Ask about the active dashboard. Every proposed mutation waits for confirmation.</p></div></div>
+      <form class="ai-composer" data-ai="form"><textarea data-ai="prompt" maxlength="16384" rows="2" placeholder="Ask about this dashboard..." aria-label="Message Schemer AI"></textarea><button class="button button-primary" type="submit" data-ai="send">Send</button></form>
+    </aside>
+
+    <dialog class="shared-ai-dialog shared-dialog" id="ai-settings-dialog"><div class="dialog-head shared-dialog-head"><div><span class="eyebrow">Shared OpenCode providers</span><h2>Provider settings</h2><p>Connections apply to Schemii and Schemer.</p></div><button type="button" data-ai-settings-close aria-label="Close provider settings">x</button></div><div class="ai-settings-status" data-ai-settings-status></div><div class="ai-providers" data-ai-settings-body></div></dialog>
+    <dialog class="shared-ai-dialog shared-dialog" id="ai-history-dialog"><div class="dialog-head shared-dialog-head"><div><span class="eyebrow">Schemer workspace</span><h2>Chat history</h2><p>Schemii conversations remain separate.</p></div><button type="button" data-ai-history-close aria-label="Close chat history">x</button></div><div class="ai-history-list" data-ai-history-body></div></dialog>
+
     <dialog id="connections-dialog" class="shared-dialog">
       <div class="dialog-head shared-dialog-head"><div><span class="eyebrow">Shared PostgreSQL service</span><h2>Data sources</h2><p>Connections saved here are immediately available in Schemii.</p></div><button id="close-connections" type="button" aria-label="Close">x</button></div>
       <div class="connection-layout">
@@ -107,6 +118,6 @@
     </dialog>
 
     <div class="app-tooltip" id="app-tooltip" role="tooltip" hidden></div>
-    <script src="/shared/session-client.js"></script><script src="/shared/postgres-client.js"></script><script src="/shared/profile-manager.js"></script><script src="/shared/ui-components.js"></script><script src="app.js"></script>
+    <script src="/shared/session-client.js"></script><script src="/shared/postgres-client.js"></script><script src="/shared/profile-manager.js"></script><script src="/shared/ui-components.js"></script><script src="/shared/ai-assistant.js"></script><script src="app.js"></script>
   </body>
 </html>

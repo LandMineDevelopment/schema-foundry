@@ -63,9 +63,6 @@ SAFE_SKILLS = {
     "read-only-query-safety",
     "target-selection",
 }
-# These OpenCode 1.18.15 models currently return an empty response or upstream
-# 401 with its synthetic anonymous `public` credential. A real Zen key may work.
-UNUSABLE_ANONYMOUS_MODELS = {"north-mini-code-free", "ling-3.0-tiny-free"}
 PROMPT_TOOLS = {
     **{name: True for name in CUSTOM_TOOLS},
     "skill": True,
@@ -148,6 +145,12 @@ class OpenCodeService:
         password: str,
         timeout: float = 30,
         *,
+        workspace: str = OPENCODE_WORKSPACE,
+        custom_tools: set[str] | None = None,
+        tool_action_types: dict[str, str] | None = None,
+        safe_skills: set[str] | None = None,
+        data_tools: set[str] | None = None,
+        action_prefix: str = ACTION_PREFIX,
         request=Request,
         opener=_open_without_redirects,
     ):
@@ -156,6 +159,22 @@ class OpenCodeService:
         self.timeout = timeout
         self._request_factory = request
         self._opener = opener
+        if not isinstance(workspace, str) or not re.fullmatch(r"/[A-Za-z0-9/_-]+", workspace) or "//" in workspace or "/../" in f"{workspace}/":
+            raise ValueError("OpenCode workspace is invalid")
+        self.workspace = workspace.rstrip("/") or "/"
+        self.custom_tools = set(CUSTOM_TOOLS if custom_tools is None else custom_tools)
+        self.tool_action_types = dict(TOOL_ACTION_TYPES if tool_action_types is None else tool_action_types)
+        self.safe_skills = set(SAFE_SKILLS if safe_skills is None else safe_skills)
+        self.data_tools = set(({"schema_read_query"} & self.custom_tools) if data_tools is None else data_tools)
+        if self.data_tools - self.custom_tools or set(self.tool_action_types) != self.custom_tools or any(not SAFE_ID.fullmatch(name) for name in self.custom_tools | self.safe_skills):
+            raise ValueError("OpenCode tool or skill policy is invalid")
+        if not isinstance(action_prefix, str) or not action_prefix or len(action_prefix) > 64 or any(ord(char) < 33 or ord(char) > 126 for char in action_prefix):
+            raise ValueError("OpenCode action prefix is invalid")
+        self.action_prefix = action_prefix
+        self.prompt_tools = {
+            **{name: True for name in self.custom_tools},
+            **{name: enabled for name, enabled in PROMPT_TOOLS.items() if name not in CUSTOM_TOOLS},
+        }
         if not self.enabled:
             self._authorization = ""
             return
@@ -177,7 +196,7 @@ class OpenCodeService:
         if not self.enabled:
             raise OpenCodeServiceError(503, "ai_disabled", "Embedded AI is not configured")
         data = None if payload is None else json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        headers = {"Accept": "application/json", "Authorization": self._authorization}
+        headers = {"Accept": "application/json", "Authorization": self._authorization, "X-OpenCode-Directory": self.workspace}
         if data is not None:
             headers["Content-Type"] = "application/json"
         request = self._request_factory(self.base_url + path, data=data, headers=headers, method=method)
@@ -213,7 +232,7 @@ class OpenCodeService:
         providers = []
         model_count = 0
         for provider in result.get("all", [])[:200] if isinstance(result.get("all"), list) else []:
-            if not isinstance(provider, dict) or not isinstance(provider.get("id"), str):
+            if not isinstance(provider, dict) or not isinstance(provider.get("id"), str) or not SAFE_ID.fullmatch(provider["id"]):
                 continue
             models = []
             source_models = provider.get("models", {})
@@ -228,13 +247,15 @@ class OpenCodeService:
                 for model in list(source_models.values())[:200]:
                     if model_count >= 5000:
                         break
-                    if not isinstance(model, dict) or not isinstance(model.get("id"), str):
-                        continue
-                    if provider["id"] == "opencode" and not opencode_authenticated and model["id"] in UNUSABLE_ANONYMOUS_MODELS:
+                    model_id = model.get("id") if isinstance(model, dict) else None
+                    if (
+                        not isinstance(model_id, str) or not model_id or model_id != model_id.strip()
+                        or len(model_id.encode("utf-8")) > 256 or any(ord(char) < 32 or ord(char) == 127 for char in model_id)
+                    ):
                         continue
                     models.append({
-                        "id": model["id"][:128],
-                        "name": str(model.get("name", model["id"]))[:256],
+                        "id": model_id,
+                        "name": str(model.get("name", model_id))[:256],
                         "toolCall": bool(model.get("tool_call")),
                         "status": str(model.get("status", "active"))[:32],
                     })
@@ -247,9 +268,11 @@ class OpenCodeService:
         safe_defaults = {}
         if isinstance(defaults, dict):
             safe_defaults = {
-                key[:128]: value[:128]
+                key[:128]: value[:256]
                 for key, value in list(defaults.items())[:200]
-                if isinstance(key, str) and isinstance(value, str)
+                if isinstance(key, str) and SAFE_ID.fullmatch(key) and isinstance(value, str)
+                and value and value == value.strip() and len(value.encode("utf-8")) <= 256
+                and not any(ord(char) < 32 or ord(char) == 127 for char in value)
             }
         connected = [item[:128] for item in result.get("connected", [])[:200] if isinstance(item, str)] if isinstance(result.get("connected"), list) else []
         return {"providers": providers, "default": safe_defaults, "connected": connected}
@@ -323,7 +346,7 @@ class OpenCodeService:
                 "description": str(item.get("description", ""))[:512],
             }
             for item in result[:100]
-            if isinstance(item, dict) and item.get("name") in SAFE_SKILLS
+            if isinstance(item, dict) and item.get("name") in self.safe_skills
         ]
 
     def status(self) -> dict[str, Any]:
@@ -414,7 +437,7 @@ class OpenCodeService:
         _model(model, optional=True)
         payload = {} if title is None else {"title": title}
         result = self._request("POST", "/session", payload)
-        if not isinstance(result, dict) or not isinstance(result.get("id"), str) or result.get("directory") != OPENCODE_WORKSPACE:
+        if not isinstance(result, dict) or not isinstance(result.get("id"), str) or result.get("directory") != self.workspace:
             raise OpenCodeServiceError(502, "opencode_error", "OpenCode returned an invalid session")
         return {"id": result["id"][:128], "title": str(result.get("title", title or ""))[:256]}
 
@@ -426,7 +449,7 @@ class OpenCodeService:
         for item in result[:200]:
             if (
                 not isinstance(item, dict) or not isinstance(item.get("id"), str)
-                or not SAFE_ID.fullmatch(item["id"]) or item.get("directory") != OPENCODE_WORKSPACE
+                or not SAFE_ID.fullmatch(item["id"]) or item.get("directory") != self.workspace
                 or item.get("parentID") is not None
             ):
                 continue
@@ -532,17 +555,21 @@ class OpenCodeService:
         return {"providerId": provider_id, "modelId": model_id}
 
     def verify_session(self, session_id: Any) -> str:
+        return self.session_identity(session_id)["id"]
+
+    def session_identity(self, session_id: Any) -> dict[str, str]:
         session_id = _identifier(session_id, "sessionId")
         result = self._request("GET", f"/session/{quote(session_id, safe='')}")
-        if not isinstance(result, dict) or result.get("id") != session_id or result.get("directory") != OPENCODE_WORKSPACE:
+        if not isinstance(result, dict) or result.get("id") != session_id or result.get("directory") != self.workspace:
             raise OpenCodeServiceError(404, "not_found", "AI session was not found")
-        return session_id
+        title = self._history_text(result.get("title"), 256)
+        return {"id": session_id, "title": title}
 
     def activity(self, session_id: Any):
         session_id = _identifier(session_id, "sessionId")
         request = self._request_factory(
             self.base_url + "/event",
-            headers={"Accept": "text/event-stream", "Authorization": self._authorization},
+            headers={"Accept": "text/event-stream", "Authorization": self._authorization, "X-OpenCode-Directory": self.workspace},
             method="GET",
         )
         try:
@@ -585,8 +612,7 @@ class OpenCodeService:
         except (UnicodeDecodeError, URLError, TimeoutError, OSError) as exc:
             raise OpenCodeServiceError(502, "opencode_unavailable", "OpenCode activity is unavailable") from exc
 
-    @staticmethod
-    def _normalize_activity_event(event: Any, session_id: str) -> dict[str, Any] | None:
+    def _normalize_activity_event(self, event: Any, session_id: str) -> dict[str, Any] | None:
         if not isinstance(event, dict) or not isinstance(event.get("type"), str):
             return None
         event_type = event["type"]
@@ -635,12 +661,12 @@ class OpenCodeService:
         tool_state = state.get("status")
         if tool_state not in {"pending", "running", "completed", "error"}:
             return None
-        if tool in CUSTOM_TOOLS:
+        if tool in self.custom_tools:
             return {"type": "part", "kind": "tool", "key": part_id, "tool": tool, "state": tool_state}
         if tool == "skill":
             tool_input = state.get("input") if isinstance(state.get("input"), dict) else {}
             skill_name = tool_input.get("name")
-            if skill_name in SAFE_SKILLS:
+            if skill_name in self.safe_skills:
                 return {"type": "part", "kind": "skill", "key": part_id, "skill": skill_name, "state": tool_state}
         return None
 
@@ -657,8 +683,9 @@ class OpenCodeService:
         system = _bounded_text(system, MAX_TEXT_SIZE, "system")
         if not isinstance(allow_data, bool):
             raise OpenCodeServiceError(400, "validation_error", "allow_data is invalid")
-        prompt_tools = dict(PROMPT_TOOLS)
-        prompt_tools["schema_read_query"] = allow_data
+        prompt_tools = dict(self.prompt_tools)
+        for tool in self.data_tools:
+            prompt_tools[tool] = allow_data
         payload = {
             "model": model,
             "system": system,
@@ -679,9 +706,9 @@ class OpenCodeService:
                     "The AI provider did not respond. Connect another provider or try a different model.",
                 ) from error
             raise
-        allowed_tools = set(CUSTOM_TOOLS)
+        allowed_tools = set(self.custom_tools)
         if not allow_data:
-            allowed_tools.remove("schema_read_query")
+            allowed_tools -= self.data_tools
         normalized = self._normalize_message(result, allowed_tools)
         if not normalized["actions"]:
             normalized["actions"] = self._recover_prompt_actions(session_id, text, allowed_tools)
@@ -718,11 +745,10 @@ class OpenCodeService:
                 break
         return actions
 
-    @staticmethod
-    def _normalize_message(result: Any, allowed_tools: set[str] | None = None) -> dict[str, Any]:
+    def _normalize_message(self, result: Any, allowed_tools: set[str] | None = None) -> dict[str, Any]:
         if not isinstance(result, dict) or not isinstance(result.get("parts"), list):
             raise OpenCodeServiceError(502, "opencode_error", "OpenCode returned an invalid message")
-        allowed_tools = set(CUSTOM_TOOLS) if allowed_tools is None else allowed_tools & CUSTOM_TOOLS
+        allowed_tools = set(self.custom_tools) if allowed_tools is None else allowed_tools & self.custom_tools
         parts = []
         actions = []
         text_items = []
@@ -746,7 +772,7 @@ class OpenCodeService:
             if part.get("type") == "tool" and part.get("tool") == "skill":
                 state = part.get("state") if isinstance(part.get("state"), dict) else {}
                 tool_input = state.get("input") if isinstance(state.get("input"), dict) else {}
-                if tool_input.get("name") in SAFE_SKILLS:
+                if tool_input.get("name") in self.safe_skills:
                     parts.append({"type": "skill", "skill": tool_input["name"], "status": str(state.get("status", "unknown"))[:32]})
                 continue
             if part.get("type") != "tool" or part.get("tool") not in allowed_tools:
@@ -759,16 +785,16 @@ class OpenCodeService:
                 safe_output = output.encode("utf-8")[:min(MAX_ACTION_SIZE, remaining)].decode("utf-8", "ignore")
                 tool_output_size += len(safe_output.encode("utf-8"))
                 safe_part["output"] = safe_output
-                if output.startswith(ACTION_PREFIX) and len(actions) < MAX_ACTIONS and len(output.encode("utf-8")) <= MAX_ACTION_SIZE:
+                if output.startswith(self.action_prefix) and len(actions) < MAX_ACTIONS and len(output.encode("utf-8")) <= MAX_ACTION_SIZE:
                     try:
                         action = json.loads(
-                            output[len(ACTION_PREFIX):],
+                            output[len(self.action_prefix):],
                             parse_constant=_reject_json_constant,
                         )
                     except (json.JSONDecodeError, RecursionError, ValueError):
                         action = None
                     action_type = action.get("type", action.get("action")) if isinstance(action, dict) else None
-                    if isinstance(action, dict) and action_type == TOOL_ACTION_TYPES[part["tool"]]:
+                    if isinstance(action, dict) and action_type == self.tool_action_types[part["tool"]]:
                         actions.append(action)
             parts.append(safe_part)
         text = "\n".join(text_items).encode("utf-8")[:MAX_TEXT_SIZE].decode("utf-8", "ignore")

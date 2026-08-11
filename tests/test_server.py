@@ -16,6 +16,7 @@ from tests.http_test_support import FakePostgresService, RunningHttpServer
 class FakeAIService:
     def __init__(self):
         self.calls = []
+        self.session_title = ""
 
     def status(self):
         self.calls.append(("status",))
@@ -39,6 +40,7 @@ class FakeAIService:
 
     def create_session(self, title=None, model=None):
         self.calls.append(("create_session", title, model))
+        self.session_title = title or ""
         return {"id": "ses_1", "title": title or ""}
 
     def list_sessions(self):
@@ -60,6 +62,10 @@ class FakeAIService:
     def verify_session(self, session_id):
         self.calls.append(("verify_session", session_id))
         return session_id
+
+    def session_identity(self, session_id):
+        self.calls.append(("session_identity", session_id))
+        return {"id": session_id, "title": self.session_title}
 
     def activity(self, session_id):
         self.calls.append(("activity", session_id))
@@ -185,8 +191,14 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(self.request(sql_path, "POST", payload, authorized=True)[0], 200)
         self.assertEqual(
             self.service.calls[-1],
-            ("execute_read_only_sql", "local", "public", "SELECT 1 AS answer"),
+            ("execute_read_only_sql", "local", "public", "SELECT 1 AS answer", {
+                "database": None, "expected_profile_fingerprint": None, "reject_privileged_role": False, "allow_explain": True, "max_rows": 500,
+                "max_columns": 100, "max_result_bytes": 1024 * 1024,
+            }),
         )
+        exact_payload = {"database": "demo", **payload}
+        self.assertEqual(self.request(sql_path, "POST", exact_payload, authorized=True)[0], 200)
+        self.assertEqual(self.request(sql_path, "POST", {**payload, "extra": True}, authorized=True)[0], 400)
 
     def test_introspection_profile_and_history_routes_forward_contracts(self):
         for path in (
@@ -352,6 +364,7 @@ class ServerTests(unittest.TestCase):
             "text": "Add an audit column", "model": model, "schemaId": "schema_one",
             "accessLevel": "schema", "profileId": "local", "namespace": "public",
         }
+        self.ai_service.session_title = "SCHEMII_CONTEXT:schema_one:schema Demo chat"
 
         status, body, _ = self.request("/api/ai/sessions/ses_1/messages", "POST", payload, authorized=True)
         self.assertEqual(status, 200)
@@ -379,6 +392,9 @@ class ServerTests(unittest.TestCase):
         self.assertFalse(call[5])
 
         payload["accessLevel"] = "data"
+        self.assertEqual(self.request("/api/ai/sessions/ses_1/messages", "POST", payload, authorized=True)[0], 409)
+        from schemii.ai_http import ai_context_fingerprint
+        self.ai_service.session_title = f"SCHEMII_CONTEXT:schema_one:data:{ai_context_fingerprint(['local', 'public'])} Demo chat"
         self.assertEqual(self.request("/api/ai/sessions/ses_1/messages", "POST", payload, authorized=True)[0], 200)
         self.assertTrue(self.ai_service.calls[-1][5])
         self.assertNotIn("row-secret", self.ai_service.calls[-1][2])
@@ -390,6 +406,7 @@ class ServerTests(unittest.TestCase):
             "text": "Describe it", "model": {"providerID": "anthropic", "modelID": "claude"},
             "schemaId": "schema_one", "accessLevel": "metadata",
         }
+        self.ai_service.session_title = "SCHEMII_CONTEXT:schema_one:metadata Demo chat"
         self.assertEqual(self.request("/api/ai/sessions/ses_1/messages", "POST", payload, authorized=True)[0], 200)
         self.assertNotIn("secret_table", self.ai_service.calls[-1][2])
         payload["schemaId"] = "missing"

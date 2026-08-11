@@ -1,0 +1,50 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": ["AGENTS.md"],
+  "share": "disabled",
+  "autoupdate": false,
+  "snapshot": false,
+  "formatter": false,
+  "lsp": false,
+  "mcp": {},
+  "agent": {
+    "plan": {"disable": true},
+    "general": {"disable": true},
+    "explore": {"disable": true}
+  },
+  "permission": {
+    "*": "deny",
+    "bash": "deny",
+    "shell": "deny",
+    "read": "deny",
+    "edit": "deny",
+    "write": "deny",
+    "apply_patch": "deny",
+    "glob": "deny",
+    "grep": "deny",
+    "list": "deny",
+    "external_directory": "deny",
+    "webfetch": "deny",
+    "websearch": "deny",
+    "task": "deny",
+    "mcp": "deny",
+    "todowrite": "deny",
+    "question": "deny",
+    "lsp": "deny",
+    "doom_loop": "deny",
+    "skill": {
+      "*": "deny",
+      "schemer-help": "allow",
+      "schemer-dashboard-safety": "allow",
+      "schemer-layout-safety": "allow",
+      "schemer-query-safety": "allow"
+    },
+    "schemer_dashboard_create": "allow",
+    "schemer_dashboard_open": "allow",
+    "schemer_widget_create": "allow",
+    "schemer_widget_rename": "allow",
+    "schemer_widget_duplicate": "allow",
+    "schemer_widget_delete": "allow",
+    "schemer_read_query": "allow"
+  }
+}

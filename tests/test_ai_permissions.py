@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from schemii.opencode_service import CUSTOM_TOOLS, PROMPT_TOOLS, SAFE_SKILLS, TOOL_ACTION_TYPES
+from schemii.schemer_ai import SCHEMER_AI_ACTION_PREFIX, SCHEMER_AI_SKILLS, SCHEMER_AI_TOOL_ACTION_TYPES
 
 
 class AiPermissionContractTests(unittest.TestCase):
@@ -61,6 +62,52 @@ class AiPermissionContractTests(unittest.TestCase):
         self.assertIn("condition: service_healthy", ai_compose)
         self.assertIn("http://127.0.0.1:4096/global/health", ai_compose)
         self.assertIn("Authorization: Basic $$credentials", ai_compose)
+
+    def test_schemer_agent_has_separate_default_deny_workspace(self):
+        root = ROOT / "ai/schemer-workspace"
+        config = json.loads((root / "opencode.json").read_text())
+        permission = config["permission"]
+        tools = {path.stem for path in (root / ".opencode/tools").glob("schemer_*.ts")}
+        skills = {path.parent.name for path in (root / ".opencode/skills").glob("*/SKILL.md")}
+        self.assertEqual(tools, set(SCHEMER_AI_TOOL_ACTION_TYPES))
+        self.assertEqual(skills, SCHEMER_AI_SKILLS)
+        self.assertEqual({name for name in tools if permission.get(name) == "allow"}, tools)
+        self.assertEqual({name for name, value in permission["skill"].items() if value == "allow"}, skills)
+        self.assertEqual(permission["*"], "deny")
+        for denied in ("bash", "shell", "read", "edit", "write", "apply_patch", "glob", "grep", "list", "webfetch", "websearch", "task", "mcp"):
+            self.assertEqual(permission[denied], "deny")
+        for tool_name, action_type in SCHEMER_AI_TOOL_ACTION_TYPES.items():
+            source = (root / f".opencode/tools/{tool_name}.ts").read_text()
+            self.assertIn(f'type: "{action_type}"', source)
+            self.assertIn(SCHEMER_AI_ACTION_PREFIX, source)
+            self.assertIn("requiresConfirmation: true", source)
+            self.assertNotRegex(source.lower(), r"password|filesystem|shell")
+            if tool_name == "schemer_read_query":
+                self.assertIn("readOnly: true", source)
+                self.assertIn("database:", source)
+                self.assertIn("sql:", source)
+            else:
+                self.assertNotRegex(source.lower(), r"sql:")
+            if tool_name == "schemer_widget_create":
+                self.assertIn("source:", source)
+                self.assertIn("query:", source)
+                self.assertIn("visualizationMode", source)
+                self.assertIn("must be supplied together", source)
+                self.assertIn('aggregation: tool.schema.literal("count_rows")', source)
+                self.assertIn('column: tool.schema.null()', source)
+                self.assertNotRegex(source, r"widgetId:|layout:")
+
+    def test_schemer_reuses_private_opencode_credentials_without_mounting_provider_data(self):
+        overlay = (ROOT / "compose.schemer.ai.yaml").read_text()
+        ai_compose = (ROOT / "compose.ai.yaml").read_text()
+        self.assertIn("SCHEMER_OPENCODE_URL: http://opencode:4096", overlay)
+        self.assertIn("SCHEMER_OPENCODE_USERNAME: ${SCHEMII_OPENCODE_USERNAME", overlay)
+        self.assertIn("SCHEMER_OPENCODE_PASSWORD: ${SCHEMII_OPENCODE_PASSWORD", overlay)
+        self.assertIn("SCHEMER_OPENCODE_TIMEOUT: ${SCHEMII_OPENCODE_TIMEOUT:-120}", overlay)
+        self.assertIn("SCHEMII_OPENCODE_TIMEOUT: ${SCHEMII_OPENCODE_TIMEOUT:-120}", ai_compose)
+        self.assertIn("./ai/schemer-workspace:/workspace-schemer:ro", overlay)
+        self.assertIn("condition: service_healthy", overlay)
+        self.assertNotIn("schemii-opencode-data:/", overlay)
 
 
 if __name__ == "__main__":

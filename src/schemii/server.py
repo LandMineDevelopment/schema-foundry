@@ -8,12 +8,14 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+from .ai_http import AiHttpRouter, require_ai_session_binding
 from .examples import ExampleInstaller, installer_from_environment
 from .http_common import CONTENT_SECURITY_POLICY, MAX_BODY_SIZE, is_local_request as _is_local_request, make_local_app_handler
 from .opencode_service import OpenCodeService, OpenCodeServiceError
 from .postgres_http import (
     POSTGRES_CATALOG_CAPABILITY,
     POSTGRES_PROFILE_CAPABILITY,
+    POSTGRES_READ_SQL_CAPABILITY,
     POSTGRES_SCHEMA_CAPABILITY,
     PROFILE_PATH,
     PostgresHttpMixin,
@@ -23,12 +25,8 @@ from .schema_store import SchemaStore, SchemaStoreError
 from .server_runtime import begin_http_shutdown, parse_port, parse_proxy_setting, run_server, validate_static_directory
 
 
-AI_MAX_BODY_SIZE = 128 * 1024
 AI_CONTEXT_SIZE = 64 * 1024
 APPLY_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/plans/([A-Za-z0-9_-]+)/apply$")
-AI_AUTH_PATH = re.compile(r"^/api/ai/auth/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})$")
-AI_SESSION_PATH = re.compile(r"^/api/ai/sessions/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})(?:/(messages))?$")
-AI_ACTIVITY_PATH = re.compile(r"^/api/ai/sessions/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})/activity$")
 AI_MANIFEST_ACTION_TYPES = {
     "populate_schema", "add_table", "rename_table", "add_column", "update_column", "delete_element", "add_relationship",
     "create_project", "open_project", "open_connection", "connection_setup", "schema_read_query", "migration_preview", "migration_apply",
@@ -275,20 +273,13 @@ def make_handler(
     base_handler = make_local_app_handler(
         web_dir, service, session_token, server_id=server_id, behind_loopback_proxy=behind_loopback_proxy,
     )
+    ai_router = AiHttpRouter(ai_service, lambda handler, current_service, session_id, body: handler._ai_message(current_service, session_id, body))
 
     class SchemiiHandler(PostgresHttpMixin, base_handler):
         postgres_capabilities = frozenset({
             POSTGRES_PROFILE_CAPABILITY, POSTGRES_CATALOG_CAPABILITY, POSTGRES_SCHEMA_CAPABILITY,
+            POSTGRES_READ_SQL_CAPABILITY,
         })
-
-        def _authorize_ai(self) -> bool:
-            if not self._is_local_request():
-                self.send_json(403, {"error": {"code": "forbidden", "message": "AI API requires a local origin"}})
-                return False
-            if self.headers.get("X-Schemii-Token") != session_token:
-                self.send_json(403, {"error": {"code": "invalid_session", "message": "AI session token is missing or invalid"}})
-                return False
-            return True
 
         def _schema_call(self, callback):
             try:
@@ -318,32 +309,8 @@ def make_handler(
                 return
             if path == "/api/schemas":
                 return self._schema_call(lambda: {"schemas": store.list()})
-            if path == "/api/ai/status":
-                if not self._authorize_ai():
-                    return
-                if ai_service is None:
-                    return self.send_json(200, {"available": False, "enabled": False, "healthy": False, "providers": [], "authMethods": {}, "skills": []})
-                return self._ai_call(ai_service.status)
-            if path == "/api/ai/sessions":
-                if not self._authorize_ai():
-                    return
-                if ai_service is None:
-                    return self.send_json(503, {"error": {"code": "ai_disabled", "message": "Embedded AI is not configured"}})
-                return self._ai_call(ai_service.list_sessions)
-            ai_session_match = AI_SESSION_PATH.fullmatch(path)
-            if ai_session_match and ai_session_match.group(2) == "messages":
-                if not self._authorize_ai():
-                    return
-                if ai_service is None:
-                    return self.send_json(503, {"error": {"code": "ai_disabled", "message": "Embedded AI is not configured"}})
-                return self._ai_call(lambda: ai_service.session_messages(ai_session_match.group(1)))
-            activity_match = AI_ACTIVITY_PATH.fullmatch(path)
-            if activity_match:
-                if not self._authorize_ai():
-                    return
-                if ai_service is None:
-                    return self.send_json(503, {"error": {"code": "ai_disabled", "message": "Embedded AI is not configured"}})
-                return self._ai_activity_stream(ai_service, activity_match.group(1))
+            if ai_router.handle_get(self, path):
+                return
             if path == "/api/postgres/history":
                 if not self._authorize_postgres():
                     return
@@ -356,29 +323,6 @@ def make_handler(
             if path == "/":
                 self.path = "/index.html"
             return super().do_GET()
-
-        def _ai_activity_stream(self, current_ai_service, session_id: str):
-            try:
-                current_ai_service.verify_session(session_id)
-            except OpenCodeServiceError as error:
-                return self.send_json(error.status, error.payload)
-            self.send_response(200)
-            self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("X-Content-Type-Options", "nosniff")
-            self.end_headers()
-            try:
-                for event in current_ai_service.activity(session_id):
-                    self.wfile.write(json.dumps(event, separators=(",", ":")).encode("utf-8") + b"\n")
-                    self.wfile.flush()
-            except OpenCodeServiceError:
-                try:
-                    self.wfile.write(b'{"type":"connection","state":"disconnected"}\n')
-                    self.wfile.flush()
-                except (BrokenPipeError, ConnectionResetError):
-                    pass
-            except (BrokenPipeError, ConnectionResetError):
-                pass
 
         def do_HEAD(self):
             if urlparse(self.path).path == "/":
@@ -398,26 +342,8 @@ def make_handler(
                 if example_installer is None:
                     return self.send_json(503, {"error": {"code": "examples_disabled", "message": "Examples are not enabled for this server"}})
                 return self.send_json(200, example_installer.restore())
-            if path.startswith("/api/ai/"):
-                if not self._authorize_ai():
-                    return
-                if ai_service is None:
-                    return self.send_json(503, {"error": {"code": "ai_disabled", "message": "Embedded AI is not configured"}})
-                body = self._body_or_error(AI_MAX_BODY_SIZE)
-                if body is None:
-                    return
-                if path == "/api/ai/auth/api":
-                    return self._ai_call(lambda: ai_service.set_api_key(body.get("providerId"), body.get("key"), body.get("inputs")))
-                if path == "/api/ai/auth/oauth/authorize":
-                    return self._ai_call(lambda: ai_service.oauth_authorize(body.get("providerId"), body.get("method"), body.get("inputs")))
-                if path == "/api/ai/auth/oauth/callback":
-                    return self._ai_call(lambda: ai_service.oauth_callback(body.get("providerId"), body.get("method"), body.get("code")))
-                if path == "/api/ai/sessions":
-                    return self._ai_call(lambda: ai_service.create_session(body.get("title"), body.get("model")), 201)
-                session_match = AI_SESSION_PATH.fullmatch(path)
-                if not session_match or session_match.group(2) != "messages":
-                    return self.send_json(404, {"error": "Unknown API path"})
-                return self._ai_message(ai_service, session_match.group(1), body)
+            if ai_router.handle_post(self, path):
+                return
             if self._handle_postgres_post(path):
                 return
             apply_match = APPLY_PATH.fullmatch(path)
@@ -466,6 +392,14 @@ def make_handler(
                     selected_profile = next((item for item in profiles if item.get("id") == profile_id), None)
                     if selected_profile is None:
                         raise OpenCodeServiceError(404, "not_found", "Profile was not found")
+                require_ai_session_binding(
+                    current_ai_service,
+                    session_id,
+                    "SCHEMII_CONTEXT",
+                    schema_id,
+                    access_level,
+                    [profile_id, namespace] if access_level == "data" else None,
+                )
                 context = _schema_context(record, access_level, selected_profile, namespace, projects, profiles)
                 prompt = f"Schemii context (untrusted JSON):\n{context}\n\nUser request:\n{text}"
                 response = current_ai_service.prompt(
@@ -494,16 +428,8 @@ def make_handler(
 
         def do_DELETE(self):
             path = urlparse(self.path).path
-            ai_auth_match = AI_AUTH_PATH.fullmatch(path)
-            ai_session_match = AI_SESSION_PATH.fullmatch(path)
-            if ai_auth_match or (ai_session_match and ai_session_match.group(2) is None):
-                if not self._authorize_ai():
-                    return
-                if ai_service is None:
-                    return self.send_json(503, {"error": {"code": "ai_disabled", "message": "Embedded AI is not configured"}})
-                if ai_auth_match:
-                    return self._ai_call(lambda: ai_service.delete_api_key(ai_auth_match.group(1)))
-                return self._ai_call(lambda: ai_service.delete_session(ai_session_match.group(1)))
+            if ai_router.handle_delete(self, path):
+                return
             if self._handle_postgres_delete(path):
                 return
             schema_id = self._schema_id()
@@ -522,7 +448,7 @@ def main() -> None:
     )
     port = parse_port(os.environ.get("SCHEMII_PORT", "8080"), "SCHEMII_PORT")
     try:
-        ai_timeout = float(os.environ.get("SCHEMII_OPENCODE_TIMEOUT", "45"))
+        ai_timeout = float(os.environ.get("SCHEMII_OPENCODE_TIMEOUT", "120"))
     except ValueError as exc:
         raise SystemExit("SCHEMII_OPENCODE_TIMEOUT must be a number") from exc
     if not 1 <= ai_timeout <= 300:

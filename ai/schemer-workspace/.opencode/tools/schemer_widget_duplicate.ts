@@ -1,0 +1,15 @@
+import { tool } from "/opt/opencode/node_modules/@opencode-ai/plugin/dist/index.js"
+
+export default tool({
+  description: "Propose duplicating one exact widget. Schemer generates the new ID and placement while preserving its configuration.",
+  args: {
+    dashboardId: tool.schema.string().trim().min(1).max(128),
+    expectedRevision: tool.schema.number().int().min(0),
+    widgetId: tool.schema.string().trim().min(1).max(128),
+    currentTitle: tool.schema.string().trim().min(1).max(128),
+    title: tool.schema.string().trim().min(1).max(128),
+  },
+  async execute(args) {
+    return "SCHEMER_ACTION:" + JSON.stringify({ type: "widget_duplicate", ...args, requiresConfirmation: true })
+  },
+})

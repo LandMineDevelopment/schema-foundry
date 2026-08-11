@@ -2,6 +2,16 @@
 
 This file is the durable implementation sequence for Schemer. Use it after a lost connection, context compaction, or a new chat.
 
+## Shared Embedded AI
+
+- [x] Reuse the existing private OpenCode service and persistent provider credential volume.
+- [x] Isolate Schemer sessions and configuration in read-only `/workspace-schemer`.
+- [x] Add Schemer-only default-deny skills and inert dashboard/widget proposal tools.
+- [x] Add same-origin provider authentication, model selection, chat, history, and filtered live activity.
+- [x] Bind actions to exact dashboard IDs, revisions, widget IDs/titles, captured snapshots, confirmation, successful save, and rollback.
+- [x] Keep rows and SQL outside metadata/dashboard disclosure; allow only separately confirmed, bounded read-only analytic SQL in data mode. Keep hosts/users/passwords, schema tools, migrations, shell, filesystem, web, tasks, and MCP outside the Schemer agent boundary.
+- [x] Create complete widgets from bounded live-verified catalog descriptors, execute revision-guarded structured queries before mutation, generate IDs/layout/presentation in Schemer, persist once, and reconcile ambiguous saves.
+
 ## Approval Protocol
 
 - Do not begin an unchecked phase until the user has reviewed and explicitly approved its implementation plan.
@@ -14,7 +24,7 @@ This file is the durable implementation sequence for Schemer. Use it after a los
 ## Product Rules
 
 - Each widget reads from exactly one PostgreSQL table, view, or materialized view.
-- Schemer does not create joins. Cross-table composition belongs in PostgreSQL views managed through Schemii.
+- Persisted Schemer widgets do not create joins. Separately confirmed data-mode analytic SQL may join relations without changing dashboard configuration; reusable cross-table widget sources still belong in PostgreSQL views managed through Schemii.
 - PostgreSQL is authoritative for relation definitions and live data.
 - A widget query supports zero or more dimensions and one or more measures.
 - Aggregate reports support any number of group-by columns and metric columns.

@@ -579,7 +579,11 @@ class PostgresServiceTests(unittest.TestCase):
     def test_read_only_sql_limits_rows_and_serializes_values(self):
         query = "SELECT id, amount FROM payments"
         rows = [(UUID(int=index + 1), Decimal(f"{index}.25")) for index in range(501)]
-        connection = Connection(responses={query: {"columns": ["id", "amount"], "rows": rows}})
+        connection = Connection(responses={
+            "SELECT current_database() AS database": [{"database": "demo"}],
+            "SELECT EXISTS": [{"exists": True}],
+            query: {"columns": ["id", "amount"], "rows": rows},
+        })
         service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connection)
         result = service.execute_read_only_sql("local", "public", query)
         self.assertEqual(result["rowCount"], 500)
@@ -593,7 +597,11 @@ class PostgresServiceTests(unittest.TestCase):
         for statement in ("", "UPDATE payments SET amount = 0", "SELECT 1; SELECT 2", "DO $$ BEGIN NULL; END $$"):
             with self.subTest(statement=statement), self.assertRaises(ValidationError):
                 self.service.execute_read_only_sql("local", "public", statement)
-        connection = Connection(fail_on="SELECT secret FROM payments")
+        metadata = {
+            "SELECT current_database() AS database": [{"database": "demo"}],
+            "SELECT EXISTS": [{"exists": True}],
+        }
+        connection = Connection(responses=metadata, fail_on="SELECT secret FROM payments")
         service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connection)
         with self.assertRaises(PostgresServiceError) as error:
             service.execute_read_only_sql("local", "public", "SELECT secret FROM payments")
@@ -608,7 +616,7 @@ class PostgresServiceTests(unittest.TestCase):
             sqlstate = "42P10"
             diag = Diagnostic()
 
-        connection = Connection(fail_on="SELECT DISTINCT", failure=QueryError())
+        connection = Connection(responses=metadata, fail_on="SELECT DISTINCT", failure=QueryError())
         service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connection)
         with self.assertRaises(PostgresServiceError) as error:
             service.execute_read_only_sql("local", "public", "SELECT DISTINCT ON (id) id FROM payments ORDER BY created_at")
@@ -616,6 +624,66 @@ class PostgresServiceTests(unittest.TestCase):
             error.exception.message,
             "Read-only SQL query failed: SELECT DISTINCT ON expressions must match initial ORDER BY expressions",
         )
+
+    def test_read_only_sql_verifies_exact_target_and_schemer_limits(self):
+        with self.assertRaises(PostgresServiceError) as error:
+            self.service.execute_read_only_sql("local", "public", "SELECT 1", expected_profile_fingerprint="stale")
+        self.assertEqual(error.exception.code, "profile_changed")
+
+        with self.assertRaises(PostgresServiceError) as error:
+            self.service.execute_read_only_sql("local", "public", "SELECT 1", database="other")
+        self.assertEqual(error.exception.code, "database_changed")
+
+        mismatch = Connection(responses={"SELECT current_database() AS database": [{"database": "other"}]})
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: mismatch)
+        with self.assertRaises(PostgresServiceError) as error:
+            service.execute_read_only_sql("local", "public", "SELECT 1", database="demo", reject_privileged_role=True)
+        self.assertEqual(error.exception.code, "database_changed")
+        self.assertFalse(any(sql == "SELECT 1" for sql, _ in mismatch.executed))
+
+        privileged = Connection(responses={
+            "SELECT current_database() AS database": [{"database": "demo", "rolsuper": True, "rolbypassrls": False}],
+        })
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: privileged)
+        with self.assertRaises(PostgresServiceError) as error:
+            service.execute_read_only_sql("local", "public", "SELECT 1", database="demo", reject_privileged_role=True)
+        self.assertEqual(error.exception.code, "unsafe_database_role")
+
+        missing = Connection(responses={
+            "SELECT current_database() AS database": [{"database": "demo"}],
+            "SELECT EXISTS": [{"exists": False}],
+        })
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: missing)
+        with self.assertRaises(PostgresServiceError) as error:
+            service.execute_read_only_sql("local", "missing", "SELECT 1", database="demo")
+        self.assertEqual(error.exception.code, "not_found")
+
+        query = "SELECT value FROM metrics"
+        limited = Connection(responses={
+            "SELECT current_database() AS database": [{"database": "demo"}],
+            "SELECT EXISTS": [{"exists": True}],
+            query: {"columns": ["value"], "rows": [(float("nan"),), ("x" * 1000,), ("later",)]},
+        })
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: limited)
+        result = service.execute_read_only_sql(
+            "local", "public", query, database="demo", allow_explain=False,
+            max_rows=100, max_columns=50, max_result_bytes=400,
+        )
+        self.assertEqual(result["rows"], [["nan"]])
+        self.assertTrue(result["truncated"])
+        json.dumps(result, allow_nan=False)
+        with self.assertRaises(ValidationError):
+            service.execute_read_only_sql("local", "public", "EXPLAIN SELECT 1", database="demo", allow_explain=False)
+
+        wide = Connection(responses={
+            "SELECT current_database() AS database": [{"database": "demo"}],
+            "SELECT EXISTS": [{"exists": True}],
+            "SELECT * FROM wide": {"columns": [f"column_{index}" for index in range(51)], "rows": []},
+        })
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: wide)
+        with self.assertRaises(PostgresServiceError) as error:
+            service.execute_read_only_sql("local", "public", "SELECT * FROM wide", database="demo", max_columns=50)
+        self.assertEqual(error.exception.code, "sql_result_too_wide")
 
     def test_canonical_fingerprint_ignores_layout_and_transients(self):
         first = {"tables": [{"id": "t", "name": "x", "x": 1, "color": "red"}], "postgres": {"profileId": "one", "importedAt": "then"}}

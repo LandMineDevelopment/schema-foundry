@@ -75,8 +75,8 @@ class FakePostgresService:
         self.calls.append(("preview_table_data", profile_id, namespace, table, offset, limit))
         return {"columns": [], "rows": [], "offset": offset, "nextOffset": offset, "hasMore": False}
 
-    def execute_read_only_sql(self, profile_id, namespace, statement):
-        self.calls.append(("execute_read_only_sql", profile_id, namespace, statement))
+    def execute_read_only_sql(self, profile_id, namespace, statement, **policy):
+        self.calls.append(("execute_read_only_sql", profile_id, namespace, statement, policy))
         return {"columns": [{"name": "answer"}], "rows": [[1]], "rowCount": 1, "truncated": False}
 
     def list_namespaces(self, profile_id):

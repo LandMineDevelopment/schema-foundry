@@ -15,6 +15,7 @@ POSTGRES_PROFILE_CAPABILITY = "profiles"
 POSTGRES_CATALOG_CAPABILITY = "catalog"
 POSTGRES_SCHEMA_CAPABILITY = "schema"
 POSTGRES_RELATION_QUERY_CAPABILITY = "relation_query"
+POSTGRES_READ_SQL_CAPABILITY = "read_sql"
 
 
 class PostgresHttpMixin:
@@ -25,7 +26,19 @@ class PostgresHttpMixin:
         POSTGRES_CATALOG_CAPABILITY,
         POSTGRES_SCHEMA_CAPABILITY,
         POSTGRES_RELATION_QUERY_CAPABILITY,
+        POSTGRES_READ_SQL_CAPABILITY,
     })
+    postgres_read_sql_policy = {
+        "require_database": False,
+        "require_profile_fingerprint": False,
+        "reject_privileged_role": False,
+        "context_fields": frozenset(),
+        "allow_explain": True,
+        "max_rows": 500,
+        "max_columns": 100,
+        "max_result_bytes": 1024 * 1024,
+    }
+    postgres_relation_query_context_fields = frozenset()
 
     def _has_postgres_capability(self, capability: str) -> bool:
         return capability in self.postgres_capabilities
@@ -95,7 +108,7 @@ class PostgresHttpMixin:
         relation_query_match = RELATION_QUERY_PATH.fullmatch(path)
         relation_detail_match = RELATION_DETAIL_PATH.fullmatch(path)
         profile_match = PROFILE_PATH.fullmatch(path)
-        if sql_match and not self._has_postgres_capability(POSTGRES_SCHEMA_CAPABILITY):
+        if sql_match and not self._has_postgres_capability(POSTGRES_READ_SQL_CAPABILITY):
             return False
         if any((relation_preview_match, relation_verify_match, relation_query_match, relation_detail_match)) and not self._has_postgres_capability(POSTGRES_RELATION_QUERY_CAPABILITY):
             return False
@@ -120,12 +133,18 @@ class PostgresHttpMixin:
                     body["detail"], body["offset"], body["limit"], body["sort"], body["searches"],
                 ))
         elif relation_query_match:
-            if not isinstance(body, dict) or set(body) != {"source", "query"}:
-                self.send_json(400, {"error": {"code": "validation_error", "message": "query request must contain exactly source and query"}})
+            base_fields = {"source", "query"}
+            contextual_fields = base_fields | set(self.postgres_relation_query_context_fields)
+            if not isinstance(body, dict) or set(body) not in (base_fields, contextual_fields):
+                self.send_json(400, {"error": {"code": "validation_error", "message": "query request fields are invalid"}})
             else:
-                self._service_call(lambda: self.service.execute_widget_query(
-                    relation_query_match.group(1), body["source"], body["query"]
-                ))
+                def execute_query():
+                    guard = getattr(self, "_postgres_relation_query_guard", None)
+                    if guard is None or set(body) == base_fields:
+                        return self.service.execute_widget_query(relation_query_match.group(1), body["source"], body["query"])
+                    with guard(body):
+                        return self.service.execute_widget_query(relation_query_match.group(1), body["source"], body["query"])
+                self._service_call(execute_query)
         elif relation_verify_match:
             self._service_call(lambda: self.service.verify_relation_source(
                 relation_verify_match.group(1), body.get("source")
@@ -135,7 +154,38 @@ class PostgresHttpMixin:
                 relation_preview_match.group(1), body.get("source"), body.get("offset", 0), body.get("limit", 20)
             ))
         elif sql_match:
-            self._service_call(lambda: self.service.execute_read_only_sql(sql_match.group(1), body.get("namespace"), body.get("sql")))
+            policy = self.postgres_read_sql_policy
+            allowed_fields = {"database", "namespace", "sql"} if policy["require_database"] else {"namespace", "sql"}
+            if policy.get("require_profile_fingerprint"):
+                allowed_fields.add("profileFingerprint")
+            allowed_fields |= set(policy.get("context_fields", ()))
+            compatible_fields = {"database", "namespace", "sql"}
+            valid_fields = (
+                isinstance(body, dict)
+                and (set(body) == allowed_fields or (not policy["require_database"] and set(body) == compatible_fields))
+            )
+            if not valid_fields:
+                self.send_json(400, {"error": {"code": "validation_error", "message": "SQL request fields are invalid"}})
+            else:
+                def execute_sql():
+                    guard = getattr(self, "_postgres_read_sql_guard", None)
+                    if guard is None:
+                        return self.service.execute_read_only_sql(
+                            sql_match.group(1), body.get("namespace"), body.get("sql"), database=body.get("database"),
+                            expected_profile_fingerprint=body.get("profileFingerprint"),
+                            reject_privileged_role=policy.get("reject_privileged_role", False),
+                            allow_explain=policy["allow_explain"], max_rows=policy["max_rows"],
+                            max_columns=policy["max_columns"], max_result_bytes=policy["max_result_bytes"],
+                        )
+                    with guard(body):
+                        return self.service.execute_read_only_sql(
+                            sql_match.group(1), body.get("namespace"), body.get("sql"), database=body.get("database"),
+                            expected_profile_fingerprint=body.get("profileFingerprint"),
+                            reject_privileged_role=policy.get("reject_privileged_role", False),
+                            allow_explain=policy["allow_explain"], max_rows=policy["max_rows"],
+                            max_columns=policy["max_columns"], max_result_bytes=policy["max_result_bytes"],
+                        )
+                self._service_call(execute_sql)
         elif profile_match.group(2) == "test":
             self._service_call(lambda: self.service.test_profile(profile_match.group(1)))
         else:

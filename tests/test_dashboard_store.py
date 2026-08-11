@@ -106,6 +106,16 @@ class DashboardStoreTests(unittest.TestCase):
         self.assertEqual(error.exception.payload["error"]["code"], "dashboard_conflict")
         self.assertEqual(self.store.get(first["id"])["dashboard"]["widgets"][0]["layout"]["desktop"]["x"], 1)
 
+    def test_revision_guard_rejects_stale_operations(self):
+        self.store.initialize_once()
+        record = self.store.get("dashboard_mercury")
+        with self.store.guard_revision(record["id"], record["revision"]):
+            self.assertEqual(self.store.get(record["id"])["revision"], record["revision"])
+        with self.assertRaises(DashboardStoreError) as error:
+            with self.store.guard_revision(record["id"], record["revision"] + 1):
+                pass
+        self.assertEqual(error.exception.payload["error"]["code"], "dashboard_changed")
+
     def test_invalid_records_and_duplicate_widget_ids_are_rejected(self):
         record = mercury_dashboard_record()
         record["dashboard"]["widgets"][1]["id"] = record["dashboard"]["widgets"][0]["id"]

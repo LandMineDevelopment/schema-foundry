@@ -1,6 +1,6 @@
 # Embedded AI Assistant
 
-Schemii's default launcher runs a private, pinned OpenCode sidecar that provides model discovery, provider authentication, chat sessions, skills, and explicit proposal tools. The sidecar starts with the default `ai-docker-db` stack, but no model request is made until the user sends a chat message. Explicit `ui`, `local-db`, and `docker-db` modes omit OpenCode.
+Schemii's default launcher runs a private, pinned OpenCode sidecar that provides model discovery, provider authentication, chat sessions, skills, and explicit proposal tools. Schemer can join that same sidecar through `compose.schemer.ai.yaml`. The sidecar starts with the default `ai-docker-db` stack, but no model request is made until the user sends a chat message. Explicit `ui`, `local-db`, and `docker-db` modes omit OpenCode.
 
 ## Start An AI Mode
 
@@ -40,9 +40,11 @@ Linux `ai-local-db` mode maps OpenCode's container port 4096 to an installation-
 
 OpenCode receives a read-only assistant workspace. Shell, filesystem reads and writes, external directories, web access, tasks, dynamic MCP, sharing, LSP, formatters, and unrelated skills are denied. Do not weaken these controls or expose OpenCode publicly.
 
+When Schemer AI is enabled, the same sidecar also receives a separate read-only `/workspace-schemer`. Schemii sessions remain restricted to `/workspace`; Schemer sessions remain restricted to `/workspace-schemer`. Each workspace has its own default-deny instructions, skills, proposal tools, and chat history. Provider authentication is intentionally global to the one OpenCode data directory, so the applications share provider connections without sharing conversations or action capabilities.
+
 ## Connect A Provider
 
-Open the AI panel, choose **Provider settings**, and select an authentication method reported by the pinned OpenCode server. Methods and models are discovered dynamically.
+Open the left-side AI drawer in either application, choose **Provider settings**, and select an authentication method reported by the pinned OpenCode server. Schemii and Schemer use the same assistant controls and provider UI; methods and models are discovered dynamically.
 
 Supported UI flows include:
 
@@ -54,15 +56,17 @@ There is no provider-independent subscription login. Provider availability and t
 
 API keys and callback codes are submitted to Schemii's local backend and are never stored in browser storage or returned by the API. OpenCode stores provider credentials in plaintext JSON with restrictive file permissions inside `schemii-opencode-data`. Protect volume access and backups.
 
-OpenCode 1.18.15 offers a temporary anonymous catalog of zero-cost models. Schemii shows the models verified to return responses and withholds anonymous models that currently return an empty response or upstream `401`. Availability can change without notice. Free-model prompts may be retained by their providers to improve models, so do not submit personal or confidential data.
+OpenCode 1.18.15 offers a temporary anonymous catalog of zero-cost models. Schemii and Schemer fetch that catalog whenever the assistant or provider settings opens, show every valid model OpenCode currently advertises, disable models OpenCode marks non-active, and use OpenCode's current default when no still-valid local preference exists. There is no application-maintained model-ID allowlist or blacklist. Catalog membership does not guarantee that an anonymous upstream has capacity: a listed model can still time out or return an empty response, after which the apps refresh discovery and report the provider failure. Availability can change without notice. Free-model prompts may be retained by their providers to improve models, so do not submit personal or confidential data.
 
 For authenticated Zen access, open **Provider settings**, use the OpenCode Zen key link, create an account and API key, and paste the key into Schemii. After connecting a provider, select any connected model from the chat panel. A model should support reliable tool calling to perform proposal actions.
 
-Schemii remembers the last selected provider/model in browser storage and restores it whenever that model remains available. This preference contains only provider and model identifiers; API keys, OAuth callbacks, and subscription tokens are never written to browser storage.
+Each application remembers its last selected provider/model in its own origin's browser storage and restores it whenever that model remains available. This preference contains only provider and model identifiers; API keys, OAuth callbacks, and subscription tokens are never written to browser storage. A model may need to be selected once in each app, but provider credentials do not need to be entered again.
 
 ## Persistent Chat History
 
 OpenCode stores chat sessions in the Docker-managed `schemii-opencode-data` volume. Schemii accepts only sessions associated with the sidecar's fixed `/workspace`; host OpenCode data is neither mounted nor shown, and records imported from another workspace are rejected. **New chat** starts a separate conversation without deleting the previous session. Open **Chat history** to list conversations by bounded title and timestamp, restore one, continue its existing session, or permanently delete it after confirmation.
+
+Schemer uses the same persistent volume but accepts only `/workspace-schemer` sessions. Its history dialog cannot list, restore, delete, or continue Schemii conversations. A Schemer conversation can continue only while its original dashboard and disclosure level are selected; otherwise history opens read-only and sending starts a newly isolated chat. Provider authentication remains shared because OpenCode stores it globally rather than per workspace.
 
 Restored history is intentionally narrower than OpenCode's raw records. Schemii returns at most 100 messages and a bounded amount of text through same-origin authenticated routes. It strips injected schema context, raw tool inputs and outputs, paths, metadata, provider response details, and action payloads. Historical schema, SQL, connection, and migration proposals are never restored as interactive actions; ask the assistant for a fresh proposal against the current design and database target.
 
@@ -76,9 +80,11 @@ Every chat selects one disclosure level:
 | `Schema` | Metadata plus bounded tables, columns, keys, checks, and relationships |
 | `Data` | Schema context and results of explicitly permitted read-only SQL requests |
 
+Schemer uses `Metadata`, `Dashboard`, and `Data`. Metadata includes active and available dashboard identities. Dashboard adds redacted widget configuration and a bounded set of live-verified source/column descriptors without connection metadata, filter literals, or rows. Data also adds the exact redacted profile/database/namespace target and enables inert analytic-query proposals. Rows are included only after the user confirms the displayed SQL.
+
 Passwords, profile hosts/users, local paths, session tokens, environment variables, and stored table rows are never added automatically. Namespace lists are not fetched while building model context. Context is bounded and treated as untrusted data in the system prompt.
 
-Data access has a separate SQL policy:
+Schemii data access has a separate SQL policy:
 
 - `Disabled` shows generated SQL but cannot execute it.
 - `Ask each time` requires confirmation for each query.
@@ -86,9 +92,11 @@ Data access has a separate SQL policy:
 
 Query results are bounded before being sent back to the model. PostgreSQL runs these queries in a read-only transaction, but a `SELECT` can invoke database functions with external side effects. Use a narrowly privileged role and review every generated statement.
 
+Schemer does not offer session-wide SQL approval: every analytic query requires a new confirmation. Changing the dashboard, disclosure level, profile, database, or namespace starts a separately bound conversation. Data-mode history cannot be viewed outside that exact target context.
+
 ## Live Agent Activity
 
-While a response is running, the chat shows an animated activity timeline modeled after OpenCode's session UI. It can show provider connection, elapsed time, reasoning activity, retry countdowns, context compaction, allowlisted skill loading, and `schema_*` tool lifecycle states. Completed responses retain a collapsed run summary, collapsed reasoning, and compact tool cards.
+Both applications use the same left-side assistant drawer and runtime. While a response is running, the chat shows an animated 25-dot activity timeline modeled after OpenCode's session UI. It can show provider connection, elapsed time, reasoning activity, retry countdowns, context compaction, allowlisted skill loading, and app-injected tool lifecycle states. Completed responses retain a collapsed run summary, collapsed reasoning, and compact tool cards. Drawer, composer, history, provider settings, keyboard focus, mobile sizing, and reduced-motion behavior are shared; each application still injects its own context, tools, skills, and action policy.
 
 The browser never connects to OpenCode directly. Schemii subscribes to the private sidecar's session events, filters every event to the exact chat session, and emits a bounded same-origin NDJSON stream. The stream does not forward prompt or response text, reasoning text, tool inputs or outputs, SQL, action payloads, paths, attachments, metadata, provider response bodies, or events from another session. Final response content still arrives through the existing bounded message route and uses text-only rendering.
 
@@ -117,6 +125,10 @@ The explicit tools can propose:
 - Open an exact listed saved PostgreSQL connection
 - Prefill a connection profile without a password
 - Open migration preview and apply review workflows
+
+Schemer's separate agent can load only Schemer help, dashboard safety, layout safety, and query safety. Its tools can propose creating or opening a dashboard and creating, renaming, duplicating, or deleting a widget. Complete widget proposals must use one exact source from the bounded live catalog, listed columns, a version-2 structured query, and a compatible visualization; Schemer re-inspects the fingerprint, revision-guards and executes the query before mutation, chooses the ID and placement, and persists once. A placeholder is proposed only when explicitly requested. In data mode only, `schemer_read_query` can emit an inert read-query proposal bound to the supplied dashboard revision, profile, database, and namespace; it is disabled in metadata/dashboard modes and never executes inside OpenCode. Confirmed analytic SQL may join relations, but widget configuration remains single-relation. Schemii's schema, connection, and migration tools remain unavailable in the Schemer workspace and prompt policy.
+
+The Schemer browser adapter sends the confirmed database, namespace, SQL, dashboard revision, and a local redacted-profile fingerprint to `/api/postgres/profiles/{profileId}/sql`. The backend rejects missing or unknown fields, holds the dashboard revision guard throughout execution, rejects profile changes after confirmation, verifies the saved and connected database plus namespace, rejects superuser and row-security-bypass roles, disables `EXPLAIN`, and returns complete JSON values within 100 rows, 50 columns, and 256 KiB. A data-mode follow-up may include that response as `queryResult` only when it is at most 48 KiB and exactly matches the selected profile, database, and namespace. Results are rejected in every other disclosure mode. The namespace is a default search path rather than a security boundary, so the saved role must be restricted to only the schemas and functions the user intends the assistant to read.
 
 Tool output is inert structured data. It does not prove that an action ran.
 
@@ -161,9 +173,11 @@ Never remove these volumes unless credential and chat deletion is intentional. U
 
 Normal launcher restarts, image rebuilds, and container recreation reuse `schemii-opencode-data`, so OpenAI, GitHub Copilot, GitLab Duo, Zen, and API-key connections do not require authentication again. Reauthentication is required only when the provider expires or revokes its credential, the user disconnects it, or the persistent data volume is removed.
 
+Disconnecting a provider from either application removes the one shared OpenCode authentication record and therefore disconnects it from both. Schemer states this explicitly before disconnect confirmation. Neither application mounts or reads the OpenCode credential volume directly.
+
 ## Limitations
 
-- Final chat content uses a bounded synchronous request alongside a session-scoped live activity stream. Slow providers may take up to `SCHEMII_OPENCODE_TIMEOUT`, which defaults to 45 seconds, followed by an upstream session-abort attempt of at most five seconds.
+- Final chat content uses a bounded synchronous request alongside a session-scoped live activity stream. Slow providers may take up to `SCHEMII_OPENCODE_TIMEOUT`, which defaults to 120 seconds and accepts `1`–`300`, followed by an upstream session-abort attempt of at most five seconds. OpenCode's provider request timeout defaults to 300 seconds, so values below that remain the effective application cutoff.
 - OpenCode provider APIs evolve quickly. The image is pinned so UI and proxy behavior do not change unexpectedly.
 - OAuth callback behavior is provider-specific. Complete the displayed instructions and provide a callback code only when requested.
 - Provider catalogs may list models that still require authentication or are temporarily unavailable. Schemii filters anonymous free models known not to respond with the pinned OpenCode version and reports empty responses as errors.

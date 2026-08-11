@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from datetime import date, datetime, time as datetime_time
 from decimal import Decimal
 from typing import Any
@@ -11,6 +12,8 @@ from .postgres_common import PostgresServiceError
 
 
 def _json_cell(value: Any) -> Any:
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, (datetime, date, datetime_time)):

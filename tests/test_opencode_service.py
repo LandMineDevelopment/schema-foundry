@@ -97,7 +97,7 @@ class OpenCodeServiceTests(unittest.TestCase):
         zen = next(provider for provider in result["providers"] if provider["id"] == "opencode")
         self.assertTrue(zen["connected"])
         self.assertFalse(zen["authenticated"])
-        self.assertEqual([model["id"] for model in zen["models"]], ["deepseek-v4-flash-free"])
+        self.assertEqual([model["id"] for model in zen["models"]], ["deepseek-v4-flash-free", "north-mini-code-free"])
         self.assertEqual(result["authMethods"]["opencode"][0]["helpUrl"], "https://opencode.ai/auth")
         self.assertEqual(result["authMethods"]["anthropic"][0]["id"], 0)
         self.assertEqual(result["skills"][0]["name"], "schemii-help")
@@ -194,6 +194,64 @@ class OpenCodeServiceTests(unittest.TestCase):
 
         self.assertEqual(error.exception.status, 404)
         self.assertEqual(error.exception.code, "not_found")
+
+    def test_workspace_and_tool_policy_isolate_schemer_sessions(self):
+        action = {"type": "dashboard_create", "title": "Sales", "requiresConfirmation": True}
+        opener = Opener(
+            {"id": "ses_dash", "title": "Dashboard", "directory": "/workspace-schemer"},
+            {"id": "ses_dash", "directory": "/workspace-schemer"},
+            {"parts": [
+                {"type": "tool", "tool": "schemer_dashboard_create", "state": {"status": "completed", "output": "SCHEMER_ACTION:" + json.dumps(action)}},
+                {"type": "tool", "tool": "schema_add_table", "state": {"status": "completed", "output": "SCHEMII_ACTION:{}"}},
+            ]},
+        )
+        service = OpenCodeService(
+            "http://127.0.0.1:4096", "opencode", "secret", 12, opener=opener,
+            workspace="/workspace-schemer",
+            custom_tools={"schemer_dashboard_create"},
+            tool_action_types={"schemer_dashboard_create": "dashboard_create"},
+            safe_skills={"schemer-help"},
+            action_prefix="SCHEMER_ACTION:",
+        )
+
+        self.assertEqual(service.create_session("Dashboard"), {"id": "ses_dash", "title": "Dashboard"})
+        result = service.prompt("ses_dash", "Create sales", {"providerId": "openai", "modelId": "gpt"}, "Schemer system")
+
+        self.assertEqual(result["actions"], [action])
+        self.assertEqual([part.get("tool") for part in result["parts"]], ["schemer_dashboard_create"])
+        payload = request_json(opener.calls[2][0])
+        self.assertTrue(payload["tools"]["schemer_dashboard_create"])
+        self.assertNotIn("schema_add_table", payload["tools"])
+        self.assertTrue(all(call[0].get_header("X-opencode-directory") == "/workspace-schemer" for call in opener.calls))
+
+        outside = OpenCodeService(
+            "http://127.0.0.1:4096", "opencode", "secret", opener=Opener({"id": "ses_schema", "directory": "/workspace"}),
+            workspace="/workspace-schemer", custom_tools=set(), tool_action_types={}, safe_skills=set(), action_prefix="SCHEMER_ACTION:",
+        )
+        with self.assertRaises(OpenCodeServiceError):
+            outside.verify_session("ses_schema")
+
+    def test_configured_data_tools_are_the_only_tools_toggled(self):
+        action = {"type": "read_query", "profileId": "shared", "database": "demo", "namespace": "public", "sql": "SELECT 1"}
+        opener = Opener(
+            {"id": "ses_data", "directory": "/workspace-schemer"},
+            {"parts": [
+                {"type": "text", "text": "Data access is disabled."},
+                {"type": "tool", "tool": "schemer_read_query", "state": {"status": "completed", "output": "SCHEMER_ACTION:" + json.dumps(action)}},
+            ]},
+            [],
+        )
+        service = OpenCodeService(
+            "http://127.0.0.1:4096", "opencode", "secret", opener=opener, workspace="/workspace-schemer",
+            custom_tools={"schemer_read_query", "schemer_dashboard_create"},
+            tool_action_types={"schemer_read_query": "read_query", "schemer_dashboard_create": "dashboard_create"},
+            safe_skills=set(), data_tools={"schemer_read_query"}, action_prefix="SCHEMER_ACTION:",
+        )
+        result = service.prompt("ses_data", "Read", {"providerId": "openai", "modelId": "gpt"}, "system", allow_data=False)
+        payload = request_json(opener.calls[1][0])
+        self.assertFalse(payload["tools"]["schemer_read_query"])
+        self.assertTrue(payload["tools"]["schemer_dashboard_create"])
+        self.assertEqual(result["actions"], [])
 
     def test_prompt_enables_only_schemii_tools_and_normalizes_actions(self):
         valid = {"type": "add_table", "table": {"name": "events"}}

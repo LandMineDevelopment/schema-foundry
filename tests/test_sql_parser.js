@@ -6,7 +6,7 @@ const source = fs.readFileSync("src/schemii/web/app.js", "utf8");
 const start = source.indexOf("const SQL_IDENTIFIER_PART");
 const end = source.indexOf("async function importSqlFile");
 const generateStart = source.indexOf("function generateSql()");
-const generateEnd = source.indexOf("elements.tablesLayer.addEventListener", generateStart);
+const generateEnd = source.indexOf("const aiAssistant =", generateStart);
 assert.notEqual(start, -1, "SQL parser start marker is missing");
 assert.notEqual(end, -1, "SQL parser end marker is missing");
 assert.notEqual(generateStart, -1, "SQL generator start marker is missing");

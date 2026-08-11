@@ -110,6 +110,7 @@ Launcher-created volumes are scoped under the printed instance:
 - `schemii-opencode-data`: provider credentials and chats
 - `schemii-opencode-config` and `schemii-opencode-state`: OpenCode configuration/state
 - `schemii-opencode-cache`: recreatable cache
+- `schemer-dashboards`: saved Schemer dashboards when Schemer is enabled
 
 List the exact volumes with:
 
@@ -118,6 +119,8 @@ docker volume ls --filter "label=com.docker.compose.project=<instance>"
 ```
 
 Never run `docker compose down --volumes`, `docker volume rm`, or equivalent destructive commands without explicit approval. Disclose that volume deletion can remove designs, layouts, profiles/passwords, migration history, PostgreSQL data, provider credentials, chat history, and AI state.
+
+Schemer AI must join the exact same Compose project and OpenCode service as Schemii. Use `compose.schemer.yaml` with `compose.schemer.ai.yaml`; do not start a second OpenCode service or copy provider credentials. Provider authentication is shared globally, while `/workspace` and `/workspace-schemer` keep application chats, skills, and proposal tools separate.
 
 For a complete user-requested uninstall, use `uninstall.sh` or `uninstall.ps1`. The scripts inventory and remove all detected Schemii projects for the current Docker user and then remove their own repository. They require typing `UNINSTALL` unless the user explicitly requests unattended `--yes`/`-Yes` operation. Never run an uninstaller merely to troubleshoot startup, and back up requested data first.
 

@@ -8,7 +8,7 @@ const html = fs.readFileSync(path.join(root, "src/schemii/web/index.html"), "utf
 
 assert.match(html, /id="restore-examples-button"[^>]*>Restore examples<\/button>/, "the Help menu must expose example restoration");
 const start = source.indexOf("async function restoreExamples");
-const end = source.indexOf("async function readAiActivity", start);
+const end = source.indexOf("async function checkPostgresDrift", start);
 const restore = source.slice(start, end);
 assert.match(restore, /await flushPendingSave\(\)/, "restoration must save active user work first");
 assert.match(restore, /sharedSessionClient\.json\("\/api\/examples\/restore"/, "restoration must use the narrow local endpoint");

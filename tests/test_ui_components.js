@@ -40,6 +40,10 @@ assert.equal(button.type, "button");
 assert.equal(button.getAttribute("aria-label"), "Refresh");
 assert.equal(button.dataset.action, "refresh");
 assert.match(button.innerHTML, /<svg/);
+for (const icon of ["assistant", "history", "settings", "newChat"]) {
+  const control = shared.createIconButton({ icon, label: icon });
+  assert.match(control.innerHTML, /<svg/, `${icon} must be available from shared UI components`);
+}
 const originalMarkup = button.innerHTML;
 shared.setControlLoading(button, true, { loadingLabel: "Checking" });
 assert.equal(button.innerHTML, originalMarkup, "loading must preserve icon markup");
