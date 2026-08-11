@@ -53,6 +53,16 @@ VISUALIZATION = {
         "donut": {"dimensionId": "dimension_date", "measureId": "measure_orders"},
     },
 }
+DETAIL = {
+    "version": 1,
+    "columns": [
+        {"sourceColumn": "id", "label": "Order ID", "width": 120, "hidden": False, "searchable": False, "numberFormat": {"style": "integer"}},
+        {"sourceColumn": "ordered_at", "label": "Ordered at", "width": 240, "hidden": False, "searchable": False, "numberFormat": {"style": "auto"}},
+    ],
+    "defaultSort": {"sourceColumn": "ordered_at", "direction": "desc", "nulls": "last"},
+    "rowIdentifier": "id",
+    "pageSize": 25,
+}
 
 
 class DashboardStoreTests(unittest.TestCase):
@@ -180,6 +190,127 @@ class DashboardStoreTests(unittest.TestCase):
         configuration["visualization"]["selections"]["donut"]["dimensionId"] = None
         saved_again = self.store.save(saved["id"], saved)
         self.assertIsNone(saved_again["dashboard"]["widgets"][0]["configuration"]["visualization"]["selections"]["bar"]["dimensionId"])
+
+    def test_aggregate_report_detail_round_trips_without_changing_other_configuration(self):
+        self.store.initialize_once()
+        record = self.store.get("dashboard_mercury")
+        widget = record["dashboard"]["widgets"][0]
+        source = {**SOURCE, "columns": SOURCE_COLUMNS}
+        widget["kind"] = "aggregate_report"
+        widget["configuration"] = {
+            "source": source,
+            "query": QUERY,
+            "table": TABLE,
+            "visualization": VISUALIZATION,
+            "detail": DETAIL,
+        }
+        saved = self.store.save(record["id"], record)
+        configuration = saved["dashboard"]["widgets"][0]["configuration"]
+        self.assertEqual(configuration["detail"], DETAIL)
+        self.assertEqual(configuration["source"], source)
+        self.assertEqual(configuration["query"], QUERY)
+        self.assertEqual(configuration["table"], TABLE)
+        self.assertEqual(configuration["visualization"], VISUALIZATION)
+
+    def test_aggregate_report_detail_accepts_nullable_options_and_boundaries(self):
+        self.store.initialize_once()
+        record = self.store.get("dashboard_mercury")
+        widget = record["dashboard"]["widgets"][0]
+        widget["kind"] = "aggregate_report"
+        detail = {
+            **DETAIL,
+            "columns": [
+                {"sourceColumn": "id", "label": "I", "width": 64, "hidden": True, "searchable": False, "numberFormat": {"style": "integer"}},
+                {"sourceColumn": "ordered_at", "label": "O" * 128, "width": 1024, "hidden": False, "searchable": False, "numberFormat": {"style": "auto"}},
+            ],
+            "defaultSort": None,
+            "rowIdentifier": None,
+            "pageSize": 100,
+        }
+        widget["configuration"] = {"source": {**SOURCE, "columns": SOURCE_COLUMNS}, "query": QUERY, "detail": detail}
+        saved = self.store.save(record["id"], record)
+        self.assertEqual(saved["dashboard"]["widgets"][0]["configuration"]["detail"], detail)
+
+    def test_aggregate_report_rejects_invalid_detail_shapes_and_references(self):
+        invalid_details = [
+            {**DETAIL, "version": 2},
+            {**DETAIL, "version": True},
+            {**DETAIL, "pageSize": 20},
+            {**DETAIL, "pageSize": True},
+            {**DETAIL, "pageSize": []},
+            {**DETAIL, "columns": []},
+            {**DETAIL, "columns": [DETAIL["columns"][0], DETAIL["columns"][0]]},
+            {**DETAIL, "columns": [{**DETAIL["columns"][0], "sourceColumn": "missing"}]},
+            {**DETAIL, "columns": [{**DETAIL["columns"][0], "width": 63}]},
+            {**DETAIL, "columns": [{**DETAIL["columns"][0], "width": 1025}]},
+            {**DETAIL, "columns": [{**DETAIL["columns"][0], "hidden": 0}]},
+            {**DETAIL, "columns": [{**column, "hidden": True} for column in DETAIL["columns"]]},
+            {**DETAIL, "columns": [{**DETAIL["columns"][0], "searchable": "yes"}]},
+            {**DETAIL, "columns": [{**DETAIL["columns"][1], "searchable": True}]},
+            {**DETAIL, "columns": [{**DETAIL["columns"][0], "label": ""}]},
+            {**DETAIL, "columns": [{**DETAIL["columns"][0], "label": "x" * 129}]},
+            {**DETAIL, "columns": [{**DETAIL["columns"][0], "extra": False}]},
+            {**DETAIL, "columns": [{**DETAIL["columns"][0], "numberFormat": {"style": "currency", "currency": "usd", "fractionDigits": 2}}]},
+            {**DETAIL, "columns": [{key: value for key, value in DETAIL["columns"][0].items() if key != "numberFormat"}]},
+            {**DETAIL, "defaultSort": {"sourceColumn": "missing", "direction": "asc", "nulls": "first"}},
+            {**DETAIL, "defaultSort": {"sourceColumn": [], "direction": "asc", "nulls": "first"}},
+            {**DETAIL, "defaultSort": {"sourceColumn": "id", "direction": "up", "nulls": "first"}},
+            {**DETAIL, "defaultSort": {"sourceColumn": "id", "direction": [], "nulls": "first"}},
+            {**DETAIL, "defaultSort": {"sourceColumn": "id", "direction": "asc", "nulls": "auto"}},
+            {**DETAIL, "defaultSort": {"sourceColumn": "id", "direction": "asc", "nulls": []}},
+            {**DETAIL, "defaultSort": {"sourceColumn": "id", "direction": "asc", "nulls": "first", "extra": True}},
+            {**DETAIL, "rowIdentifier": "missing"},
+            {**DETAIL, "rowIdentifier": False},
+            {**DETAIL, "extra": None},
+        ]
+        for detail in invalid_details:
+            with self.subTest(detail=detail):
+                record = mercury_dashboard_record()
+                widget = record["dashboard"]["widgets"][0]
+                widget["kind"] = "aggregate_report"
+                widget["configuration"] = {"source": {**SOURCE, "columns": SOURCE_COLUMNS}, "query": QUERY, "detail": detail}
+                with self.assertRaises(DashboardStoreError) as error:
+                    self.store.save(record["id"], record)
+                self.assertEqual(error.exception.payload["error"]["code"], "invalid_dashboard")
+        extra_source_columns = [
+            {"name": f"column_{index}", "type": "text", "nullable": True, "ordinal": index + 3}
+            for index in range(63)
+        ]
+        too_many_columns = [
+            {"sourceColumn": column["name"], "label": column["name"], "width": 160, "hidden": False, "searchable": True, "numberFormat": {"style": "auto"}}
+            for column in extra_source_columns
+        ]
+        record = mercury_dashboard_record()
+        widget = record["dashboard"]["widgets"][0]
+        widget["kind"] = "aggregate_report"
+        widget["configuration"] = {
+            "source": {**SOURCE, "columns": SOURCE_COLUMNS + extra_source_columns},
+            "query": QUERY,
+            "detail": {**DETAIL, "columns": DETAIL["columns"] + too_many_columns},
+        }
+        with self.assertRaises(DashboardStoreError):
+            self.store.save(record["id"], record)
+
+    def test_detail_references_can_use_snapshot_columns_and_non_aggregate_widgets_reject_detail(self):
+        self.store.initialize_once()
+        record = self.store.get("dashboard_mercury")
+        widget = record["dashboard"]["widgets"][0]
+        widget["kind"] = "aggregate_report"
+        detail = {**DETAIL, "columns": [DETAIL["columns"][0]], "defaultSort": {"sourceColumn": "id", "direction": "asc", "nulls": "last"}}
+        widget["configuration"] = {"source": {**SOURCE, "columns": SOURCE_COLUMNS}, "query": QUERY, "detail": detail}
+        saved = self.store.save(record["id"], record)
+        self.assertEqual(saved["dashboard"]["widgets"][0]["configuration"]["detail"], detail)
+        for kind in ("preview", "placeholder"):
+            with self.subTest(kind=kind):
+                record = mercury_dashboard_record()
+                record["dashboard"]["widgets"][0]["kind"] = kind
+                record["dashboard"]["widgets"][0]["configuration"] = {
+                    "source": {**SOURCE, "columns": SOURCE_COLUMNS},
+                    "query": QUERY,
+                    "detail": DETAIL,
+                }
+                with self.assertRaises(DashboardStoreError):
+                    self.store.save(record["id"], record)
 
     def test_aggregate_report_rejects_invalid_visualization_references_and_shapes(self):
         invalid_visualizations = [

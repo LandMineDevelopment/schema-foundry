@@ -6,7 +6,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from schemii.widget_query import QueryValidationError, compile_query, normalize_query
+from schemii.widget_query import (
+    QueryValidationError,
+    compile_detail_query,
+    compile_query,
+    normalize_detail_request,
+    normalize_query,
+)
 from schemii.postgres_service import quote_identifier
 
 
@@ -130,6 +136,70 @@ class WidgetQueryTests(unittest.TestCase):
         value["dimensions"][0]["id"] = "filter_group_legacy"
         normalized = normalize_query(value, COLUMNS)
         self.assertEqual(normalized["filters"][0]["id"], "filter_group_legacy_")
+
+    def test_compiles_detail_count_and_page_from_server_owned_bindings(self):
+        normalized = normalize_query(query(), COLUMNS)
+        detail = {
+            "version": 1,
+            "columns": [
+                {"id": "detail_customer", "label": "Customer", "column": "customer_id", "numberFormat": {"style": "integer"}, "searchable": False},
+                {"id": "detail_publisher", "label": "Publisher", "column": "publisher", "numberFormat": {"style": "auto"}, "searchable": True},
+            ],
+            "rowIdentifier": "customer_id",
+        }
+        request = normalize_detail_request(
+            {"dimensions": [
+                {"targetId": "dimension_format", "value": None},
+                {"targetId": "dimension_publisher", "value": "O'Reilly"},
+            ], "measureId": "measure_revenue"},
+            detail, 20, 25,
+            {"targetId": "detail_publisher", "direction": "desc", "nulls": "last"},
+            "50%_off", normalized, COLUMNS,
+        )
+        compiled = compile_detail_query(
+            {"namespace": "bookstore", "relation": "book sales"}, normalized, request, COLUMNS, quote_identifier
+        )
+        for sql in (compiled["countSql"], compiled["sql"]):
+            self.assertIn('FROM "bookstore"."book sales"', sql)
+            self.assertIn('"format" IN (%s, %s)', sql)
+            self.assertIn('"publisher" = %s', sql)
+            self.assertIn('"format" IS NULL', sql)
+            self.assertIn('"revenue" IS NOT NULL', sql)
+            self.assertIn('"publisher" ILIKE %s', sql)
+            self.assertNotIn("O'Reilly", sql)
+        self.assertIn('"__schemer_c1" DESC NULLS LAST', compiled["sql"])
+        self.assertIn('"customer_id" ASC NULLS LAST', compiled["sql"])
+        self.assertEqual(
+            compiled["countParameters"],
+            ["paperback", "hardcover", "O'Reilly", "%50\\%\\_off%"],
+        )
+        self.assertEqual(compiled["parameters"][-2:], [25, 20])
+        self.assertIn("contains", compiled["columns"][1]["operators"])
+        self.assertNotIn("contains", compiled["columns"][0]["operators"])
+
+    def test_rejects_invalid_detail_selection_configuration_and_bounds(self):
+        normalized = normalize_query(query(), COLUMNS)
+        detail = {
+            "version": 1,
+            "columns": [{"id": "detail_publisher", "label": "Publisher", "column": "publisher", "numberFormat": {"style": "auto"}, "searchable": True}],
+            "rowIdentifier": None,
+        }
+        valid_selection = {"dimensions": [
+            {"targetId": "dimension_publisher", "value": "A"},
+            {"targetId": "dimension_format", "value": "paperback"},
+        ]}
+        invalid = [
+            (valid_selection["dimensions"][:1], detail, 0, 20, None, ""),
+            ([valid_selection["dimensions"][0], valid_selection["dimensions"][0]], detail, 0, 20, None, ""),
+            (valid_selection["dimensions"], {**detail, "columns": [{**detail["columns"][0], "column": "missing"}]}, 0, 20, None, ""),
+            (valid_selection["dimensions"], {**detail, "columns": [{**detail["columns"][0], "column": "revenue"}]}, 0, 20, None, "search"),
+            (valid_selection["dimensions"], detail, -1, 20, None, ""),
+            (valid_selection["dimensions"], detail, 0, 101, None, ""),
+            (valid_selection["dimensions"], detail, 0, 20, {"targetId": "missing", "direction": "asc", "nulls": "last"}, ""),
+        ]
+        for dimensions, candidate_detail, offset, limit, sort, search in invalid:
+            with self.subTest(detail=candidate_detail, offset=offset, limit=limit), self.assertRaises(QueryValidationError):
+                normalize_detail_request({"dimensions": dimensions}, candidate_detail, offset, limit, sort, search, normalized, COLUMNS)
 
     def test_rejects_invalid_shapes_references_and_values(self):
         invalid = []

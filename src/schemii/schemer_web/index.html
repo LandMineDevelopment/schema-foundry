@@ -55,6 +55,12 @@
             </article>
           </template>
         </section>
+        <aside class="detail-drawer" id="detail-drawer" aria-label="Detail report" aria-hidden="true" inert>
+          <header class="detail-report-head"><button class="detail-report-heading" id="expand-detail-report" type="button" aria-expanded="true"><span class="eyebrow">Detail report</span><strong id="detail-report-title">Selected rows</strong><small id="detail-report-timestamp"></small></button><button id="view-detail-sql" type="button">View SQL</button><span class="shared-icon-button detail-close-spacer" aria-hidden="true"></span></header>
+          <div class="detail-report-controls"><div class="detail-filter-chips" id="detail-filter-chips" aria-label="Active detail filters"></div><label>Search<input id="detail-search" type="search" maxlength="256" placeholder="Search detail rows" /></label></div>
+          <div class="detail-report-body" id="detail-report-body" aria-live="polite"></div>
+          <footer class="detail-report-footer"><span id="detail-report-count"></span><div><button type="button" id="detail-previous">Previous</button><span id="detail-page"></span><button type="button" id="detail-next">Next</button></div></footer>
+        </aside>
       </main>
     </div>
 
@@ -84,7 +90,7 @@
     <dialog class="widget-editor-dialog" id="widget-editor-dialog">
       <div class="dialog-head"><div><span class="eyebrow">Widget name</span><input class="widget-editor-name" id="widget-editor-name" required maxlength="128" aria-label="Widget name" /><p>Configure this widget without affecting other dashboard widgets.</p></div><button id="close-widget-editor" type="button" aria-label="Close widget editor">x</button></div>
       <div class="widget-editor-layout">
-        <nav class="widget-editor-nav" role="tablist" aria-label="Widget configuration sections"><button class="active" role="tab" aria-controls="widget-source-editor" type="button" data-editor-section="source">Source</button><button role="tab" aria-controls="widget-query-editor" type="button" data-editor-section="query">Visualization</button><button role="tab" aria-controls="widget-query-editor" type="button" data-editor-section="filters">Filters <small>AND / OR</small></button><button role="tab" aria-controls="widget-query-editor" type="button" data-editor-section="sort">Sort <small>&amp; Limit</small></button></nav>
+        <nav class="widget-editor-nav" role="tablist" aria-label="Widget configuration sections"><button class="active" role="tab" aria-controls="widget-source-editor" type="button" data-editor-section="source">Source</button><button role="tab" aria-controls="widget-query-editor" type="button" data-editor-section="query">Visualization</button><button role="tab" aria-controls="widget-query-editor" type="button" data-editor-section="filters">Filters <small>AND / OR</small></button><button role="tab" aria-controls="widget-query-editor" type="button" data-editor-section="sort">Sort <small>&amp; Limit</small></button><button role="tab" aria-controls="widget-query-editor" type="button" data-editor-section="detail">Detail Report</button></nav>
         <section class="widget-source-editor" id="widget-source-editor" role="tabpanel"><div class="widget-source-selectors"><label>Connection<select id="widget-source-profile" aria-label="Widget source connection"></select></label><label>Namespace<select id="widget-source-namespace" aria-label="Widget source namespace"></select></label></div><div class="relation-browser"><div class="relation-browser-head"><strong>Relations</strong><span>Tables, views, and materialized views</span></div><p id="relation-browser-status" aria-live="polite">Select a connection and namespace.</p><div class="relation-list" id="relation-list"></div><section class="relation-detail" id="relation-detail" hidden></section></div></section>
         <section class="widget-query-editor" id="widget-query-editor" role="tabpanel" hidden><header><div><strong id="widget-query-heading">Groupings &amp; Measures</strong><p id="widget-query-copy">Choose result groupings and aggregate measures.</p></div><button class="button button-ghost" id="reset-widget-query" type="button">Reset query to saved</button></header><div class="query-editor-groups" id="widget-query-fields"></div><footer><label id="widget-query-limit-field" hidden>Result row limit<input id="widget-query-limit" type="number" min="1" max="500" value="100" /></label><p class="form-status" id="widget-query-status" aria-live="polite">Name and source save automatically. Query changes remain local until applied.</p><button class="button button-primary" id="apply-widget-query" type="button">Apply query &amp; run</button></footer></section>
       </div>
@@ -95,6 +101,7 @@
       <div class="executed-sql-body"><pre><code id="executed-sql-code"></code></pre><section id="executed-sql-parameters" hidden><strong>Bound parameters</strong><pre><code id="executed-sql-parameter-code"></code></pre></section></div>
     </dialog>
 
-    <script src="/shared/postgres-client.js"></script><script src="app.js"></script>
+    <div class="app-tooltip" id="app-tooltip" role="tooltip" hidden></div>
+    <script src="/shared/postgres-client.js"></script><script src="/shared/ui-components.js"></script><script src="app.js"></script>
   </body>
 </html>

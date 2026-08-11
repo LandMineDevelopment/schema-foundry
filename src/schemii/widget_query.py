@@ -26,6 +26,10 @@ class QueryValidationError(ValueError):
     pass
 
 
+def is_searchable_text_type(value: Any) -> bool:
+    return isinstance(value, str) and bool(TEXT_TYPE_RE.fullmatch(value))
+
+
 def _text(value: Any, field: str, maximum: int = 128) -> str:
     if not isinstance(value, str) or not value or value != value.strip() or len(value) > maximum or any(ord(char) < 32 or ord(char) == 127 for char in value):
         raise QueryValidationError(f"{field} must be a trimmed string up to {maximum} characters")
@@ -44,7 +48,7 @@ def _bounded_list(value: Any, field: str, minimum: int, maximum: int) -> list[An
     return value
 
 
-def _format(value: Any) -> dict[str, Any]:
+def normalize_number_format(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict) or "style" not in value:
         raise QueryValidationError("measure numberFormat is invalid")
     style = value.get("style")
@@ -74,6 +78,38 @@ def _filter_operators(column_type: str) -> set[str]:
     if NUMERIC_TYPE_RE.fullmatch(column_type) or TEMPORAL_TYPE_RE.fullmatch(column_type):
         return ORDER_FILTER_OPERATORS
     return {"eq", "neq", "in", "not_in"} | NULL_FILTER_OPERATORS
+
+
+def _compile_filter_groups(filter_groups: list[dict[str, Any]], quote: Callable[[str], str]) -> tuple[list[list[str]], list[Any]]:
+    parameters = []
+    predicate_groups = []
+    operators = {"eq": "=", "neq": "<>", "lt": "<", "lte": "<=", "gt": ">", "gte": ">="}
+    for group in filter_groups:
+        predicates = []
+        for item in group["conditions"]:
+            column = quote(item["column"])
+            operator = item["operator"]
+            if operator in operators:
+                predicates.append(f"{column} {operators[operator]} %s")
+                parameters.append(item["values"][0])
+            elif operator == "between":
+                predicates.append(f"{column} BETWEEN %s AND %s")
+                parameters.extend(item["values"])
+            elif operator in {"in", "not_in"}:
+                placeholders = ", ".join("%s" for _ in item["values"])
+                predicates.append(f"{column} {'NOT IN' if operator == 'not_in' else 'IN'} ({placeholders})")
+                parameters.extend(item["values"])
+            elif operator in {"like", "contains", "starts_with", "ends_with"}:
+                value = item["values"][0]
+                if operator != "like":
+                    value = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                    value = f"%{value}%" if operator == "contains" else f"{value}%" if operator == "starts_with" else f"%{value}"
+                predicates.append(f"{column} LIKE %s ESCAPE E'\\\\'")
+                parameters.append(value)
+            else:
+                predicates.append(f"{column} IS {'NOT ' if operator == 'is_not_null' else ''}NULL")
+        predicate_groups.append(predicates)
+    return predicate_groups, parameters
 
 
 def normalize_query(query: Any, source_columns: list[dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -143,7 +179,7 @@ def normalize_query(query: Any, source_columns: list[dict[str, Any]] | None = No
         measures.append({
             "id": item_id, "label": _text(item.get("label"), "measure label"), "column": column,
             "aggregation": aggregation, "distinct": distinct, "nullBehavior": null_behavior,
-            "numberFormat": _format(item.get("numberFormat")),
+            "numberFormat": normalize_number_format(item.get("numberFormat")),
         })
 
     raw_filters = _bounded_list(query.get("filters"), "filters", 0, 32 if input_version == 2 else 64)
@@ -204,6 +240,82 @@ def normalize_query(query: Any, source_columns: list[dict[str, Any]] | None = No
     return {"version": 2, "dimensions": dimensions, "measures": measures, "filters": filter_groups, "sort": sorts, "limit": limit}
 
 
+def normalize_detail_request(
+    selection: Any, detail: Any, offset: Any, limit: Any, sort: Any, search: Any,
+    query: dict[str, Any], source_columns: list[dict[str, Any]],
+) -> dict[str, Any]:
+    columns_by_name = {column.get("name"): column for column in source_columns}
+    dimensions_by_id = {item["id"]: item for item in query["dimensions"]}
+    measures_by_id = {item["id"]: item for item in query["measures"]}
+    if not isinstance(selection, dict) or set(selection) not in ({"dimensions"}, {"dimensions", "measureId"}):
+        raise QueryValidationError("selection fields are invalid")
+    selected_dimensions = selection.get("dimensions")
+    if not isinstance(selected_dimensions, list) or len(selected_dimensions) != len(dimensions_by_id):
+        raise QueryValidationError("selection must contain every executed dimension exactly once")
+    selected_values = {}
+    seen_dimensions = set()
+    for item in selected_dimensions:
+        if not isinstance(item, dict) or set(item) != {"targetId", "value"}:
+            raise QueryValidationError("selected dimension fields are invalid")
+        target_id = item.get("targetId")
+        value = item.get("value")
+        if target_id not in dimensions_by_id or target_id in seen_dimensions or isinstance(value, (dict, list)) or isinstance(value, float) and not math.isfinite(value):
+            raise QueryValidationError("selected dimension is invalid or duplicated")
+        seen_dimensions.add(target_id)
+        selected_values[target_id] = value
+    if seen_dimensions != set(dimensions_by_id):
+        raise QueryValidationError("selection must contain every executed dimension exactly once")
+    normalized_selection = [
+        {"targetId": target_id, "value": selected_values[target_id]}
+        for target_id in dimensions_by_id
+    ]
+    measure_id = selection.get("measureId")
+    if "measureId" in selection and measure_id not in measures_by_id:
+        raise QueryValidationError("selected measure is not in the executed query")
+
+    if not isinstance(detail, dict) or set(detail) != {"version", "columns", "rowIdentifier"} or detail.get("version") != 1 or isinstance(detail.get("version"), bool):
+        raise QueryValidationError("detail configuration fields are invalid")
+    detail_columns = []
+    detail_ids = set()
+    detail_source_columns = set()
+    for item in _bounded_list(detail.get("columns"), "detail columns", 1, 64):
+        if not isinstance(item, dict) or set(item) != {"id", "label", "column", "numberFormat", "searchable"}:
+            raise QueryValidationError("detail column fields are invalid")
+        item_id = _id(item.get("id"), "detail column ID")
+        column_name = _text(item.get("column"), "detail source column", 63)
+        source_column = columns_by_name.get(column_name)
+        if item_id in detail_ids or column_name in detail_source_columns or source_column is None or not isinstance(item.get("searchable"), bool):
+            raise QueryValidationError("detail column identity or source binding is invalid or duplicated")
+        if item["searchable"] and not is_searchable_text_type(source_column.get("type")):
+            raise QueryValidationError("searchable detail columns must use PostgreSQL text columns")
+        detail_ids.add(item_id)
+        detail_source_columns.add(column_name)
+        detail_columns.append({
+            "id": item_id, "label": _text(item.get("label"), "detail column label"), "column": column_name,
+            "numberFormat": normalize_number_format(item.get("numberFormat")), "searchable": item["searchable"],
+        })
+    row_identifier = detail.get("rowIdentifier")
+    if row_identifier is not None and (not isinstance(row_identifier, str) or row_identifier not in columns_by_name):
+        raise QueryValidationError("detail row identifier must be null or a source column")
+    if isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset <= 10_000_000:
+        raise QueryValidationError("offset must be an integer from 0 to 10000000")
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+        raise QueryValidationError("limit must be an integer from 1 to 100")
+    if not isinstance(search, str) or len(search) > 256 or any(ord(char) < 32 or ord(char) == 127 for char in search):
+        raise QueryValidationError("search must be a string up to 256 characters")
+    if search and not any(item["searchable"] for item in detail_columns):
+        raise QueryValidationError("search requires a configured searchable text column")
+    if sort is not None:
+        if not isinstance(sort, dict) or set(sort) != {"targetId", "direction", "nulls"} or sort.get("targetId") not in detail_ids or sort.get("direction") not in {"asc", "desc"} or sort.get("nulls") not in {"first", "last"}:
+            raise QueryValidationError("detail sort is invalid")
+        sort = {key: sort[key] for key in ("targetId", "direction", "nulls")}
+    return {
+        "selection": {"dimensions": normalized_selection, **({"measureId": measure_id} if "measureId" in selection else {})},
+        "detail": {"version": 1, "columns": detail_columns, "rowIdentifier": row_identifier},
+        "offset": offset, "limit": limit, "sort": sort, "search": search,
+    }
+
+
 def compile_query(source: dict[str, Any], query: dict[str, Any], quote: Callable[[str], str]) -> dict[str, Any]:
     dimensions = query["dimensions"]
     measures = query["measures"]
@@ -232,34 +344,7 @@ def compile_query(source: dict[str, Any], query: dict[str, Any], quote: Callable
             "aggregation": item["aggregation"], "distinct": item["distinct"],
             "nullBehavior": item["nullBehavior"], "numberFormat": item["numberFormat"],
         })
-    parameters = []
-    predicate_groups = []
-    operators = {"eq": "=", "neq": "<>", "lt": "<", "lte": "<=", "gt": ">", "gte": ">="}
-    for group in query["filters"]:
-        predicates = []
-        for item in group["conditions"]:
-            column = quote(item["column"])
-            operator = item["operator"]
-            if operator in operators:
-                predicates.append(f"{column} {operators[operator]} %s")
-                parameters.append(item["values"][0])
-            elif operator == "between":
-                predicates.append(f"{column} BETWEEN %s AND %s")
-                parameters.extend(item["values"])
-            elif operator in {"in", "not_in"}:
-                placeholders = ", ".join("%s" for _ in item["values"])
-                predicates.append(f"{column} {'NOT IN' if operator == 'not_in' else 'IN'} ({placeholders})")
-                parameters.extend(item["values"])
-            elif operator in {"like", "contains", "starts_with", "ends_with"}:
-                value = item["values"][0]
-                if operator != "like":
-                    value = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-                    value = f"%{value}%" if operator == "contains" else f"{value}%" if operator == "starts_with" else f"%{value}"
-                predicates.append(f"{column} LIKE %s ESCAPE E'\\\\'")
-                parameters.append(value)
-            else:
-                predicates.append(f"{column} IS {'NOT ' if operator == 'is_not_null' else ''}NULL")
-        predicate_groups.append(predicates)
+    predicate_groups, parameters = _compile_filter_groups(query["filters"], quote)
     relation = f'{quote(source["namespace"])}.{quote(source["relation"])}'
     sql = "SELECT\n    " + ",\n    ".join(select) + f"\nFROM {relation}"
     if predicate_groups:
@@ -275,3 +360,61 @@ def compile_query(source: dict[str, Any], query: dict[str, Any], quote: Callable
     sql += "\nLIMIT %s"
     parameters.append(query["limit"] + 1)
     return {"sql": sql, "parameters": parameters, "columns": output, "aliases": [aliases[item["id"]] for item in dimensions + measures]}
+
+
+def compile_detail_query(
+    source: dict[str, Any], query: dict[str, Any], request: dict[str, Any],
+    source_columns: list[dict[str, Any]], quote: Callable[[str], str],
+) -> dict[str, Any]:
+    detail_columns = request["detail"]["columns"]
+    source_by_name = {column["name"]: column for column in source_columns}
+    dimensions_by_id = {item["id"]: item for item in query["dimensions"]}
+    measures_by_id = {item["id"]: item for item in query["measures"]}
+    aliases = {item["id"]: f"__schemer_c{index}" for index, item in enumerate(detail_columns)}
+    output_columns = [{
+        "id": item["id"], "label": item["label"], "sourceColumn": item["column"],
+        "type": source_by_name[item["column"]]["type"], "nullable": source_by_name[item["column"]]["nullable"],
+        "numberFormat": item["numberFormat"], "searchable": item["searchable"],
+        "operators": sorted(_filter_operators(str(source_by_name[item["column"]]["type"]))),
+    } for item in detail_columns]
+    predicate_groups, parameters = _compile_filter_groups(query["filters"], quote)
+    predicates = []
+    if predicate_groups:
+        formatted_groups = ["(\n        " + "\n        AND ".join(group) + "\n    )" for group in predicate_groups]
+        predicates.append("(\n    " + "\n    OR ".join(formatted_groups) + "\n)")
+    for selected in request["selection"]["dimensions"]:
+        column = quote(dimensions_by_id[selected["targetId"]]["column"])
+        if selected["value"] is None:
+            predicates.append(f"{column} IS NULL")
+        else:
+            predicates.append(f"{column} = %s")
+            parameters.append(selected["value"])
+    measure_id = request["selection"].get("measureId")
+    if measure_id is not None and measures_by_id[measure_id]["aggregation"] != "count_rows":
+        predicates.append(f'{quote(measures_by_id[measure_id]["column"])} IS NOT NULL')
+    searchable = [quote(item["column"]) for item in detail_columns if item["searchable"]]
+    if request["search"] and searchable:
+        escaped = request["search"].replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        predicates.append("(" + " OR ".join(f"{column} ILIKE %s ESCAPE E'\\\\'" for column in searchable) + ")")
+        parameters.extend(f"%{escaped}%" for _ in searchable)
+    relation = f'{quote(source["namespace"])}.{quote(source["relation"])}'
+    where = "\nWHERE\n    " + "\n    AND ".join(predicates) if predicates else ""
+    count_sql = f'SELECT pg_catalog.count(*) AS {quote("__schemer_count")}\nFROM {relation}{where}'
+    select = ",\n    ".join(f'{quote(item["column"])} AS {quote(aliases[item["id"]])}' for item in detail_columns)
+    select_sql = f"SELECT\n    {select}\nFROM {relation}{where}"
+    sort = request["sort"]
+    row_identifier = request["detail"]["rowIdentifier"]
+    if sort is not None:
+        sort_parts = [f'{quote(aliases[sort["targetId"]])} {sort["direction"].upper()} NULLS {sort["nulls"].upper()}']
+        sorted_column = next(item["column"] for item in detail_columns if item["id"] == sort["targetId"])
+        if row_identifier is not None and row_identifier != sorted_column:
+            sort_parts.append(f'{quote(row_identifier)} ASC NULLS LAST')
+        select_sql += "\nORDER BY\n    " + ",\n    ".join(sort_parts)
+    elif row_identifier is not None:
+        select_sql += f'\nORDER BY\n    {quote(row_identifier)} ASC NULLS LAST'
+    select_sql += "\nLIMIT %s OFFSET %s"
+    return {
+        "countSql": count_sql, "countParameters": list(parameters),
+        "sql": select_sql, "parameters": [*parameters, request["limit"], request["offset"]],
+        "columns": output_columns, "aliases": [aliases[item["id"]] for item in detail_columns],
+    }

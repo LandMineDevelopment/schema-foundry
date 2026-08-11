@@ -28,13 +28,6 @@
 .ai-rail-status { position: absolute; top: 5px; right: 5px; width: 5px; height: 5px; border-radius: 50%; background: #5a6270; }
 .ai-rail-status.available { background: #72d4a0; box-shadow: 0 0 7px rgba(114, 212, 160, .7); }
 
-.app-tooltip { position: fixed; z-index: 1000; width: max-content; max-width: min(260px, calc(100vw - 16px)); padding: 5px 8px; pointer-events: none; opacity: 0; border: 1px solid var(--line); border-radius: 4px; color: #cdd5df; background: #171c24; box-shadow: 0 5px 16px rgba(0, 0, 0, .28); font-size: 10px; line-height: 1.35; white-space: normal; transition: opacity .15s, transform .15s; }
-.app-tooltip[data-placement="right"] { transform: translateX(-4px); }
-.app-tooltip[data-placement="left"] { transform: translateX(4px); }
-.app-tooltip[data-placement="top"] { transform: translateY(4px); }
-.app-tooltip[data-placement="bottom"] { transform: translateY(-4px); }
-.app-tooltip.visible { opacity: 1; transform: translate(0); }
-.app-tooltip[hidden] { display: none; }
 
 .workspace { position: absolute; inset: 0; overflow: hidden; background: #0c1016; cursor: default; touch-action: none; }
 .workspace.panning { cursor: grabbing; }
@@ -245,13 +238,6 @@
 .multi-selection-notice { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 20px; border-bottom: 1px solid #55451f; color: #d8c99e; background: #1d1910; }
 .multi-selection-notice strong { color: var(--accent); font-size: 10px; }
 .multi-selection-notice span { color: #887b5c; font-size: 9px; text-align: right; }
-.icon-button { display: grid; place-items: center; width: 27px; height: 27px; padding: 0; border: 1px solid var(--line); border-radius: 5px; color: #747f8e; background: transparent; cursor: pointer; }
-.icon-button:hover { color: var(--accent); border-color: #675426; background: #211b0f; }
-.icon-button.active { color: var(--accent); border-color: #675426; background: #211b0f; }
-.icon-button.danger:hover { color: var(--danger); border-color: #65323a; background: #26171b; }
-.icon-button:disabled { opacity: .35; cursor: not-allowed; }
-.icon-button:disabled:hover { color: #747f8e; border-color: var(--line); background: transparent; }
-.icon-button svg { width: 13px; fill: none; stroke: currentColor; stroke-width: 1.7; }
 .inspector-section { padding: 18px 20px; border-bottom: 1px solid var(--line); }
 .section-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .section-title h3 { margin: 0; color: #9ca7b5; font-size: 9px; text-transform: uppercase; letter-spacing: .12em; }

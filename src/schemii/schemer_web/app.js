@@ -51,7 +51,18 @@ const elements = {
   sqlStatus: document.querySelector("#executed-sql-status"),
   sqlCode: document.querySelector("#executed-sql-code"),
   sqlParameters: document.querySelector("#executed-sql-parameters"),
-  sqlParameterCode: document.querySelector("#executed-sql-parameter-code")
+  sqlParameterCode: document.querySelector("#executed-sql-parameter-code"),
+  detailDrawer: document.querySelector("#detail-drawer"),
+  detailTitle: document.querySelector("#detail-report-title"),
+  detailTimestamp: document.querySelector("#detail-report-timestamp"),
+  detailFilters: document.querySelector("#detail-filter-chips"),
+  detailSearch: document.querySelector("#detail-search"),
+  detailBody: document.querySelector("#detail-report-body"),
+  detailCount: document.querySelector("#detail-report-count"),
+  detailPage: document.querySelector("#detail-page"),
+  detailPrevious: document.querySelector("#detail-previous"),
+  detailNext: document.querySelector("#detail-next"),
+  tooltip: document.querySelector("#app-tooltip")
 };
 
 let sessionToken = null;
@@ -85,6 +96,7 @@ let queryExecutionGeneration = 0;
 let widgetQueryDraft = null;
 let widgetTableDraft = null;
 let widgetVisualizationDraft = null;
+let widgetDetailDraft = null;
 let widgetEditorSection = "source";
 let widgetEditorGeneration = 0;
 let widgetQueryApplySession = null;
@@ -93,9 +105,45 @@ const widgetQueryResults = new Map();
 const widgetQueryExecutionTokens = new Map();
 const widgetTablePages = new Map();
 const executedSqlByResult = new Map();
+let detailRequestToken = null;
+let detailContext = null;
+let detailReturnFocus = null;
+let detailSearchTimer = null;
 const postgres = window.SchemiiShared.createPostgresClient({
   getToken: () => sessionToken,
   setToken: token => { sessionToken = token; }
+});
+const tooltipController = window.SchemiiShared.createTooltipController({ element: elements.tooltip });
+
+function sharedIconButton(options) {
+  return window.SchemiiShared.createIconButton(options);
+}
+
+function replaceWithSharedIcon(id, options) {
+  const current = document.querySelector(`#${id}`);
+  if (!current) return null;
+  const replacement = sharedIconButton({ ...options, id });
+  replacement.hidden = current.hidden;
+  replacement.disabled = current.disabled;
+  current.replaceWith(replacement);
+  return replacement;
+}
+
+for (const [id, label] of [
+  ["close-connections", "Close data sources"],
+  ["close-dashboard-form", "Close dashboard form"],
+  ["close-widget-editor", "Close widget editor"],
+  ["close-executed-sql", "Close executed SQL"],
+  ["close-widget-inspector", "Close selected population"],
+]) replaceWithSharedIcon(id, { icon: "close", label, tooltip: label });
+replaceWithSharedIcon("view-inspector-sql", { icon: "sql", label: "View selected population SQL", tooltip: "View SQL" });
+replaceWithSharedIcon("view-detail-sql", { icon: "sql", label: "View detail report SQL", tooltip: "View SQL", className: "detail-sql-button" });
+replaceWithSharedIcon("connections-button", { icon: "database", label: "Data sources", tooltip: "Data sources", placement: "bottom" });
+elements.editModeButton = replaceWithSharedIcon("edit-mode-button", { icon: "edit", label: "Edit dashboard", tooltip: "Edit dashboard", placement: "bottom" });
+elements.addWidgetButton = replaceWithSharedIcon("add-widget-button", { icon: "add", label: "Add widget", tooltip: "Add widget", placement: "bottom" });
+replaceWithSharedIcon("refresh-button", { icon: "refresh", label: "Refresh dashboard", tooltip: "Refresh dashboard" });
+window.SchemiiShared.decorateIconControl(document.querySelector("#dashboard-menu > summary"), {
+  icon: "more", label: "Dashboard actions", tooltip: "Dashboard actions", placement: "bottom",
 });
 
 function clone(value) {
@@ -111,6 +159,7 @@ function invalidateWidgetRuntime(widgetId) {
   sourceVerification.delete(widgetId);
   sourceVerificationGeneration += 1;
   queryExecutionGeneration += 1;
+  if (detailContext?.widgetId === widgetId) closeDetailReport(false);
 }
 
 function isMobileLayout() {
@@ -362,6 +411,38 @@ function reconcileTablePresentation(query, presentation = null) {
     }
   }
   return { version: 1, columns: ordered, pageSize: [10, 25, 50, 100].includes(presentation?.pageSize) ? presentation.pageSize : 25 };
+}
+
+function defaultDetailReport(source) {
+  return {
+    version: 1,
+    columns: (source?.columns ?? []).slice(0, 64).map(column => ({ sourceColumn: column.name, label: column.name, width: 160, hidden: false, searchable: textPostgresType(column.type), numberFormat: { style: "auto" } })),
+    defaultSort: null,
+    rowIdentifier: null,
+    pageSize: 25
+  };
+}
+
+function reconcileDetailReport(source, detail = null) {
+  const fallback = defaultDetailReport(source);
+  const sourceColumns = new Map((source?.columns ?? []).map(column => [column.name, column]));
+  const saved = new Map((detail?.columns ?? []).filter(item => sourceColumns.has(item.sourceColumn)).map(item => [item.sourceColumn, item]));
+  const orderedNames = (detail?.columns ?? []).map(item => item.sourceColumn).filter((name, index, names) => sourceColumns.has(name) && names.indexOf(name) === index);
+  for (const column of source?.columns ?? []) if (orderedNames.length < 64 && !orderedNames.includes(column.name)) orderedNames.push(column.name);
+  const columns = orderedNames.map(sourceColumn => {
+    const value = saved.get(sourceColumn) ?? fallback.columns.find(item => item.sourceColumn === sourceColumn);
+    return {
+      sourceColumn,
+      label: typeof value?.label === "string" && value.label.trim() ? value.label.trim().slice(0, 128) : sourceColumn,
+      width: Number.isInteger(value?.width) && value.width >= 64 && value.width <= 1024 ? value.width : 160,
+      hidden: Boolean(value?.hidden),
+      searchable: Boolean(value?.searchable) && textPostgresType(sourceColumns.get(sourceColumn).type),
+      numberFormat: ["auto", "integer", "decimal", "currency", "percent"].includes(value?.numberFormat?.style) ? clone(value.numberFormat) : { style: "auto" }
+    };
+  });
+  const defaultSort = orderedNames.includes(detail?.defaultSort?.sourceColumn) ? { sourceColumn: detail.defaultSort.sourceColumn, direction: detail.defaultSort.direction === "desc" ? "desc" : "asc", nulls: detail.defaultSort.nulls === "first" ? "first" : "last" } : null;
+  const rowIdentifier = sourceColumns.has(detail?.rowIdentifier) ? detail.rowIdentifier : null;
+  return { version: 1, columns, defaultSort, rowIdentifier, pageSize: [10, 25, 50, 100].includes(detail?.pageSize) ? detail.pageSize : 25 };
 }
 
 function defaultVisualization(query) {
@@ -753,6 +834,93 @@ function editorVisualizationSection() {
   return section;
 }
 
+function editorDetailSection(source) {
+  const section = document.createElement("section");
+  section.className = "query-editor-group detail-editor-group";
+  const header = document.createElement("header");
+  const heading = document.createElement("div");
+  const title = document.createElement("strong");
+  title.textContent = "Detail report columns";
+  const copy = document.createElement("p");
+  copy.textContent = "Configure source rows shown after drilling into an aggregate mark.";
+  heading.append(title, copy);
+  header.append(heading);
+  const rows = document.createElement("div");
+  rows.className = "query-editor-rows";
+  widgetDetailDraft.columns.forEach((item, index) => {
+    const row = document.createElement("div");
+    row.className = "query-editor-row detail-column-row";
+    const sourceName = document.createElement("strong");
+    sourceName.className = "table-column-target";
+    sourceName.textContent = item.sourceColumn;
+    const label = queryInput(item.label, value => { item.label = value.trim() || item.sourceColumn; });
+    label.maxLength = 128;
+    const width = queryInput(item.width, value => { item.width = Math.max(64, Math.min(1024, Number(value) || 160)); }, "number");
+    width.min = "64";
+    width.max = "1024";
+    const shown = document.createElement("input");
+    shown.type = "checkbox";
+    shown.checked = !item.hidden;
+    shown.disabled = !item.hidden && widgetDetailDraft.columns.filter(column => !column.hidden).length === 1;
+    shown.addEventListener("change", () => { item.hidden = !shown.checked; });
+    const searchable = document.createElement("input");
+    searchable.type = "checkbox";
+    searchable.checked = item.searchable;
+    searchable.disabled = !textPostgresType(source?.columns?.find(column => column.name === item.sourceColumn)?.type ?? "");
+    searchable.addEventListener("change", () => { item.searchable = searchable.checked; });
+    const sourceColumn = source?.columns?.find(column => column.name === item.sourceColumn);
+    const numberFormat = querySelect(
+      [["auto", "Automatic"], ["integer", "Integer"], ["decimal", "Decimal"], ["currency", "Currency"], ["percent", "Percent"]],
+      item.numberFormat.style,
+      value => {
+        item.numberFormat = value === "currency" ? { style: value, currency: "USD", fractionDigits: 2 } : ["decimal", "percent"].includes(value) ? { style: value, fractionDigits: 2 } : { style: value };
+        renderWidgetQueryDraft();
+      }
+    );
+    numberFormat.disabled = !numericPostgresType(sourceColumn?.type ?? "");
+    const formatControls = [queryLabel("Number format", numberFormat)];
+    if (item.numberFormat.style === "currency") {
+      const currency = queryInput(item.numberFormat.currency, value => { item.numberFormat.currency = value.trim().toUpperCase(); });
+      currency.maxLength = 3;
+      formatControls.push(queryLabel("Currency", currency));
+    }
+    if (["decimal", "currency", "percent"].includes(item.numberFormat.style)) {
+      const fractionDigits = queryInput(item.numberFormat.fractionDigits, value => { item.numberFormat.fractionDigits = Number(value); }, "number");
+      fractionDigits.min = "0";
+      fractionDigits.max = "20";
+      formatControls.push(queryLabel("Decimal places", fractionDigits));
+    }
+    const order = document.createElement("div");
+    order.className = "sort-priority detail-column-order";
+    const orderLabel = document.createElement("span");
+    orderLabel.textContent = `Column ${index + 1}`;
+    order.append(orderLabel);
+    for (const [labelText, offset] of [["Up", -1], ["Down", 1]]) {
+      const move = document.createElement("button");
+      move.type = "button";
+      move.className = "sort-order-button";
+      move.textContent = labelText;
+      move.disabled = index + offset < 0 || index + offset >= widgetDetailDraft.columns.length;
+      move.addEventListener("click", () => { widgetDetailDraft.columns.splice(index, 1); widgetDetailDraft.columns.splice(index + offset, 0, item); renderWidgetQueryDraft(); });
+      order.append(move);
+    }
+    row.append(sourceName, queryLabel("Display label", label), queryLabel("Width (px)", width), queryLabel("Show", shown), queryLabel("Searchable", searchable), ...formatControls, order);
+    rows.append(row);
+  });
+  const settings = document.createElement("div");
+  settings.className = "query-editor-row detail-settings-row";
+  const sourceOptions = [["", "No default sort"], ...widgetDetailDraft.columns.map(column => [column.sourceColumn, column.sourceColumn])];
+  const sort = widgetDetailDraft.defaultSort ?? { sourceColumn: "", direction: "asc", nulls: "last" };
+  settings.append(
+    queryLabel("Default sort", querySelect(sourceOptions, sort.sourceColumn, value => { widgetDetailDraft.defaultSort = value ? { ...sort, sourceColumn: value } : null; renderWidgetQueryDraft(); })),
+    queryLabel("Direction", querySelect([["asc", "Ascending"], ["desc", "Descending"]], sort.direction, value => { if (widgetDetailDraft.defaultSort) widgetDetailDraft.defaultSort.direction = value; })),
+    queryLabel("Row identifier", querySelect([["", "No row identifier"], ...(source?.columns ?? []).map(column => [column.name, column.name])], widgetDetailDraft.rowIdentifier, value => { widgetDetailDraft.rowIdentifier = value || null; })),
+    queryLabel("Rows per page", querySelect([["10", "10"], ["25", "25"], ["50", "50"], ["100", "100"]], String(widgetDetailDraft.pageSize), value => { widgetDetailDraft.pageSize = Number(value); }))
+  );
+  section.append(header, rows, settings);
+  return section;
+}
+
 function markVisualizationRole(section, label, required = false) {
   section.classList.add(required ? "visualization-role-required" : "visualization-role-linked");
   const badge = document.createElement("span");
@@ -783,6 +951,7 @@ function renderWidgetQueryDraft() {
   document.querySelector("#apply-widget-query").disabled = false;
   widgetTableDraft = reconcileTablePresentation(widgetQueryDraft, widgetTableDraft);
   widgetVisualizationDraft = reconcileVisualization(widgetQueryDraft, widgetVisualizationDraft);
+  widgetDetailDraft = reconcileDetailReport(widget.configuration.source, widgetDetailDraft);
   const visualizationMode = widgetVisualizationDraft.mode;
   const activeRoles = visualizationRoleIds(visualizationMode, widgetVisualizationDraft, widgetQueryDraft);
   const activeDimensionIds = new Set(activeRoles.dimensionIds);
@@ -1080,6 +1249,7 @@ function renderWidgetQueryDraft() {
   pageSizeRow.append(queryLabel("Rows per page", querySelect([["10", "10"], ["25", "25"], ["50", "50"], ["100", "100"]], String(widgetTableDraft.pageSize), value => { widgetTableDraft.pageSize = Number(value); })));
   tableRows.append(pageSizeRow);
   const visualization = editorVisualizationSection();
+  const detailReport = editorDetailSection(widget.configuration.source);
   if (["bar", "line", "donut"].includes(visualizationMode)) {
     markVisualizationRole(dimensions, activeRoles.dimensionIds.length ? "Active dimension" : "Choose a dimension", !activeRoles.dimensionIds.length);
   }
@@ -1092,7 +1262,8 @@ function renderWidgetQueryDraft() {
   const views = {
     query: { heading: "Visualization, Dimensions & Measures", copy: "Each visualization exposes only the dimensions and measures it consumes.", sections: querySections },
     filters: { heading: "Filters", copy: "Build AND conditions inside separate OR groups.", sections: [filters] },
-    sort: { heading: "Sort, Columns & Limit", copy: "Control SQL ordering, aggregate table presentation, and bounded result sizes.", sections: [sorting, tablePresentation] }
+    sort: { heading: "Sort, Columns & Limit", copy: "Control SQL ordering, aggregate table presentation, and bounded result sizes.", sections: [sorting, tablePresentation] },
+    detail: { heading: "Detail Report", copy: "Choose the source columns and defaults used by drill-through reports.", sections: [detailReport] }
   };
   const view = views[widgetEditorSection] ?? views.query;
   elements.widgetQueryHeading.textContent = view.heading;
@@ -1229,11 +1400,13 @@ function renderRelationDetail(descriptor) {
     const savedQuery = sameSource ? widget.configuration?.query : null;
     const savedTable = sameSource ? widget.configuration?.table : null;
     const savedVisualization = sameSource ? widget.configuration?.visualization : null;
-    widget.configuration = { source, ...(savedQuery ? { query: savedQuery, ...(savedTable ? { table: savedTable } : {}), ...(savedVisualization ? { visualization: savedVisualization } : {}) } : {}) };
+    const savedDetail = sameSource ? widget.configuration?.detail : null;
+    widget.configuration = { source, ...(savedQuery ? { query: savedQuery, ...(savedTable ? { table: savedTable } : {}), ...(savedVisualization ? { visualization: savedVisualization } : {}), ...(savedDetail ? { detail: savedDetail } : {}) } : {}) };
     if (!savedQuery) widget.kind = "placeholder";
     widgetQueryDraft = clone(savedQuery ?? defaultWidgetQuery());
     widgetTableDraft = reconcileTablePresentation(widgetQueryDraft, savedTable);
     widgetVisualizationDraft = reconcileVisualization(widgetQueryDraft, savedVisualization);
+    widgetDetailDraft = reconcileDetailReport(source, savedDetail);
     if (!sameSource) {
       invalidateWidgetRuntime(widget.id);
     }
@@ -1249,6 +1422,7 @@ function renderRelationDetail(descriptor) {
     widgetQueryDraft = null;
     widgetTableDraft = null;
     widgetVisualizationDraft = null;
+    widgetDetailDraft = null;
     invalidateWidgetRuntime(widget.id);
     assignmentStatus.textContent = `Cleared source from ${widget.title}.`;
     markDashboardChanged(true);
@@ -1352,6 +1526,7 @@ async function loadRelations(profile, namespace) {
 }
 
 async function selectProfile(profile) {
+  if (detailContext && detailContext.source.profileId !== profile.id) closeDetailReport(false);
   elements.namespaceSelect.disabled = true;
   elements.namespaceSelect.replaceChildren(new Option("Loading namespaces...", ""));
   try {
@@ -1402,6 +1577,7 @@ async function openWidgetEditor(widgetId) {
   widgetQueryDraft = clone(widget.configuration?.query ?? defaultWidgetQuery());
   widgetTableDraft = reconcileTablePresentation(widgetQueryDraft, widget.configuration?.table);
   widgetVisualizationDraft = reconcileVisualization(widgetQueryDraft, widget.configuration?.visualization);
+  widgetDetailDraft = reconcileDetailReport(widget.configuration?.source, widget.configuration?.detail);
   elements.widgetEditorName.disabled = false;
   document.querySelector("#reset-widget-query").disabled = false;
   elements.widgetQueryLimit.disabled = false;
@@ -1808,6 +1984,9 @@ function renderQueryResult(card, widget) {
       values: values[index] === null ? [] : [values[index]]
     }));
     row.dataset.drillLineage = JSON.stringify({ dimensions, filterGroups: execution.result.lineage?.filterGroups ?? [] });
+    row.tabIndex = 0;
+    row.setAttribute("role", "button");
+    row.setAttribute("aria-label", "Open detail rows for this aggregate row");
     for (const { presentation: item, column, index } of visibleColumns) {
       const value = values[index];
       const cell = document.createElement("td");
@@ -1822,6 +2001,9 @@ function renderQueryResult(card, widget) {
       }
       if (column.kind === "measure") {
         cell.classList.add("drill-eligible");
+        cell.tabIndex = 0;
+        cell.setAttribute("role", "button");
+        cell.setAttribute("aria-label", `Open detail rows for ${item.label}`);
         cell.dataset.drillLineage = JSON.stringify({ dimensions, measure: execution.result.lineage?.measures?.find(measure => measure.id === column.id) ?? column, filterGroups: execution.result.lineage?.filterGroups ?? [] });
       }
       row.append(cell);
@@ -1966,40 +2148,18 @@ function dashboardWidgetElement(widget) {
   }
   const oldMenu = card.querySelector("header > button");
   oldMenu?.remove();
-  const viewSql = document.createElement("button");
-  viewSql.type = "button";
-  viewSql.className = "widget-sql-button";
+  const viewSql = sharedIconButton({ icon: "sql", label: `View SQL for ${widget.title}`, tooltip: "View SQL", className: "widget-sql-button" });
   viewSql.dataset.action = "view-widget-sql";
-  viewSql.textContent = "View SQL";
-  viewSql.setAttribute("aria-label", `View SQL for ${widget.title}`);
   const controls = document.createElement("div");
   controls.className = "widget-edit-controls";
   const widgetIndex = activeDashboard?.dashboard.widgets.findIndex(item => item.id === widget.id) ?? -1;
-  const edit = document.createElement("button");
-  edit.type = "button";
-  edit.dataset.action = "edit-widget";
-  edit.textContent = "Edit";
-  edit.setAttribute("aria-label", `Edit ${widget.title}`);
-  const moveEarlier = document.createElement("button");
-  moveEarlier.type = "button";
-  moveEarlier.dataset.action = "move-widget-earlier";
-  moveEarlier.textContent = "Earlier";
+  const edit = sharedIconButton({ icon: "edit", label: `Edit ${widget.title}`, tooltip: "Edit widget", dataset: { action: "edit-widget" } });
+  const moveEarlier = sharedIconButton({ icon: "earlier", label: `Move ${widget.title} earlier`, tooltip: "Move earlier", dataset: { action: "move-widget-earlier" } });
   moveEarlier.disabled = widgetIndex <= 0;
-  moveEarlier.setAttribute("aria-label", `Move ${widget.title} earlier`);
-  const moveLater = document.createElement("button");
-  moveLater.type = "button";
-  moveLater.dataset.action = "move-widget-later";
-  moveLater.textContent = "Later";
+  const moveLater = sharedIconButton({ icon: "later", label: `Move ${widget.title} later`, tooltip: "Move later", dataset: { action: "move-widget-later" } });
   moveLater.disabled = widgetIndex < 0 || widgetIndex >= (activeDashboard?.dashboard.widgets.length ?? 0) - 1;
-  moveLater.setAttribute("aria-label", `Move ${widget.title} later`);
-  const duplicate = document.createElement("button");
-  duplicate.type = "button";
-  duplicate.dataset.action = "duplicate-widget";
-  duplicate.textContent = "Duplicate";
-  const remove = document.createElement("button");
-  remove.type = "button";
-  remove.dataset.action = "delete-widget";
-  remove.textContent = "Delete";
+  const duplicate = sharedIconButton({ icon: "duplicate", label: `Duplicate ${widget.title}`, tooltip: "Duplicate widget", dataset: { action: "duplicate-widget" } });
+  const remove = sharedIconButton({ icon: "delete", label: `Delete ${widget.title}`, tooltip: "Delete widget", className: "danger", dataset: { action: "delete-widget" } });
   controls.append(edit, moveEarlier, moveLater, duplicate, remove);
   card.querySelector("header")?.append(viewSql, controls);
   renderQueryResult(card, widget);
@@ -2082,6 +2242,7 @@ function renderDashboardList() {
 }
 
 function openDashboard(dashboardId) {
+  closeDetailReport(false);
   closeWidgetFocus(true);
   if (saveTimer && saveTimerDashboardId !== dashboardId) {
     clearTimeout(saveTimer);
@@ -2200,9 +2361,11 @@ function setEditMode(enabled, flush = true) {
   editMode = nextEditMode;
   document.body.classList.toggle("dashboard-edit-mode", editMode);
   elements.canvas.classList.toggle("editing", editMode);
-  elements.editModeButton.textContent = editMode ? "Finish editing" : "Edit dashboard";
-  elements.editModeButton.classList.toggle("button-primary", editMode);
-  elements.editModeButton.classList.toggle("button-ghost", !editMode);
+  const editLabel = editMode ? "Finish editing" : "Edit dashboard";
+  elements.editModeButton.classList.toggle("active", editMode);
+  elements.editModeButton.setAttribute("aria-label", editLabel);
+  elements.editModeButton.setAttribute("aria-pressed", String(editMode));
+  tooltipController.update(elements.editModeButton, editLabel);
   elements.addWidgetButton.hidden = !editMode;
   if (!editMode && elements.widgetEditor.open) closeWidgetEditor();
   for (const card of elements.canvas.querySelectorAll(".widget")) {
@@ -2454,12 +2617,17 @@ function openWidgetFocus(widgetId) {
   card.removeAttribute("tabindex");
   card.removeAttribute("aria-label");
   card.querySelector(".widget-edit-controls")?.remove();
-  const close = document.createElement("button");
-  close.type = "button";
-  close.className = "button button-ghost focused-widget-close";
-  close.textContent = "Close";
-  close.setAttribute("aria-label", "Close expanded widget");
+  const close = sharedIconButton({ icon: "close", label: "Close expanded widget", tooltip: "Close widget workspace (Esc)", className: "focused-widget-close" });
   const header = card.querySelector(":scope > header");
+  header?.classList.add("focused-widget-pane-head");
+  const heading = header?.querySelector(":scope > div");
+  if (heading) {
+    heading.classList.add("focused-widget-pane-heading");
+    heading.tabIndex = 0;
+    heading.setAttribute("role", "button");
+    heading.setAttribute("aria-expanded", "true");
+    heading.setAttribute("aria-label", `Expand ${widget.title}`);
+  }
   header?.append(close);
   const body = document.createElement("div");
   body.className = "focused-widget-body";
@@ -2519,6 +2687,24 @@ function closeWidgetFocus(immediate = false) {
   focusAnimation.finished.then(finish, finish);
 }
 
+function setDetailPane(pane) {
+  if (!detailContext) return;
+  const detailActive = pane === "detail";
+  elements.widgetFocus.classList.toggle("detail-active", detailActive);
+  elements.detailDrawer.classList.toggle("collapsed", !detailActive);
+  const widgetHeading = elements.widgetFocusContent.querySelector(".focused-widget-pane-heading");
+  const widgetBody = elements.widgetFocusContent.querySelector(".focused-widget-body");
+  widgetHeading?.setAttribute("aria-expanded", String(!detailActive));
+  if (widgetBody) widgetBody.inert = detailActive;
+  document.querySelector("#expand-detail-report").setAttribute("aria-expanded", String(detailActive));
+  for (const child of elements.detailDrawer.children) if (!child.classList.contains("detail-report-head")) child.inert = !detailActive;
+}
+
+function toggleDetailPane() {
+  if (!detailContext) return;
+  setDetailPane(elements.widgetFocus.classList.contains("detail-active") ? "widget" : "detail");
+}
+
 function closeWidgetInspector() {
   elements.widgetInspector.classList.add("dismissed");
   elements.widgetInspector.inert = true;
@@ -2539,6 +2725,206 @@ function openWidgetInspector(metricName, filters = []) {
 
 function inspectMetric(metric) {
   openWidgetInspector(metric.dataset.inspectMetric, JSON.parse(metric.dataset.inspectFilters || "[]"));
+}
+
+function detailRows(result) {
+  const rows = result.rows ?? result.row ?? [];
+  return rows.map(row => Array.isArray(row) ? row : result.columns.map(column => row[column.sourceColumn ?? column.name ?? column.id]));
+}
+
+function renderDetailTable(container, context) {
+  container.replaceChildren();
+  if (context.state !== "ready") {
+    const status = document.createElement("p");
+    status.className = `detail-report-status${context.state === "error" ? " error" : ""}`;
+    status.textContent = context.message;
+    container.append(status);
+    return;
+  }
+  const presentation = new Map(context.detail.columns.map(column => [column.sourceColumn, column]));
+  const columns = context.result.columns.map((column, index) => ({ column, index, presentation: presentation.get(column.sourceColumn ?? column.name) })).filter(item => !item.presentation?.hidden);
+  const scroll = document.createElement("div");
+  scroll.className = "detail-table-scroll";
+  scroll.tabIndex = 0;
+  scroll.setAttribute("role", "region");
+  scroll.setAttribute("aria-label", `${context.widgetTitle} detail rows`);
+  const table = document.createElement("table");
+  table.className = "detail-table";
+  const colgroup = document.createElement("colgroup");
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const item of columns) {
+    const col = document.createElement("col");
+    col.style.width = `${item.presentation?.width ?? 160}px`;
+    colgroup.append(col);
+    const cell = document.createElement("th");
+    const button = document.createElement("button");
+    button.type = "button";
+    const sourceColumn = item.column.sourceColumn ?? item.column.name;
+    const activeSort = context.sort?.sourceColumn === sourceColumn ? context.sort : null;
+    button.textContent = `${item.presentation?.label ?? item.column.label ?? sourceColumn}${activeSort ? activeSort.direction === "desc" ? " ↓" : " ↑" : ""}`;
+    button.setAttribute("aria-label", `Sort by ${item.presentation?.label ?? sourceColumn}${activeSort ? activeSort.direction === "asc" ? " descending" : " ascending" : " ascending"}`);
+    button.addEventListener("click", () => {
+      context.sort = { sourceColumn, direction: activeSort?.direction === "asc" ? "desc" : "asc", nulls: "last" };
+      context.offset = 0;
+      requestDetailReport(context);
+    });
+    cell.append(button);
+    headRow.append(cell);
+  }
+  head.append(headRow);
+  const body = document.createElement("tbody");
+  for (const values of detailRows(context.result)) {
+    const row = document.createElement("tr");
+    for (const item of columns) {
+      const cell = document.createElement("td");
+      const value = values[item.index];
+      cell.textContent = formatQueryValue(value, item.column.numberFormat);
+      row.append(cell);
+    }
+    body.append(row);
+  }
+  if (!body.children.length) {
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = Math.max(columns.length, 1);
+    cell.textContent = "No detail rows match this selection.";
+    row.append(cell);
+    body.append(row);
+  }
+  table.append(colgroup, head, body);
+  scroll.append(table);
+  container.append(scroll);
+}
+
+function renderDetailReport() {
+  if (!detailContext) return;
+  elements.detailTitle.textContent = detailContext.widgetTitle;
+  elements.detailFilters.replaceChildren();
+  const dimensionLabels = new Map(detailContext.query.dimensions.map(dimension => [dimension.id, dimension.label]));
+  for (const dimension of detailContext.selection.dimensions) {
+    const chip = document.createElement("span");
+    chip.textContent = `${dimensionLabels.get(dimension.targetId) ?? dimension.targetId}: ${dimension.value === null ? "NULL" : String(dimension.value)}`;
+    elements.detailFilters.append(chip);
+  }
+  const operatorLabels = { eq: "=", neq: "!=", lt: "<", lte: "<=", gt: ">", gte: ">=", between: "between", in: "in", not_in: "not in", like: "matches", contains: "contains", starts_with: "starts with", ends_with: "ends with", is_null: "is NULL", is_not_null: "is not NULL" };
+  detailContext.query.filters.forEach((group, groupIndex) => {
+    for (const condition of group.conditions) {
+      const chip = document.createElement("span");
+      const values = condition.values.map(value => value === null ? "NULL" : String(value)).join(condition.operator === "between" ? " and " : ", ");
+      chip.textContent = `${detailContext.query.filters.length > 1 ? `Group ${groupIndex + 1} · ` : ""}${condition.column} ${operatorLabels[condition.operator] ?? condition.operator}${values ? ` ${values}` : ""}`;
+      elements.detailFilters.append(chip);
+    }
+  });
+  if (detailContext.selection.measureId) {
+    const chip = document.createElement("span");
+    chip.textContent = `Measure: ${detailContext.query.measures.find(measure => measure.id === detailContext.selection.measureId)?.label ?? detailContext.selection.measureId}`;
+    elements.detailFilters.append(chip);
+  }
+  if (!elements.detailFilters.children.length) {
+    const chip = document.createElement("span");
+    chip.textContent = "All aggregate rows";
+    elements.detailFilters.append(chip);
+  }
+  const result = detailContext.result;
+  const dashboardTime = detailContext.dashboardQueriedAt ? `Dashboard ${new Date(detailContext.dashboardQueriedAt).toLocaleString()}` : "";
+  const detailTime = result?.queriedAt ? `Detail ${new Date(result.queriedAt).toLocaleString()}${result.queryDurationMs == null ? "" : ` · ${result.queryDurationMs} ms`}` : "";
+  elements.detailTimestamp.textContent = [dashboardTime, detailTime].filter(Boolean).join(" · ");
+  elements.detailCount.textContent = result ? `${result.matchingRowCount} matching row${result.matchingRowCount === 1 ? "" : "s"}` : "";
+  const page = Math.floor(detailContext.offset / detailContext.limit) + 1;
+  const pages = result ? Math.max(1, Math.ceil(result.matchingRowCount / detailContext.limit)) : 1;
+  elements.detailPage.textContent = `Page ${page} of ${pages}`;
+  elements.detailPrevious.disabled = detailContext.state !== "ready" || detailContext.offset === 0;
+  elements.detailNext.disabled = detailContext.state !== "ready" || !result?.hasMore;
+  elements.detailSearch.disabled = !detailContext.detail.columns.some(column => column.searchable);
+  renderDetailTable(elements.detailBody, detailContext);
+}
+
+async function requestDetailReport(context) {
+  const token = {};
+  detailRequestToken = token;
+  context.state = "loading";
+  context.message = "Loading selected source rows...";
+  renderDetailReport();
+  const detailColumns = context.detail.columns.map((column, index) => ({ id: `detail_column_${index + 1}`, label: column.label, column: column.sourceColumn, numberFormat: clone(column.numberFormat), searchable: column.searchable }));
+  const sortColumnIndex = context.detail.columns.findIndex(column => column.sourceColumn === context.sort?.sourceColumn);
+  const requestDetail = { version: 1, columns: detailColumns, rowIdentifier: context.detail.rowIdentifier };
+  const requestSort = sortColumnIndex < 0 ? null : { targetId: detailColumns[sortColumnIndex].id, direction: context.sort.direction, nulls: context.sort.nulls };
+  const request = {
+    source: clone(context.source), query: clone(context.query), selection: clone(context.selection), detail: requestDetail,
+    offset: context.offset, limit: context.limit, sort: requestSort, search: context.search
+  };
+  try {
+    const result = await postgres.request(`/api/postgres/profiles/${encodeURIComponent(context.source.profileId)}/relation/detail`, { method: "POST", body: JSON.stringify(request) });
+    const widget = activeDashboard?.dashboard.widgets.find(item => item.id === context.widgetId);
+    const current = detailContext === context && detailRequestToken === token && activeDashboard?.id === context.dashboardId && widget && JSON.stringify(widget.configuration?.source) === JSON.stringify(context.source) && JSON.stringify(queryForVisualization(widget.configuration.query, widget.configuration.visualization)) === JSON.stringify(context.query) && JSON.stringify(reconcileDetailReport(widget.configuration.source, widget.configuration.detail)) === JSON.stringify(context.detail);
+    if (!current) return;
+    context.state = "ready";
+    context.result = result;
+    context.message = "";
+    renderDetailReport();
+  } catch (error) {
+    if (detailContext !== context || detailRequestToken !== token) return;
+    context.state = "error";
+    context.message = error.message;
+    context.result = null;
+    renderDetailReport();
+  }
+}
+
+function openDetailReport(target, widgetId) {
+  const widget = activeDashboard?.dashboard.widgets.find(item => item.id === widgetId);
+  if (!widget?.configuration?.source || !widget.configuration?.query || sourceVerification.get(widget.id)?.state !== "verified") return false;
+  let lineage;
+  try { lineage = JSON.parse(target.dataset.drillLineage); } catch (_error) { return false; }
+  if (focusedWidgetId !== widget.id) openWidgetFocus(widget.id);
+  const detail = reconcileDetailReport(widget.configuration.source, widget.configuration.detail);
+  const selection = {
+    dimensions: (lineage.dimensions ?? []).map(dimension => ({ targetId: dimension.targetId, value: dimension.operator === "is_null" ? null : dimension.values?.[0] ?? null })),
+    ...(lineage.measure?.id ? { measureId: lineage.measure.id } : {})
+  };
+  detailReturnFocus = target;
+  detailContext = {
+    dashboardId: activeDashboard.id, widgetId: widget.id, widgetTitle: `${widget.title} details`, source: clone(widget.configuration.source),
+    query: queryForVisualization(clone(widget.configuration.query), clone(widget.configuration.visualization)), selection, detail,
+    dashboardQueriedAt: widgetQueryResults.get(widget.id)?.result?.queriedAt ?? null,
+    offset: 0, limit: detail.pageSize, sort: clone(detail.defaultSort), search: "", state: "loading", result: null, message: "Loading selected source rows..."
+  };
+  elements.detailSearch.value = "";
+  elements.detailDrawer.classList.add("open");
+  elements.widgetFocus.classList.add("detail-open");
+  elements.detailDrawer.inert = false;
+  elements.detailDrawer.removeAttribute("aria-hidden");
+  setDetailPane("detail");
+  requestDetailReport(detailContext);
+  document.querySelector("#expand-detail-report").focus();
+  return true;
+}
+
+function closeDetailReport(restoreFocus = true) {
+  clearTimeout(detailSearchTimer);
+  detailRequestToken = null;
+  elements.widgetFocus.classList.remove("detail-open", "detail-active");
+  detailContext = null;
+  elements.detailDrawer.classList.remove("open", "collapsed");
+  elements.detailDrawer.inert = true;
+  elements.detailDrawer.setAttribute("aria-hidden", "true");
+  if (restoreFocus) {
+    if (detailReturnFocus?.isConnected) detailReturnFocus.focus();
+    else elements.widgetFocusContent.querySelector(".focused-widget-pane-heading")?.focus();
+  }
+  detailReturnFocus = null;
+}
+
+function openDetailSql() {
+  if (!detailContext?.result) return;
+  elements.sqlContext.textContent = "Detail report";
+  elements.sqlTitle.textContent = `${detailContext.widgetTitle} SQL`;
+  elements.sqlStatus.textContent = "The parameterized statement used for the currently displayed detail page.";
+  elements.sqlCode.textContent = detailContext.result.sql || "";
+  elements.sqlParameters.hidden = detailContext.result.parameters === undefined;
+  elements.sqlParameterCode.textContent = detailContext.result.parameters === undefined ? "" : JSON.stringify(detailContext.result.parameters, null, 2);
+  elements.sqlDialog.showModal();
 }
 
 function openExecutedSql(widget, population = false) {
@@ -2705,6 +3091,7 @@ elements.widgetEditor.addEventListener("close", () => {
   widgetQueryDraft = null;
   widgetTableDraft = null;
   widgetVisualizationDraft = null;
+  widgetDetailDraft = null;
   relationInspectionGeneration += 1;
   relationCatalogGeneration += 1;
 });
@@ -2734,6 +3121,7 @@ document.querySelector("#reset-widget-query").addEventListener("click", () => {
   widgetQueryDraft = clone(widget?.configuration?.query ?? defaultWidgetQuery());
   widgetTableDraft = reconcileTablePresentation(widgetQueryDraft, widget?.configuration?.table);
   widgetVisualizationDraft = reconcileVisualization(widgetQueryDraft, widget?.configuration?.visualization);
+  widgetDetailDraft = reconcileDetailReport(widget?.configuration?.source, widget?.configuration?.detail);
   renderWidgetQueryDraft();
 });
 document.querySelector("#apply-widget-query").addEventListener("click", async event => {
@@ -2746,6 +3134,7 @@ document.querySelector("#apply-widget-query").addEventListener("click", async ev
   const draft = clone(widgetQueryDraft);
   const tableDraft = reconcileTablePresentation(draft, clone(widgetTableDraft));
   const visualizationDraft = reconcileVisualization(draft, clone(widgetVisualizationDraft));
+  const detailDraft = reconcileDetailReport(source, clone(widgetDetailDraft));
   const applySession = { dashboardId, widgetId, generation: widgetEditorGeneration };
   widgetQueryApplySession = applySession;
   renderWidgetQueryDraft();
@@ -2758,10 +3147,11 @@ document.querySelector("#apply-widget-query").addEventListener("click", async ev
     const currentWidget = activeDashboard?.dashboard.widgets.find(item => item.id === widgetId);
     if (activeDashboard?.id !== dashboardId || editedWidgetId !== widgetId || widgetEditorGeneration !== applySession.generation || currentWidget !== widget || sourceVerification.get(widgetId)?.state !== "verified" || JSON.stringify(widget.configuration.source) !== JSON.stringify(source)) return;
     widget.kind = "aggregate_report";
-    widget.configuration = { source, query: draft, table: tableDraft, visualization: visualizationDraft };
+    widget.configuration = { source, query: draft, table: tableDraft, visualization: visualizationDraft, detail: detailDraft };
     widgetQueryDraft = clone(draft);
     widgetTableDraft = clone(tableDraft);
     widgetVisualizationDraft = clone(visualizationDraft);
+    widgetDetailDraft = clone(detailDraft);
     widgetQueryExecutionTokens.set(`${widget.id}:publish`, {});
     widgetTablePages.set(widget.id, 0);
     widgetQueryResults.set(widget.id, { state: "ready", result });
@@ -2806,6 +3196,8 @@ elements.canvas.addEventListener("click", event => {
   if (action === "move-widget-later") return moveWidget(widgetId, 1);
   if (action === "duplicate-widget") return duplicateWidget(widgetId);
   if (action === "delete-widget") return deleteWidget(widgetId);
+  const drillTarget = event.target.closest("[data-drill-lineage]");
+  if (drillTarget && openDetailReport(drillTarget, widgetId)) return;
   if (widgetId && !editMode) openWidgetFocus(widgetId);
 });
 function clearWidgetDropState() {
@@ -2868,7 +3260,14 @@ elements.canvas.addEventListener("drop", event => {
 elements.canvas.addEventListener("dragend", finishWidgetDrag);
 elements.canvas.addEventListener("keydown", event => {
   const card = event.target.closest(".widget");
-  if (!card || event.target.closest("button") || !["Enter", " "].includes(event.key)) return;
+  if (!card || !["Enter", " "].includes(event.key)) return;
+  const drillTarget = event.target.closest("[data-drill-lineage]");
+  if (drillTarget) {
+    event.preventDefault();
+    openDetailReport(drillTarget, card.dataset.widgetId);
+    return;
+  }
+  if (event.target.closest("button")) return;
   event.preventDefault();
   openWidgetFocus(card.dataset.widgetId);
 });
@@ -2876,17 +3275,53 @@ document.querySelector("#close-widget-inspector").addEventListener("click", clos
 document.querySelector("#view-inspector-sql").addEventListener("click", () => openExecutedSql(activeDashboard?.dashboard.widgets.find(widget => widget.id === focusedWidgetId), true));
 document.querySelector("#close-executed-sql").addEventListener("click", () => elements.sqlDialog.close());
 elements.widgetFocusContent.addEventListener("click", event => {
-  if (event.target.closest(".focused-widget-close")) return closeWidgetFocus();
+  if (event.target.closest(".focused-widget-close")) {
+    if (detailContext) closeDetailReport(false);
+    return closeWidgetFocus();
+  }
   if (event.target.closest('[data-action="view-widget-sql"]')) return openExecutedSql(activeDashboard?.dashboard.widgets.find(widget => widget.id === focusedWidgetId));
+  const drillTarget = event.target.closest("[data-drill-lineage]");
+  if (drillTarget && openDetailReport(drillTarget, focusedWidgetId)) return;
   const metric = event.target.closest("[data-inspect-metric]");
   if (metric) inspectMetric(metric);
 });
 elements.widgetFocusContent.addEventListener("keydown", event => {
+  const drillTarget = event.target.closest("[data-drill-lineage]");
+  if (drillTarget && ["Enter", " "].includes(event.key)) {
+    event.preventDefault();
+    openDetailReport(drillTarget, focusedWidgetId);
+    return;
+  }
   const metric = event.target.closest("[data-inspect-metric]");
   if (!metric || !["Enter", " "].includes(event.key)) return;
   event.preventDefault();
   inspectMetric(metric);
 });
+elements.detailDrawer.querySelector(".detail-report-head").addEventListener("click", event => {
+  if (event.target.closest("#view-detail-sql")) return;
+  toggleDetailPane();
+});
+elements.widgetFocusContent.addEventListener("click", event => {
+  if (!detailContext || event.target.closest("button, [data-drill-lineage]") || !event.target.closest(".focused-widget-pane-head")) return;
+  toggleDetailPane();
+});
+elements.widgetFocusContent.addEventListener("keydown", event => {
+  if (!detailContext || event.target !== elements.widgetFocusContent.querySelector(".focused-widget-pane-heading") || !["Enter", " "].includes(event.key)) return;
+  event.preventDefault();
+  toggleDetailPane();
+});
+elements.detailPrevious.addEventListener("click", () => { if (detailContext) { detailContext.offset = Math.max(0, detailContext.offset - detailContext.limit); requestDetailReport(detailContext); } });
+elements.detailNext.addEventListener("click", () => { if (detailContext?.result?.hasMore) { detailContext.offset += detailContext.limit; requestDetailReport(detailContext); } });
+elements.detailSearch.addEventListener("input", () => {
+  clearTimeout(detailSearchTimer);
+  detailSearchTimer = setTimeout(() => {
+    if (!detailContext) return;
+    detailContext.search = elements.detailSearch.value;
+    detailContext.offset = 0;
+    requestDetailReport(detailContext);
+  }, 250);
+});
+document.querySelector("#view-detail-sql").addEventListener("click", openDetailSql);
 elements.workspace.addEventListener("scroll", () => {
   if (!activeDashboard || !editMode || focusedWidgetId) return;
   const mode = isMobileLayout() ? "mobile" : "desktop";
@@ -2904,8 +3339,27 @@ window.addEventListener("keydown", event => {
     popup.closest(".query-calendar-control")?.querySelector(".query-calendar-toggle")?.setAttribute("aria-expanded", "false");
     calendarClosed = true;
   }
-  if (!calendarClosed && focusedWidgetId) closeWidgetFocus();
+  if (!calendarClosed && detailContext) closeDetailReport();
+  else if (!calendarClosed && focusedWidgetId) closeWidgetFocus();
 });
+document.addEventListener("pointerover", event => {
+  const target = event.target.closest?.("[data-tooltip]");
+  if (target && target !== tooltipController.activeTarget) tooltipController.show(target);
+});
+document.addEventListener("pointerout", event => {
+  if (!tooltipController.activeTarget || tooltipController.activeTarget.contains(event.relatedTarget)) return;
+  tooltipController.hide();
+});
+document.addEventListener("focusin", event => {
+  const target = event.target.closest?.("[data-tooltip]");
+  if (target) tooltipController.show(target);
+});
+document.addEventListener("focusout", event => {
+  if (tooltipController.activeTarget?.contains(event.relatedTarget)) return;
+  tooltipController.hide();
+});
+document.addEventListener("pointerdown", () => tooltipController.hide());
+document.addEventListener("scroll", () => tooltipController.hide(), true);
 window.addEventListener("beforeunload", () => { if (saveTimer) persistDashboard(); });
 
 Promise.all([loadDashboards(), loadProfiles()]);

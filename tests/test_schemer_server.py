@@ -68,6 +68,10 @@ class FakePostgresService:
         self.calls.append(("execute_widget_query", profile_id, source, query))
         return {"columns": [{"label": "Rows"}], "rows": [[1]], "sql": "SELECT count(*)", "parameters": []}
 
+    def execute_relation_detail(self, profile_id, source, query, selection, detail, offset, limit, sort, search):
+        self.calls.append(("execute_relation_detail", profile_id, source, query, selection, detail, offset, limit, sort, search))
+        return {"columns": [], "rows": [], "matchingRowCount": 0, "offset": offset, "limit": limit, "hasMore": False}
+
     def catalog_status(self, profile_id, namespace):
         self.calls.append(("catalog_status", profile_id, namespace))
         return {"profileId": profile_id, "namespace": namespace, "fingerprint": "live"}
@@ -142,6 +146,7 @@ class SchemerServerTests(unittest.TestCase):
         self.assertIn(b"Schemer", body)
         self.assertEqual(self.request("/shared/theme.css")[0], 200)
         self.assertEqual(self.request("/shared/postgres-client.js")[0], 200)
+        self.assertEqual(self.request("/shared/ui-components.js")[0], 200)
         self.assertEqual(self.request("/shared/../server.py")[0], 404)
         status, body, _ = self.request("/api/session")
         self.assertEqual(status, 200)
@@ -188,6 +193,21 @@ class SchemerServerTests(unittest.TestCase):
         self.assertEqual(json.loads(body)["sql"], "SELECT count(*)")
         self.assertIn(("execute_widget_query", "shared", preview_source, query), self.service.calls)
         self.assertEqual(self.request(query_path, "POST", {"source": preview_source, "query": query, "sql": "SELECT 1"}, True)[0], 400)
+        detail_request = {
+            "source": preview_source, "query": query, "selection": {"dimensions": []},
+            "detail": {"version": 1, "columns": [], "rowIdentifier": None},
+            "offset": 0, "limit": 20, "sort": None, "search": "",
+        }
+        detail_path = "/api/postgres/profiles/shared/relation/detail"
+        self.assertEqual(self.request(detail_path, "POST", detail_request)[0], 403)
+        status, body, _ = self.request(detail_path, "POST", detail_request, True)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["matchingRowCount"], 0)
+        self.assertIn((
+            "execute_relation_detail", "shared", preview_source, query, detail_request["selection"],
+            detail_request["detail"], 0, 20, None, "",
+        ), self.service.calls)
+        self.assertEqual(self.request(detail_path, "POST", {**detail_request, "extra": True}, True)[0], 400)
         self.assertIn(("test_profile", "shared"), self.service.calls)
 
     def test_profile_writes_use_shared_router_and_redact_password(self):

@@ -139,16 +139,18 @@ Acceptance criteria: changing a slicer refreshes every explicitly bound widget a
 
 Approval required before implementation.
 
-- [ ] Add a right-side detail drawer that does not destroy dashboard context.
+Core approved and implemented. Dashboard slicer integration remains deferred with Phase 6, so the full acceptance criterion remains open.
+
+- [x] Add a right-side detail drawer that does not destroy dashboard context.
 - [ ] Combine dashboard slicers, widget filters, clicked dimensions, clicked series, and measure-specific filters.
-- [ ] Define reusable detail reports tied to the same source relation as their widgets.
-- [ ] Configure detail columns, labels, formats, default sort, and row identifier.
-- [ ] Add bounded pagination, sorting, searching, and column visibility.
-- [ ] Make KPI, chart marks, aggregate rows, and aggregate metric cells drillable.
-- [ ] Display active filter chips and matching-row count.
-- [ ] Distinguish dashboard refresh time from live detail-query time.
-- [ ] Add full-screen report navigation without losing the originating dashboard filters.
-- [ ] Defer export and individual record panels unless separately approved.
+- [x] Define reusable detail reports tied to the same source relation as their widgets.
+- [x] Configure detail columns, labels, formats, default sort, and row identifier.
+- [x] Add bounded pagination, sorting, searching, and column visibility.
+- [x] Make KPI, chart marks, aggregate rows, and aggregate metric cells drillable.
+- [x] Display active filter chips and matching-row count.
+- [x] Distinguish dashboard refresh time from live detail-query time.
+- [x] Keep widget and detail results in one header-switchable vertical workspace without losing originating filters.
+- [x] Defer export and individual record panels unless separately approved.
 
 Acceptance criteria: clicking a chart mark or aggregate cell opens the logically matching underlying rows with complete filter lineage.
 

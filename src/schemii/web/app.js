@@ -217,6 +217,7 @@ const elements = {
   shutdownWarning: document.querySelector("#shutdown-warning"),
   confirmShutdown: document.querySelector("#confirm-shutdown")
 };
+const tooltipController = window.SchemiiShared.createTooltipController({ element: elements.tooltip });
 
 let schemaLibrary = { activeId: null, schemas: [] };
 let activeSchemaId = null;
@@ -261,8 +262,6 @@ let assistantDemoPaused = false;
 let postgresDemoTimer = null;
 let postgresDemoStep = 0;
 let postgresDemoPaused = false;
-let activeTooltipTarget = null;
-let tooltipHideTimer = null;
 let undoStack = [];
 let redoStack = [];
 let historyGroup = null;
@@ -1231,64 +1230,16 @@ function findAppTooltipTarget(start, includeDescendants = false) {
   return null;
 }
 
-function positionTooltip(target) {
-  const targetRect = target.getBoundingClientRect();
-  const tooltipRect = elements.tooltip.getBoundingClientRect();
-  const gap = 9;
-  const margin = 8;
-  let placement = target.dataset.tooltipPlacement || (target.closest(".tool-rail") ? "right" : "top");
-  let left;
-  let top;
-
-  if (placement === "right" && targetRect.right + gap + tooltipRect.width > window.innerWidth - margin) placement = "left";
-  if (placement === "left" && targetRect.left - gap - tooltipRect.width < margin) placement = "right";
-  if (placement === "top" && targetRect.top - gap - tooltipRect.height < margin) placement = "bottom";
-  if (placement === "bottom" && targetRect.bottom + gap + tooltipRect.height > window.innerHeight - margin) placement = "top";
-
-  if (placement === "right" || placement === "left") {
-    left = placement === "right" ? targetRect.right + gap : targetRect.left - tooltipRect.width - gap;
-    top = targetRect.top + (targetRect.height - tooltipRect.height) / 2;
-  } else {
-    left = targetRect.left + (targetRect.width - tooltipRect.width) / 2;
-    top = placement === "bottom" ? targetRect.bottom + gap : targetRect.top - tooltipRect.height - gap;
-  }
-
-  elements.tooltip.dataset.placement = placement;
-  elements.tooltip.style.left = `${Math.max(margin, Math.min(left, window.innerWidth - tooltipRect.width - margin))}px`;
-  elements.tooltip.style.top = `${Math.max(margin, Math.min(top, window.innerHeight - tooltipRect.height - margin))}px`;
-}
-
 function showTooltip(target) {
-  const nativeTitle = target.getAttribute("title");
-  if (nativeTitle) {
-    target.dataset.tooltip = nativeTitle;
-    target.removeAttribute("title");
-  }
-  if (!target.dataset.tooltip) return;
-  clearTimeout(tooltipHideTimer);
-  activeTooltipTarget = target;
-  elements.tooltip.textContent = target.dataset.tooltip;
-  elements.tooltip.classList.remove("visible");
-  elements.tooltip.hidden = false;
-  positionTooltip(target);
-  requestAnimationFrame(() => {
-    if (activeTooltipTarget === target) elements.tooltip.classList.add("visible");
-  });
+  tooltipController.show(target);
 }
 
 function hideTooltip() {
-  activeTooltipTarget = null;
-  elements.tooltip.classList.remove("visible");
-  clearTimeout(tooltipHideTimer);
-  tooltipHideTimer = setTimeout(() => { elements.tooltip.hidden = true; }, 150);
+  tooltipController.hide();
 }
 
 function updateTooltip(target, text) {
-  target.dataset.tooltip = text;
-  delete target.dataset.tooltipAutomatic;
-  if (activeTooltipTarget !== target) return;
-  elements.tooltip.textContent = text;
-  positionTooltip(target);
+  tooltipController.update(target, text);
 }
 
 function migrateSchema(schema) {
@@ -2109,9 +2060,7 @@ function renderInspector() {
           <button class="icon-button danger" data-action="delete-table" data-tooltip="Delete table" aria-label="Delete table" type="button">
             <svg viewBox="0 0 20 20"><path d="M4 6h12M8 3h4l1 3H7l1-3ZM6 6l1 11h6l1-11M9 9v5M11 9v5"/></svg>
           </button>
-          <button class="icon-button" data-action="close-inspector" data-tooltip="Close table workspace (Esc)" type="button" aria-label="Close table workspace">
-            <svg viewBox="0 0 20 20"><path d="m5 5 10 10M15 5 5 15"/></svg>
-          </button>
+          <span data-shared-icon-slot="close-inspector"></span>
         </div>
       </div>
       <h2 data-tooltip="${escapeHtml(selectedTable.name)}">${escapeHtml(selectedTable.name)}</h2>
@@ -2161,6 +2110,11 @@ function renderInspector() {
       </section>
     </div>
   `;
+  const closeSlot = elements.inspectorContent.querySelector('[data-shared-icon-slot="close-inspector"]');
+  closeSlot?.replaceWith(window.SchemiiShared.createIconButton({
+    icon: "close", label: "Close table workspace", tooltip: "Close table workspace (Esc)",
+    className: "icon-button", dataset: { action: "close-inspector" },
+  }));
 }
 
 function describeInspectorIndex(index) {
@@ -6550,10 +6504,10 @@ elements.deleteFunctionButton.addEventListener("click", () => {
 
 document.addEventListener("pointerover", event => {
   const target = findAppTooltipTarget(event.target);
-  if (target && target !== activeTooltipTarget) showTooltip(target);
+  if (target && target !== tooltipController.activeTarget) showTooltip(target);
 });
 document.addEventListener("pointerout", event => {
-  if (!activeTooltipTarget || activeTooltipTarget.contains(event.relatedTarget)) return;
+  if (!tooltipController.activeTarget || tooltipController.activeTarget.contains(event.relatedTarget)) return;
   hideTooltip();
 });
 document.addEventListener("focusin", event => {
@@ -6561,7 +6515,7 @@ document.addEventListener("focusin", event => {
   if (target) showTooltip(target);
 });
 document.addEventListener("focusout", event => {
-  if (activeTooltipTarget?.contains(event.relatedTarget)) return;
+  if (tooltipController.activeTarget?.contains(event.relatedTarget)) return;
   hideTooltip();
 });
 document.addEventListener("pointerdown", hideTooltip);

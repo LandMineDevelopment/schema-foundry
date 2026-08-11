@@ -10,6 +10,7 @@ SQL_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})
 RELATION_PREVIEW_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/relation/preview$")
 RELATION_VERIFY_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/relation/verify$")
 RELATION_QUERY_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/relation/query$")
+RELATION_DETAIL_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/relation/detail$")
 
 
 class PostgresHttpMixin:
@@ -72,15 +73,25 @@ class PostgresHttpMixin:
         relation_preview_match = RELATION_PREVIEW_PATH.fullmatch(path)
         relation_verify_match = RELATION_VERIFY_PATH.fullmatch(path)
         relation_query_match = RELATION_QUERY_PATH.fullmatch(path)
+        relation_detail_match = RELATION_DETAIL_PATH.fullmatch(path)
         profile_match = PROFILE_PATH.fullmatch(path)
-        if not sql_match and not relation_preview_match and not relation_verify_match and not relation_query_match and not (profile_match and profile_match.group(2) in {"test", "introspect"}):
+        if not sql_match and not relation_preview_match and not relation_verify_match and not relation_query_match and not relation_detail_match and not (profile_match and profile_match.group(2) in {"test", "introspect"}):
             return False
         if not self._authorize_postgres():
             return True
         body = self._body_or_error()
         if body is None:
             return True
-        if relation_query_match:
+        if relation_detail_match:
+            fields = {"source", "query", "selection", "detail", "offset", "limit", "sort", "search"}
+            if not isinstance(body, dict) or set(body) != fields:
+                self.send_json(400, {"error": {"code": "validation_error", "message": "detail request fields are invalid"}})
+            else:
+                self._service_call(lambda: self.service.execute_relation_detail(
+                    relation_detail_match.group(1), body["source"], body["query"], body["selection"],
+                    body["detail"], body["offset"], body["limit"], body["sort"], body["search"],
+                ))
+        elif relation_query_match:
             if not isinstance(body, dict) or set(body) != {"source", "query"}:
                 self.send_json(400, {"error": {"code": "validation_error", "message": "query request must contain exactly source and query"}})
             else:

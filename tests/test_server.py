@@ -69,6 +69,10 @@ class FakePostgresService:
         self.calls.append(("execute_widget_query", profile_id, source, query))
         return {"columns": [{"label": "Rows"}], "rows": [[1]], "sql": "SELECT count(*)", "parameters": []}
 
+    def execute_relation_detail(self, profile_id, source, query, selection, detail, offset, limit, sort, search):
+        self.calls.append(("execute_relation_detail", profile_id, source, query, selection, detail, offset, limit, sort, search))
+        return {"columns": [], "rows": [], "matchingRowCount": 0, "offset": offset, "limit": limit, "hasMore": False}
+
     def catalog_status(self, profile_id, namespace):
         self.calls.append(("catalog_status", profile_id, namespace))
         return {"profileId": profile_id, "namespace": namespace, "fingerprint": "live"}
@@ -330,6 +334,22 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(self.request(query_path, "POST", {"source": preview_source, "query": query}, authorized=True)[0], 200)
         self.assertIn(("execute_widget_query", "local", preview_source, query), self.service.calls)
         self.assertEqual(self.request(query_path, "POST", {"source": preview_source, "query": query, "extra": True}, authorized=True)[0], 400)
+        detail_path = "/api/postgres/profiles/local/relation/detail"
+        detail_request = {
+            "source": preview_source, "query": query,
+            "selection": {"dimensions": []},
+            "detail": {"version": 1, "columns": [], "rowIdentifier": None},
+            "offset": 0, "limit": 25, "sort": None, "search": "",
+        }
+        self.assertEqual(self.request(detail_path, "POST", detail_request)[0], 403)
+        self.assertEqual(self.request(detail_path, "POST", detail_request, authorized=True)[0], 200)
+        self.assertIn((
+            "execute_relation_detail", "local", preview_source, query, detail_request["selection"],
+            detail_request["detail"], 0, 25, None, "",
+        ), self.service.calls)
+        self.assertEqual(self.request(detail_path, "POST", {**detail_request, "sql": "SELECT 1"}, authorized=True)[0], 400)
+        missing_search = dict(detail_request); missing_search.pop("search")
+        self.assertEqual(self.request(detail_path, "POST", missing_search, authorized=True)[0], 400)
 
     def test_test_introspect_preview_and_apply_routes_forward_contracts(self):
         schema = {"projectName": "demo.public", "tables": [], "relationships": [], "functions": []}

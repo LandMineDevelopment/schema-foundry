@@ -24,7 +24,13 @@ from pathlib import Path
 from typing import Any, Callable
 from uuid import UUID
 
-from .widget_query import QueryValidationError, compile_query, normalize_query
+from .widget_query import (
+    QueryValidationError,
+    compile_detail_query,
+    compile_query,
+    normalize_detail_request,
+    normalize_query,
+)
 
 try:
     import fcntl
@@ -927,6 +933,7 @@ class PostgresService:
         if profile["dbname"] != database:
             raise PostgresServiceError(409, "database_changed", "The saved profile database does not match the widget source")
         connection = self._connect_profile(profile)
+        started = time.perf_counter()
         try:
             self._execute_statement(connection, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             self._execute_statement(connection, f"SET LOCAL statement_timeout = '{self._statement_timeout_ms}ms'")
@@ -962,6 +969,8 @@ class PostgresService:
                 "truncated": truncated,
                 "sql": compiled["sql"],
                 "parameters": [self._json_cell(value) for value in compiled["parameters"]],
+                "queryDurationMs": max(0, round((time.perf_counter() - started) * 1000)),
+                "queriedAt": _utc_now(),
                 "lineage": {
                     "dimensions": [{"id": item["id"], "sourceColumn": item["column"]} for item in normalized_query["dimensions"]],
                     "measures": [{"id": item["id"], "sourceColumn": item["column"], "aggregation": item["aggregation"], "distinct": item["distinct"]} for item in normalized_query["measures"]],
@@ -983,6 +992,95 @@ class PostgresService:
             except Exception:
                 pass
             raise PostgresServiceError(422, "aggregate_query_failed", "Aggregate query failed") from exc
+        finally:
+            self._close(connection)
+
+    def execute_relation_detail(
+        self,
+        profile_id: str,
+        source: Any,
+        query: Any,
+        selection: Any,
+        detail: Any,
+        offset: Any,
+        limit: Any,
+        sort: Any,
+        search: Any,
+    ) -> dict[str, Any]:
+        database, namespace, relation, kind, fingerprint, source_columns = self._validate_relation_source(profile_id, source)
+        if source_columns is None:
+            raise ValidationError("detail query requires a current source column snapshot")
+        try:
+            normalized_query = normalize_query(query, source_columns)
+            normalized_request = normalize_detail_request(
+                selection, detail, offset, limit, sort, search, normalized_query, source_columns
+            )
+        except QueryValidationError as exc:
+            raise ValidationError(str(exc)) from exc
+        profile = self._profile(profile_id)
+        if profile["dbname"] != database:
+            raise PostgresServiceError(409, "database_changed", "The saved profile database does not match the detail source")
+        connection = self._connect_profile(profile)
+        started = time.perf_counter()
+        try:
+            self._execute_statement(connection, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            self._execute_statement(connection, f"SET LOCAL statement_timeout = '{self._statement_timeout_ms}ms'")
+            relation_sql = f"{quote_identifier(namespace)}.{quote_identifier(relation)}"
+            self._execute_statement(connection, f"LOCK TABLE {relation_sql} IN ACCESS SHARE MODE")
+            current_database = self._execute_rows(connection, "SELECT current_database() AS database")[0]["database"]
+            if current_database != database:
+                raise PostgresServiceError(409, "database_changed", "The connected PostgreSQL database does not match the requested database")
+            descriptor = self._inspect_relation_connection(
+                connection, profile_id, database, namespace, relation, kind, fingerprint
+            )
+            try:
+                normalized_query = normalize_query(normalized_query, descriptor["columns"])
+                normalized_request = normalize_detail_request(
+                    normalized_request["selection"], normalized_request["detail"],
+                    normalized_request["offset"], normalized_request["limit"], normalized_request["sort"],
+                    normalized_request["search"], normalized_query, descriptor["columns"],
+                )
+            except QueryValidationError as exc:
+                raise ValidationError(str(exc)) from exc
+            compiled = compile_detail_query(source, normalized_query, normalized_request, descriptor["columns"], quote_identifier)
+            count_rows = self._execute_rows(connection, compiled["countSql"], tuple(compiled["countParameters"]))
+            matching_row_count = int(count_rows[0]["__schemer_count"]) if count_rows else 0
+            rows = self._execute_rows(connection, compiled["sql"], tuple(compiled["parameters"]))
+            result_rows = [
+                [self._json_cell(row.get(alias)) for alias in compiled["aliases"]]
+                for row in rows
+            ]
+            connection.rollback()
+            duration_ms = max(0, round((time.perf_counter() - started) * 1000))
+            return {
+                "source": {key: source[key] for key in ("profileId", "database", "namespace", "relation", "kind", "fingerprint")},
+                "queryVersion": 2,
+                "detailVersion": 1,
+                "columns": compiled["columns"],
+                "rows": result_rows,
+                "matchingRowCount": matching_row_count,
+                "offset": normalized_request["offset"],
+                "limit": normalized_request["limit"],
+                "hasMore": normalized_request["offset"] + len(result_rows) < matching_row_count,
+                "sql": compiled["sql"],
+                "parameters": [self._json_cell(value) for value in compiled["parameters"]],
+                "countSql": compiled["countSql"],
+                "countParameters": [self._json_cell(value) for value in compiled["countParameters"]],
+                "queryDurationMs": duration_ms,
+                "queriedAt": _utc_now(),
+            }
+        except PostgresServiceError:
+            try:
+                connection.rollback()
+            except Exception:
+                pass
+            raise
+        except Exception as exc:
+            try:
+                connection.rollback()
+            except Exception:
+                pass
+            raise PostgresServiceError(422, "detail_query_failed", _safe_sql_query_failure(exc)) from exc
         finally:
             self._close(connection)
 

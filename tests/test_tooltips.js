@@ -4,7 +4,7 @@ const vm = require("node:vm");
 
 const source = fs.readFileSync("src/schemii/web/app.js", "utf8");
 const start = source.indexOf("function elementHasTruncatedText");
-const end = source.indexOf("function positionTooltip", start);
+const end = source.indexOf("function showTooltip", start);
 assert.notEqual(start, -1, "truncated tooltip helper marker is missing");
 assert.notEqual(end, -1, "truncated tooltip helper end marker is missing");
 

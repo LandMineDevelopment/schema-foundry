@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .widget_query import QueryValidationError, normalize_query
+from .widget_query import QueryValidationError, is_searchable_text_type, normalize_number_format, normalize_query
 
 
 DASHBOARD_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
@@ -122,6 +122,71 @@ def _table_configuration(value: Any, query: dict[str, Any], widget_id: str) -> d
     return {"version": 1, "columns": normalized_columns, "pageSize": page_size}
 
 
+def _detail_configuration(value: Any, source_columns: list[dict[str, Any]], widget_id: str) -> dict[str, Any]:
+    required = {"version", "columns", "defaultSort", "rowIdentifier", "pageSize"}
+    if not isinstance(value, dict) or set(value) != required or isinstance(value.get("version"), bool) or value.get("version") != 1:
+        raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} detail configuration is invalid")
+    page_size = value.get("pageSize")
+    if isinstance(page_size, bool) or not isinstance(page_size, int) or page_size not in TABLE_PAGE_SIZES:
+        raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} detail page size is invalid")
+    snapshot_columns = {column["name"]: column for column in source_columns}
+    columns = value.get("columns")
+    if not isinstance(columns, list) or not 1 <= len(columns) <= 64:
+        raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} detail columns are invalid")
+    normalized_columns = []
+    configured_columns = set()
+    for column in columns:
+        if not isinstance(column, dict) or set(column) != {"sourceColumn", "label", "width", "hidden", "searchable", "numberFormat"}:
+            raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} detail column is invalid")
+        source_column = column.get("sourceColumn")
+        if not isinstance(source_column, str) or source_column not in snapshot_columns or source_column in configured_columns:
+            raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} detail source column is invalid or duplicated")
+        if not isinstance(column.get("hidden"), bool) or not isinstance(column.get("searchable"), bool):
+            raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} detail column behavior is invalid")
+        if column["searchable"] and not is_searchable_text_type(snapshot_columns[source_column]["type"]):
+            raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} searchable detail columns must use PostgreSQL text columns")
+        configured_columns.add(source_column)
+        try:
+            number_format = normalize_number_format(column.get("numberFormat"))
+        except QueryValidationError as exc:
+            raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} detail column format is invalid: {exc}") from exc
+        normalized_columns.append({
+            "sourceColumn": source_column,
+            "label": _bounded_text(column.get("label"), "detail column label", 128),
+            "width": _integer(column.get("width"), "detail column width", 64, 1024),
+            "hidden": column["hidden"],
+            "searchable": column["searchable"],
+            "numberFormat": number_format,
+        })
+    if all(column["hidden"] for column in normalized_columns):
+        raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} detail report must display at least one column")
+    default_sort = value.get("defaultSort")
+    normalized_sort = None
+    if default_sort is not None:
+        if not isinstance(default_sort, dict) or set(default_sort) != {"sourceColumn", "direction", "nulls"}:
+            raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} detail default sort is invalid")
+        source_column = default_sort.get("sourceColumn")
+        direction = default_sort.get("direction")
+        nulls = default_sort.get("nulls")
+        if not isinstance(source_column, str) or source_column not in configured_columns or not isinstance(direction, str) or direction not in {"asc", "desc"} or not isinstance(nulls, str) or nulls not in {"first", "last"}:
+            raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} detail default sort is invalid")
+        normalized_sort = {
+            "sourceColumn": source_column,
+            "direction": direction,
+            "nulls": nulls,
+        }
+    row_identifier = value.get("rowIdentifier")
+    if row_identifier is not None and (not isinstance(row_identifier, str) or row_identifier not in snapshot_columns):
+        raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} detail row identifier is invalid")
+    return {
+        "version": 1,
+        "columns": normalized_columns,
+        "defaultSort": normalized_sort,
+        "rowIdentifier": row_identifier,
+        "pageSize": page_size,
+    }
+
+
 def _visualization_configuration(value: Any, query: dict[str, Any], widget_id: str) -> dict[str, Any]:
     required = {"version", "mode", "selections"}
     if not isinstance(value, dict) or set(value) != required or isinstance(value.get("version"), bool) or value.get("version") != 1:
@@ -168,12 +233,14 @@ def _visualization_configuration(value: Any, query: dict[str, Any], widget_id: s
 
 
 def _widget_configuration(value: Any, widget_id: str, widget_kind: str) -> dict[str, Any]:
+    aggregate_fields = {"source", "query", "table", "visualization", "detail"}
     allowed = (set(), {"source"}, {"source", "query"}, {"source", "query", "table"}, {"source", "query", "visualization"}, {"source", "query", "table", "visualization"})
+    allowed += tuple(fields | {"detail"} for fields in allowed if {"source", "query"} <= fields)
     if not isinstance(value, dict) or set(value) not in allowed:
         raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} configuration must contain at most one source")
-    if widget_kind == "aggregate_report" and set(value) not in ({"source", "query"}, {"source", "query", "table"}, {"source", "query", "visualization"}, {"source", "query", "table", "visualization"}):
+    if widget_kind == "aggregate_report" and (not {"source", "query"} <= set(value) or set(value) - aggregate_fields):
         raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} aggregate report requires a source and query")
-    if widget_kind != "aggregate_report" and ({"table", "visualization"} & set(value)):
+    if widget_kind != "aggregate_report" and ({"table", "visualization", "detail"} & set(value)):
         raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} presentation requires an aggregate report")
     if not value:
         return {}
@@ -235,6 +302,8 @@ def _widget_configuration(value: Any, widget_id: str, widget_kind: str) -> dict[
         normalized["table"] = _table_configuration(value["table"], normalized["query"], widget_id)
     if "visualization" in value:
         normalized["visualization"] = _visualization_configuration(value["visualization"], normalized["query"], widget_id)
+    if "detail" in value:
+        normalized["detail"] = _detail_configuration(value["detail"], normalized_source["columns"], widget_id)
     return normalized
 
 

@@ -71,3 +71,19 @@ button { color: inherit; }
 .top-action-icon { display: grid; place-items: center; width: 31px; min-width: 31px; height: 31px; min-height: 31px; padding: 0; color: #aab4c1; border-color: transparent; }
 .top-action-icon:hover { color: var(--text); border-color: var(--line-strong); }
 .top-action-icon svg { width: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+
+.shared-icon-button, .icon-button { display: grid; width: 27px; min-width: 27px; height: 27px; min-height: 27px; padding: 0; border: 1px solid var(--line); border-radius: 5px; place-items: center; color: #747f8e; background: transparent; cursor: pointer; }
+.shared-icon-button:hover, .shared-icon-button:focus-visible, .icon-button:hover, .icon-button:focus-visible { color: var(--accent); border-color: #675426; outline: 0; background: #211b0f; }
+.shared-icon-button.active, .icon-button.active { color: var(--accent); border-color: #675426; background: #211b0f; }
+.shared-icon-button.danger:hover, .shared-icon-button.danger:focus-visible, .icon-button.danger:hover, .icon-button.danger:focus-visible { color: var(--danger); border-color: #65323a; background: #26171b; }
+.shared-icon-button:disabled, .icon-button:disabled { opacity: .35; cursor: not-allowed; }
+.shared-icon-button:disabled:hover, .icon-button:disabled:hover { color: #747f8e; border-color: var(--line); background: transparent; }
+.shared-icon-button svg, .icon-button svg { width: 13px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+
+.app-tooltip { position: fixed; z-index: 1000; width: max-content; max-width: min(260px, calc(100vw - 16px)); padding: 5px 8px; pointer-events: none; opacity: 0; border: 1px solid var(--line); border-radius: 4px; color: #cdd5df; background: #171c24; box-shadow: 0 5px 16px rgba(0, 0, 0, .28); font-size: 10px; line-height: 1.35; white-space: normal; transition: opacity .15s, transform .15s; }
+.app-tooltip[data-placement="right"] { transform: translateX(-4px); }
+.app-tooltip[data-placement="left"] { transform: translateX(4px); }
+.app-tooltip[data-placement="top"] { transform: translateY(4px); }
+.app-tooltip[data-placement="bottom"] { transform: translateY(-4px); }
+.app-tooltip.visible { opacity: 1; transform: translate(0); }
+.app-tooltip[hidden] { display: none; }

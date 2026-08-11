@@ -393,6 +393,8 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertTrue(result["truncated"])
         self.assertEqual(result["queryVersion"], 2)
         self.assertEqual(result["parameters"], ["cancelled", 3])
+        self.assertIsInstance(result["queryDurationMs"], int)
+        self.assertTrue(result["queriedAt"].endswith("Z"))
         self.assertEqual(result["lineage"]["measures"][0]["sourceColumn"], "amount")
         self.assertEqual(result["lineage"]["filterGroups"][0]["conditions"][0]["operator"], "neq")
         query_connection = connections[-1]
@@ -414,6 +416,72 @@ class PostgresServiceTests(unittest.TestCase):
         duplicate_ordinals = {**source, "columns": [{**column, "ordinal": 1} for column in source["columns"]]}
         with self.assertRaises(ValidationError):
             service.execute_widget_query("local", duplicate_ordinals, query)
+
+    def test_relation_detail_counts_and_pages_one_verified_snapshot(self):
+        responses = {
+            "SELECT current_database() AS database": [{"database": "demo"}],
+            "c.relkind AS catalog_kind": [{"catalog_kind": "r", "relation_kind": "table", "view_definition": None}],
+            "a.attname AS column_name": [
+                {"column_name": "status", "data_type": "text", "nullable": False, "ordinal": 1, "type_category": "S", "type_name": "text"},
+                {"column_name": "amount", "data_type": "numeric", "nullable": True, "ordinal": 2, "type_category": "N", "type_name": "numeric"},
+            ],
+            'count(*) AS "__schemer_count"': [{"__schemer_count": 3}],
+            '"status" AS "__schemer_c0"': {
+                "columns": ["__schemer_c0", "__schemer_c1"],
+                "rows": [("paid", Decimal("30.50")), ("paid", Decimal("12"))],
+            },
+        }
+        connections = []
+        service = PostgresService(
+            self.temporary_directory.name,
+            connect_factory=lambda **kwargs: (connections.append(Connection(responses=responses)) or connections[-1]),
+        )
+        descriptor = service.inspect_relation("local", "demo", "public", "orders")
+        source = {
+            **{key: descriptor[key] for key in ("profileId", "database", "namespace", "relation", "kind", "fingerprint")},
+            "columns": [{key: column[key] for key in ("name", "type", "nullable", "ordinal")} for column in descriptor["columns"]],
+        }
+        query = {
+            "version": 2,
+            "dimensions": [{"id": "dimension_status", "label": "Status", "column": "status"}],
+            "measures": [{"id": "measure_revenue", "label": "Revenue", "column": "amount", "aggregation": "sum", "distinct": False, "nullBehavior": "zero", "numberFormat": {"style": "decimal", "fractionDigits": 2}}],
+            "filters": [{"id": "filter_group_status", "conditions": [{"id": "filter_status", "column": "status", "operator": "neq", "values": ["cancelled"]}]}],
+            "sort": [],
+            "limit": 100,
+        }
+        selection = {"dimensions": [{"targetId": "dimension_status", "value": "paid"}], "measureId": "measure_revenue"}
+        detail = {
+            "version": 1,
+            "columns": [
+                {"id": "detail_status", "label": "Status", "column": "status", "numberFormat": {"style": "auto"}, "searchable": True},
+                {"id": "detail_amount", "label": "Amount", "column": "amount", "numberFormat": {"style": "decimal", "fractionDigits": 2}, "searchable": False},
+            ],
+            "rowIdentifier": None,
+        }
+        result = service.execute_relation_detail(
+            "local", source, query, selection, detail, 0, 2,
+            {"targetId": "detail_amount", "direction": "desc", "nulls": "last"}, "acme",
+        )
+        self.assertEqual(result["rows"], [["paid", "30.50"], ["paid", "12"]])
+        self.assertEqual(result["matchingRowCount"], 3)
+        self.assertTrue(result["hasMore"])
+        self.assertEqual(result["parameters"], ["cancelled", "paid", "%acme%", 2, 0])
+        self.assertEqual(result["countParameters"], ["cancelled", "paid", "%acme%"])
+        self.assertIsInstance(result["queryDurationMs"], int)
+        self.assertTrue(result["queriedAt"].endswith("Z"))
+        query_connection = connections[-1]
+        self.assertEqual(query_connection.executed[0][0], "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        self.assertIn(('LOCK TABLE "public"."orders" IN ACCESS SHARE MODE', ()), query_connection.executed)
+        count_index = next(index for index, item in enumerate(query_connection.executed) if '__schemer_count' in item[0])
+        page_index = next(index for index, item in enumerate(query_connection.executed) if '__schemer_c0' in item[0])
+        self.assertLess(count_index, page_index)
+        self.assertNotIn("JOIN", result["sql"].upper())
+        self.assertNotIn("acme", result["sql"])
+        self.assertEqual(query_connection.rollbacks, 1)
+        self.assertTrue(query_connection.closed)
+
+        with self.assertRaises(ValidationError):
+            service.execute_relation_detail("local", source, query, selection, detail, 0, 101, None, "")
 
     def test_relation_inspection_rejects_stale_kind_and_fingerprint(self):
         responses = {
