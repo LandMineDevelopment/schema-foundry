@@ -103,5 +103,7 @@ const shutdown = source.slice(shutdownStart, shutdownEnd);
 assert.ok(shutdown.indexOf("await flushPendingSave()") < shutdown.indexOf('fetch("/api/shutdown"'), "shutdown must save pending edits before stopping the server");
 assert.match(shutdown, /"X-Schemii-Token": postgresState\.token/, "shutdown must send the local session token");
 assert.match(source, /initializeSchemaLibrary\(\)\.finally[\s\S]+initializeOnboarding\(\)/, "onboarding must initialize after the workspace");
+assert.match(source, /workspace\.addEventListener\("pointerdown"[\s\S]*event\.target\.closest\("\.database-drift-banner"\)[^\n]*return;/, "database drift controls must not be captured as blank-canvas selection gestures");
+assert.match(source, /refresh-database-drift"\)\.addEventListener\("click", refreshLinkedPostgresDesign\)[\s\S]*dismiss-database-drift"\)\.addEventListener\("click"[\s\S]*databaseDriftBanner\.hidden = true/, "the drift banner must retain working refresh and dismiss actions");
 
 console.log("Onboarding and browser shutdown tests passed");

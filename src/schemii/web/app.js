@@ -4808,7 +4808,7 @@ elements.workspace.addEventListener("pointerdown", event => {
     middlePanPanelSnapshot = collapseWorkspacePanelsForMiddlePan();
     return;
   }
-  if (event.target.closest(".table-card") || event.target.closest(".connection-hit") || event.target.closest(".relationship-banner") || event.target.closest(".table-data-panel")) return;
+  if (event.target.closest(".table-card") || event.target.closest(".connection-hit") || event.target.closest(".relationship-banner") || event.target.closest(".database-drift-banner") || event.target.closest(".table-data-panel")) return;
   if (spacePressed || event.pointerType === "touch") {
     panState = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, viewX: view.x, viewY: view.y };
     elements.workspace.setPointerCapture(event.pointerId);
