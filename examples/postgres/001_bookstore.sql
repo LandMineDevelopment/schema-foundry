@@ -3,6 +3,12 @@ SELECT CASE WHEN to_regnamespace('bookstore') IS NULL THEN 'true' ELSE 'false' E
 
 BEGIN;
 
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '30s';
+SELECT pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtext('schemii:bookstore')::bigint
+);
+
 CREATE SCHEMA bookstore;
 COMMENT ON SCHEMA bookstore IS 'Schemii tutorial dataset v1';
 
@@ -180,8 +186,317 @@ COMMIT;
 
 SELECT CASE WHEN
     to_regnamespace('bookstore') IS NOT NULL
-    AND obj_description(to_regnamespace('bookstore'), 'pg_namespace') IS DISTINCT FROM 'Schemii tutorial dataset v2'
-    AND obj_description(to_regnamespace('bookstore'), 'pg_namespace') IS DISTINCT FROM 'Schemii tutorial dataset v3'
+    AND obj_description(to_regnamespace('bookstore'), 'pg_namespace') IN (
+        'Schemii tutorial dataset v3',
+        'Schemii tutorial dataset v4'
+    )
+THEN 'true' ELSE 'false' END AS reconcile_bookstore_v4 \gset
+\if :reconcile_bookstore_v4
+
+BEGIN;
+
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '30s';
+SELECT pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtext('schemii:bookstore')::bigint
+);
+
+DO $mercury_v4$
+DECLARE
+    reserved record;
+    existing_kind "char";
+    existing_comment text;
+    definition_is_canonical boolean;
+    index_is_qualifying boolean;
+    is_v3_upgrade boolean;
+    monthly_sales_is_canonical boolean := false;
+BEGIN
+    is_v3_upgrade := pg_catalog.obj_description(
+        pg_catalog.to_regnamespace('bookstore'),
+        'pg_namespace'
+    ) = 'Schemii tutorial dataset v3';
+
+    IF (
+        SELECT count(*)
+        FROM pg_catalog.pg_class AS relation
+        JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+        WHERE namespace.nspname = 'bookstore'
+          AND relation.relkind IN ('r', 'p')
+          AND relation.relname IN (
+              'publishers', 'authors', 'books', 'book_authors', 'inventory',
+              'customers', 'orders', 'order_items', 'reviews'
+          )
+    ) <> 9 THEN
+        RAISE EXCEPTION 'Mercury Books v4 requires its nine bookstore base tables';
+    END IF;
+
+    CREATE TEMPORARY VIEW mercury_v4_book_catalog_default AS
+    SELECT b.id, b.isbn, b.title, p.name AS publisher, b.price, b.format,
+           i.on_hand, string_agg(a.name, ', ' ORDER BY ba.author_order) AS authors
+    FROM bookstore.books b
+    JOIN bookstore.publishers p ON p.id = b.publisher_id
+    JOIN bookstore.inventory i ON i.book_id = b.id
+    JOIN bookstore.book_authors ba ON ba.book_id = b.id
+    JOIN bookstore.authors a ON a.id = ba.author_id
+    GROUP BY b.id, p.name, i.on_hand;
+
+    CREATE TEMPORARY VIEW mercury_v4_order_summary_default AS
+    SELECT orders.id AS order_id,
+           orders.customer_id,
+           customers.full_name AS customer_name,
+           orders.status,
+           orders.ordered_at,
+           orders.shipped_at,
+           orders.ordered_at::date AS order_date,
+           COALESCE(sum(order_items.quantity), 0)::bigint AS item_count,
+           COALESCE(sum(order_items.line_total), 0)::numeric(14,2) AS order_total
+    FROM bookstore.orders
+    JOIN bookstore.customers ON customers.id = orders.customer_id
+    LEFT JOIN bookstore.order_items ON order_items.order_id = orders.id
+    GROUP BY orders.id, customers.full_name;
+
+    CREATE TEMPORARY VIEW mercury_v4_low_stock_books_default AS
+    SELECT books.id AS book_id,
+           books.isbn,
+           books.title,
+           publishers.name AS publisher_name,
+           inventory.on_hand,
+           inventory.reorder_level,
+           inventory.reorder_level - inventory.on_hand AS units_below_reorder
+    FROM bookstore.books
+    JOIN bookstore.publishers ON publishers.id = books.publisher_id
+    JOIN bookstore.inventory ON inventory.book_id = books.id
+    WHERE inventory.on_hand < inventory.reorder_level;
+
+    CREATE TEMPORARY VIEW mercury_v4_customer_order_totals_default AS
+    SELECT customers.id AS customer_id,
+           customers.full_name AS customer_name,
+           customers.email,
+           count(DISTINCT orders.id) FILTER (WHERE orders.status <> 'cancelled')::bigint AS order_count,
+           COALESCE(sum(order_items.quantity) FILTER (WHERE orders.status <> 'cancelled'), 0)::bigint AS item_count,
+           COALESCE(sum(order_items.line_total) FILTER (WHERE orders.status <> 'cancelled'), 0)::numeric(14,2) AS lifetime_value,
+           max(orders.ordered_at) FILTER (WHERE orders.status <> 'cancelled') AS last_ordered_at
+    FROM bookstore.customers
+    LEFT JOIN bookstore.orders ON orders.customer_id = customers.id
+    LEFT JOIN bookstore.order_items ON order_items.order_id = orders.id
+    GROUP BY customers.id;
+
+    CREATE TEMPORARY VIEW mercury_v4_monthly_sales_default AS
+    SELECT date_trunc('month', orders.ordered_at AT TIME ZONE 'UTC')::date AS sales_month,
+           count(DISTINCT orders.id)::bigint AS order_count,
+           COALESCE(sum(order_items.quantity), 0)::bigint AS item_count,
+           COALESCE(sum(order_items.line_total), 0)::numeric(14,2) AS gross_sales
+    FROM bookstore.orders
+    JOIN bookstore.order_items ON order_items.order_id = orders.id
+    WHERE orders.status IN ('paid', 'packed', 'shipped')
+    GROUP BY date_trunc('month', orders.ordered_at AT TIME ZONE 'UTC')::date;
+
+    FOR reserved IN
+        SELECT *
+        FROM (VALUES
+            ('book_catalog', 'v'::"char", 'Schemii Mercury Books tutorial v4 reserved view: book_catalog', 'mercury_v4_book_catalog_default'),
+            ('order_summary', 'v'::"char", 'Schemii Mercury Books tutorial v4 reserved view: order_summary', 'mercury_v4_order_summary_default'),
+            ('low_stock_books', 'v'::"char", 'Schemii Mercury Books tutorial v4 reserved view: low_stock_books', 'mercury_v4_low_stock_books_default'),
+            ('customer_order_totals', 'v'::"char", 'Schemii Mercury Books tutorial v4 reserved view: customer_order_totals', 'mercury_v4_customer_order_totals_default'),
+            ('monthly_sales', 'm'::"char", 'Schemii Mercury Books tutorial v4 reserved materialized view: monthly_sales', 'mercury_v4_monthly_sales_default')
+        ) AS objects(object_name, expected_kind, expected_comment, canonical_name)
+    LOOP
+        SELECT relation.relkind, pg_catalog.obj_description(relation.oid, 'pg_class')
+        INTO existing_kind, existing_comment
+        FROM pg_catalog.pg_class AS relation
+        JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+        WHERE namespace.nspname = 'bookstore'
+          AND relation.relname = reserved.object_name;
+
+        IF FOUND THEN
+            IF existing_kind <> reserved.expected_kind THEN
+                RAISE EXCEPTION 'Mercury Books reserved object collision: bookstore.%', reserved.object_name;
+            END IF;
+
+            SELECT pg_catalog.pg_get_viewdef(
+                       pg_catalog.to_regclass(pg_catalog.format('bookstore.%I', reserved.object_name)),
+                       false
+                   ) = pg_catalog.pg_get_viewdef(
+                       pg_catalog.to_regclass(pg_catalog.format('pg_temp.%I', reserved.canonical_name)),
+                       false
+                   )
+            INTO definition_is_canonical;
+
+            IF reserved.object_name = 'monthly_sales' THEN
+                monthly_sales_is_canonical := definition_is_canonical;
+            END IF;
+
+            IF existing_comment = reserved.expected_comment THEN
+                IF definition_is_canonical IS DISTINCT FROM true THEN
+                    RAISE NOTICE 'Mercury Books reserved identity present but user-modified; preserving bookstore.%', reserved.object_name;
+                END IF;
+            ELSIF definition_is_canonical IS TRUE AND (
+                (reserved.object_name = 'book_catalog' AND existing_comment IS NULL)
+                OR (
+                    is_v3_upgrade
+                    AND reserved.object_name = 'order_summary'
+                    AND existing_comment = 'One row per Mercury Books order for resettable Schemer examples'
+                )
+            ) THEN
+                EXECUTE pg_catalog.format(
+                    'COMMENT ON %s bookstore.%I IS %L',
+                    CASE WHEN reserved.expected_kind = 'm' THEN 'MATERIALIZED VIEW' ELSE 'VIEW' END,
+                    reserved.object_name,
+                    reserved.expected_comment
+                );
+            ELSIF reserved.object_name = 'book_catalog' AND existing_comment IS NULL THEN
+                RAISE NOTICE 'Mercury Books reserved identity present but user-modified; preserving bookstore.book_catalog';
+            ELSE
+                RAISE EXCEPTION 'Mercury Books reserved object collision: bookstore.%', reserved.object_name;
+            END IF;
+        END IF;
+    END LOOP;
+
+    IF to_regclass('bookstore.book_catalog') IS NULL THEN
+        EXECUTE $view$
+            CREATE VIEW bookstore.book_catalog AS
+            SELECT b.id, b.isbn, b.title, p.name AS publisher, b.price, b.format,
+                   i.on_hand, string_agg(a.name, ', ' ORDER BY ba.author_order) AS authors
+            FROM bookstore.books b
+            JOIN bookstore.publishers p ON p.id = b.publisher_id
+            JOIN bookstore.inventory i ON i.book_id = b.id
+            JOIN bookstore.book_authors ba ON ba.book_id = b.id
+            JOIN bookstore.authors a ON a.id = ba.author_id
+            GROUP BY b.id, p.name, i.on_hand
+        $view$;
+        COMMENT ON VIEW bookstore.book_catalog IS 'Schemii Mercury Books tutorial v4 reserved view: book_catalog';
+    END IF;
+
+    IF to_regclass('bookstore.order_summary') IS NULL THEN
+        EXECUTE $view$
+            CREATE VIEW bookstore.order_summary AS
+            SELECT orders.id AS order_id,
+                   orders.customer_id,
+                   customers.full_name AS customer_name,
+                   orders.status,
+                   orders.ordered_at,
+                   orders.shipped_at,
+                   orders.ordered_at::date AS order_date,
+                   COALESCE(sum(order_items.quantity), 0)::bigint AS item_count,
+                   COALESCE(sum(order_items.line_total), 0)::numeric(14,2) AS order_total
+            FROM bookstore.orders
+            JOIN bookstore.customers ON customers.id = orders.customer_id
+            LEFT JOIN bookstore.order_items ON order_items.order_id = orders.id
+            GROUP BY orders.id, customers.full_name
+        $view$;
+        COMMENT ON VIEW bookstore.order_summary IS 'Schemii Mercury Books tutorial v4 reserved view: order_summary';
+    END IF;
+
+    IF to_regclass('bookstore.low_stock_books') IS NULL THEN
+        EXECUTE $view$
+            CREATE VIEW bookstore.low_stock_books AS
+            SELECT books.id AS book_id,
+                   books.isbn,
+                   books.title,
+                   publishers.name AS publisher_name,
+                   inventory.on_hand,
+                   inventory.reorder_level,
+                   inventory.reorder_level - inventory.on_hand AS units_below_reorder
+            FROM bookstore.books
+            JOIN bookstore.publishers ON publishers.id = books.publisher_id
+            JOIN bookstore.inventory ON inventory.book_id = books.id
+            WHERE inventory.on_hand < inventory.reorder_level
+        $view$;
+        COMMENT ON VIEW bookstore.low_stock_books IS 'Schemii Mercury Books tutorial v4 reserved view: low_stock_books';
+    END IF;
+
+    IF to_regclass('bookstore.customer_order_totals') IS NULL THEN
+        EXECUTE $view$
+            CREATE VIEW bookstore.customer_order_totals AS
+            SELECT customers.id AS customer_id,
+                   customers.full_name AS customer_name,
+                   customers.email,
+                   count(DISTINCT orders.id) FILTER (WHERE orders.status <> 'cancelled')::bigint AS order_count,
+                   COALESCE(sum(order_items.quantity) FILTER (WHERE orders.status <> 'cancelled'), 0)::bigint AS item_count,
+                   COALESCE(sum(order_items.line_total) FILTER (WHERE orders.status <> 'cancelled'), 0)::numeric(14,2) AS lifetime_value,
+                   max(orders.ordered_at) FILTER (WHERE orders.status <> 'cancelled') AS last_ordered_at
+            FROM bookstore.customers
+            LEFT JOIN bookstore.orders ON orders.customer_id = customers.id
+            LEFT JOIN bookstore.order_items ON order_items.order_id = orders.id
+            GROUP BY customers.id
+        $view$;
+        COMMENT ON VIEW bookstore.customer_order_totals IS 'Schemii Mercury Books tutorial v4 reserved view: customer_order_totals';
+    END IF;
+
+    IF to_regclass('bookstore.monthly_sales') IS NULL THEN
+        EXECUTE $materialized_view$
+            CREATE MATERIALIZED VIEW bookstore.monthly_sales AS
+            SELECT date_trunc('month', orders.ordered_at AT TIME ZONE 'UTC')::date AS sales_month,
+                   count(DISTINCT orders.id)::bigint AS order_count,
+                   COALESCE(sum(order_items.quantity), 0)::bigint AS item_count,
+                   COALESCE(sum(order_items.line_total), 0)::numeric(14,2) AS gross_sales
+            FROM bookstore.orders
+            JOIN bookstore.order_items ON order_items.order_id = orders.id
+            WHERE orders.status IN ('paid', 'packed', 'shipped')
+            GROUP BY date_trunc('month', orders.ordered_at AT TIME ZONE 'UTC')::date
+        $materialized_view$;
+        COMMENT ON MATERIALIZED VIEW bookstore.monthly_sales IS 'Schemii Mercury Books tutorial v4 reserved materialized view: monthly_sales';
+        monthly_sales_is_canonical := true;
+    END IF;
+
+    IF to_regclass('bookstore.monthly_sales_sales_month_uidx') IS NULL THEN
+        IF monthly_sales_is_canonical THEN
+            CREATE UNIQUE INDEX monthly_sales_sales_month_uidx
+                ON bookstore.monthly_sales (sales_month);
+            COMMENT ON INDEX bookstore.monthly_sales_sales_month_uidx IS 'Schemii Mercury Books tutorial v4 reserved index: monthly_sales_sales_month_uidx';
+        ELSE
+            RAISE NOTICE 'Mercury Books index restoration skipped because reserved bookstore.monthly_sales is user-modified';
+        END IF;
+    END IF;
+
+    SELECT index_definition.indisunique
+           AND index_definition.indisvalid
+           AND index_definition.indpred IS NULL
+           AND index_definition.indexprs IS NULL
+           AND index_definition.indnkeyatts = 1
+           AND index_definition.indnatts = 1
+           AND (
+               SELECT array_agg(attribute.attname ORDER BY index_key.ordinality)
+               FROM unnest(index_definition.indkey) WITH ORDINALITY AS index_key(attnum, ordinality)
+               JOIN pg_catalog.pg_attribute AS attribute
+                 ON attribute.attrelid = index_definition.indrelid
+                AND attribute.attnum = index_key.attnum
+           ) = ARRAY['sales_month']::name[]
+    INTO index_is_qualifying
+    FROM pg_catalog.pg_index AS index_definition
+    WHERE index_definition.indexrelid = to_regclass('bookstore.monthly_sales_sales_month_uidx')
+      AND index_definition.indrelid = to_regclass('bookstore.monthly_sales');
+
+    IF to_regclass('bookstore.monthly_sales_sales_month_uidx') IS NOT NULL
+       AND index_is_qualifying IS DISTINCT FROM true THEN
+        RAISE EXCEPTION 'Mercury Books reserved index is not a qualifying unique index: bookstore.monthly_sales_sales_month_uidx';
+    END IF;
+
+    IF to_regclass('bookstore.monthly_sales_sales_month_uidx') IS NOT NULL
+       AND pg_catalog.obj_description(to_regclass('bookstore.monthly_sales_sales_month_uidx'), 'pg_class')
+           IS DISTINCT FROM 'Schemii Mercury Books tutorial v4 reserved index: monthly_sales_sales_month_uidx' THEN
+        RAISE EXCEPTION 'Mercury Books reserved object collision: bookstore.monthly_sales_sales_month_uidx';
+    END IF;
+
+    IF is_v3_upgrade THEN
+        COMMENT ON SCHEMA bookstore IS 'Schemii tutorial dataset v4';
+    END IF;
+
+    DROP VIEW pg_temp.mercury_v4_book_catalog_default;
+    DROP VIEW pg_temp.mercury_v4_order_summary_default;
+    DROP VIEW pg_temp.mercury_v4_low_stock_books_default;
+    DROP VIEW pg_temp.mercury_v4_customer_order_totals_default;
+    DROP VIEW pg_temp.mercury_v4_monthly_sales_default;
+END
+$mercury_v4$;
+
+COMMIT;
+
+\endif
+
+SELECT CASE WHEN
+    to_regnamespace('bookstore') IS NOT NULL
+    AND obj_description(to_regnamespace('bookstore'), 'pg_namespace') = 'Schemii tutorial dataset v1'
     AND (
         SELECT count(*) = 9
         FROM pg_catalog.pg_class c
@@ -194,6 +509,12 @@ THEN 'true' ELSE 'false' END AS expand_bookstore \gset
 \if :expand_bookstore
 
 BEGIN;
+
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '30s';
+SELECT pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtext('schemii:bookstore')::bigint
+);
 
 INSERT INTO bookstore.publishers (id, name, country_code, founded_year) VALUES
     (4, 'Cedar & Ink', 'US', 1996),
@@ -330,10 +651,7 @@ COMMIT;
 
 SELECT CASE WHEN
     to_regnamespace('bookstore') IS NOT NULL
-    AND (
-        obj_description(to_regnamespace('bookstore'), 'pg_namespace') IS DISTINCT FROM 'Schemii tutorial dataset v3'
-        OR to_regclass('bookstore.order_summary') IS NULL
-    )
+    AND obj_description(to_regnamespace('bookstore'), 'pg_namespace') = 'Schemii tutorial dataset v2'
     AND to_regclass('bookstore.orders') IS NOT NULL
     AND to_regclass('bookstore.customers') IS NOT NULL
     AND to_regclass('bookstore.order_items') IS NOT NULL
@@ -341,6 +659,33 @@ THEN 'true' ELSE 'false' END AS add_dashboard_view \gset
 \if :add_dashboard_view
 
 BEGIN;
+
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '30s';
+SELECT pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtext('schemii:bookstore')::bigint
+);
+
+DO $mercury_v3$
+DECLARE
+    existing_kind "char";
+    existing_comment text;
+BEGIN
+    SELECT relation.relkind, pg_catalog.obj_description(relation.oid, 'pg_class')
+    INTO existing_kind, existing_comment
+    FROM pg_catalog.pg_class AS relation
+    JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+    WHERE namespace.nspname = 'bookstore'
+      AND relation.relname = 'order_summary';
+
+    IF FOUND AND (
+        existing_kind <> 'v'
+        OR existing_comment IS DISTINCT FROM 'One row per Mercury Books order for resettable Schemer examples'
+    ) THEN
+        RAISE EXCEPTION 'Mercury Books reserved object collision: bookstore.order_summary';
+    END IF;
+END
+$mercury_v3$;
 
 CREATE OR REPLACE VIEW bookstore.order_summary AS
 SELECT orders.id AS order_id,
@@ -362,4 +707,13 @@ COMMENT ON SCHEMA bookstore IS 'Schemii tutorial dataset v3';
 
 COMMIT;
 
+\endif
+
+-- A new install reaches v3 later in this file; rerun once so the guarded v4
+-- reconciliation follows the same path as an existing v3 installation.
+SELECT CASE WHEN
+    obj_description(to_regnamespace('bookstore'), 'pg_namespace') = 'Schemii tutorial dataset v3'
+THEN 'true' ELSE 'false' END AS finish_bookstore_v4 \gset
+\if :finish_bookstore_v4
+\ir 001_bookstore.sql
 \endif

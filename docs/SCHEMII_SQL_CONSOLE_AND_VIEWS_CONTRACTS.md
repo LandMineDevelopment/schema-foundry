@@ -1,6 +1,6 @@
 # Schemii SQL Console And Views Contracts
 
-Status: Phase 3 design approved. Phase 4 SQL Console read and write execution implemented; Views backend remains approval-gated.
+Status: SQL Console read/write execution and the live Schemii Views catalog, inspection, ordinary-view lifecycle, and materialized-view creation/recreation/deletion are implemented. Kind conversion and materialized refresh remain unsupported.
 
 This document defines the execution, catalog, persistence, conflict, and migration boundaries for Schemii's independent SQL Console and graphical Views layer. It extends focused shared infrastructure used by Schemii and Schemer without combining their application workflows or weakening their distinct revision guards.
 
@@ -21,20 +21,13 @@ Extend these existing modules rather than adding Console- or Views-specific copi
 - `postgres_http.py`: capability-scoped `/api/postgres/...` routes and per-application policies.
 - `relation_source.py`: exact persisted relation identity and semantic column snapshot.
 - `shared_web/session-client.js` and `shared_web/postgres-client.js`: authenticated browser transport.
-- Existing Schemii migration `preview()` and `apply()`: all view DDL planning and application.
+- Dedicated Schemii `preview_view_mutation()` and `apply_view_mutation()`: saved-schema-bound view DDL planning and application, isolated from general schema plans.
 
 Do not introduce another connection implementation, SQL parser, profile store, HTTP session mechanism, migration executor, or generic application framework.
 
 ### Capability Split
 
-The current relation-query capability is too broad for Schemii Views. Split the safe exact-source operations from Schemer analytics:
-
-- `relation_read`: relation verification and bounded row preview for tables, views, and materialized views.
-- `relation_query`: Schemer aggregate, detail, and temporal execution.
-- `console`: shared execution registry and read/write policy hooks.
-- `view_actions`: Schemii-only materialized-view refresh and future narrowly scoped view operations.
-
-Schemii mounts `relation_read`, `console`, schema migration, catalog, and profiles. Schemer mounts `relation_read`, `relation_query`, its read-only console policy, catalog, and profiles. Schemer does not gain Schemii migration or write capabilities.
+Schemii mounts the shared profile, catalog, schema, read-SQL, and Console capabilities, including its write-enabled Console policy. Schemer separately mounts relation analytics and its own revision-bound policies. The two view mutation routes are implemented directly by the Schemii server and are not mounted by Schemer. There is currently no `view_actions` capability or materialized-refresh route.
 
 The existing `POST /api/postgres/profiles/{profileId}/sql` route remains a backward-compatible, single-statement, read-only adapter over the shared executor. Existing Schemii table tools, AI actions, and Schemer analytic SQL do not have to migrate in the same release as the standalone Console. The adapter retains each application's current policy and guards; it never accepts write grants.
 
@@ -57,6 +50,7 @@ Exact relation operations additionally carry canonical source identity:
   "database": "bookstore",
   "namespace": "bookstore",
   "relation": "order_summary",
+  "operation": "upsert",
   "kind": "view",
   "fingerprint": "64-lowercase-hex-characters",
   "columns": []
@@ -179,59 +173,122 @@ Server logs may record execution ID, timestamp, mode, exact non-secret target id
 
 ## Views Catalog And Inspection
 
-The live PostgreSQL catalog is authoritative for relation kind, definition, ownership, output columns, dependencies, and materialized status. Extend the shared catalog result additively with:
+The live PostgreSQL catalog is authoritative. Views first derives its target only from the active saved schema record:
 
-- owner role name and whether the current role can alter or refresh;
-- ordered direct dependencies and dependents with exact identity and kind;
-- bounded definition availability and existing 64 KiB definition cap;
-- materialized population status and concurrent-refresh eligibility when PostgreSQL exposes it;
-- the existing stable semantic fingerprint.
+- `schemaId` is the active record ID;
+- `profileId`, `database`, and `namespace` exactly equal `schema.postgres.sourceProfileId`, `schema.postgres.database`, and `schema.postgres.namespace`;
+- `expectedSchemaRevision` is the record's current positive integer `revision`;
+- `layoutToken` is the record's current 64-character layout hash.
 
-Permission-denied metadata is represented as unavailable with a reason, not fabricated or silently omitted. Catalog and preview operations are read-only and bounded.
+Without that complete binding, the Views workspace does not query PostgreSQL. Browser requests also reject responses whose profile, database, namespace, relation, or kind differs from the binding/request, and generation guards discard stale catalog and descriptor responses.
 
-The approved frontend surfaces these contracts as follows:
+### GET APIs
 
-- Browse Views lists exact live objects.
-- Relations mode navigates upstream, selected, and downstream objects.
-- Column Flow shows server-derived column provenance when available and an explicit unavailable state otherwise.
-- Impact mode summarizes affected relations from the verified dependency graph.
-- The right inspector displays the exact catalog snapshot and becomes read-only when permissions do not allow changes.
+```text
+GET /api/postgres/profiles/{profileId}/relations?database={database}&namespace={namespace}
+GET /api/postgres/profiles/{profileId}/relation?database={database}&namespace={namespace}&relation={relation}&expectedKind={kind}[&expectedFingerprint={fingerprint}]
+```
+
+Both routes require the authenticated local PostgreSQL session. Each uses a repeatable-read, read-only transaction and verifies `current_database()` against `database`. The catalog response is:
+
+```json
+{
+  "profileId": "local",
+  "database": "bookstore",
+  "namespace": "bookstore",
+  "relations": [{"name": "order_summary", "kind": "view"}]
+}
+```
+
+The shared catalog may contain tables, ordinary views, and materialized views; the Schemii Views browser retains only `view` and `materialized_view`. The descriptor returns exact target identity and kind plus:
+
+- ordered semantic columns (`name`, PostgreSQL display `type`, `nullable`, `ordinal`, and advisory suggestions);
+- a stable 64-character semantic fingerprint covering identity, ordered columns, catalog kind, and view definition;
+- `definition`: `{status:"available", format:"query", sql}` or `{status:"unavailable", reason:"not_permitted"|"too_large"|"not_supported"}` with a 64 KiB cap;
+- `owner`: an available role name or explicit `not_permitted` envelope;
+- advisory current-role permissions: `canSelect`, `canAlter`, and materialized-only `canRefresh`;
+- direct dependencies and dependents, each as an available envelope of exact database/namespace/relation/kind identities, capped at 500 with `truncated`;
+- `materialized`: population and qualifying unique-index-based concurrent-refresh eligibility for materialized views, or `not_applicable` for other kinds;
+- `columnProvenance`: always `{status:"unavailable", reason:"not_supported"}`.
+
+`expectedKind` and optional `expectedFingerprint` cause `relation_changed` if live metadata differs. Foreign tables may occur in lineage as `foreign_table`, but the descriptor endpoint accepts only tables, views, and materialized views; the Views UI therefore displays foreign-table lineage as inspection unavailable. PostgreSQL dependency metadata is relation-level only. No output-column mappings are inferred.
+
+The live frontend:
+
+- lists exact live objects in a right-side sibling pane;
+- applies case-insensitive typed search to already loaded cards without rerendering the workspace;
+- combines search with All, Views, and Materialized kind filters;
+- shows the selected view, exact output fields, direct lineage, and a compact impact summary;
+- expands supported same-namespace source descriptors in place and respects reduced motion;
+- opens an idempotent read-only relation inspector and disables inspection for unsupported or cross-namespace lineage;
+- makes a definition read-only when it is unavailable or advisory `canAlter` is false.
 
 ## View Editing And Migration
 
-An editable draft is design state, not live catalog state. It carries the exact source fingerprint from which editing began. Save draft persists through the normal schema-record revision guard. Commit changes means migration preview, never direct DDL.
+Definition drafts remain browser-local and are not inserted into `schema.views` before preview. Duplicate regenerates the statement with the new identity. Commit means preview then apply; neither the Console nor `/plans/{id}/apply` accepts a view-mutation plan.
 
-Workflow:
+### Preview API
 
-1. Re-inspect the exact relation and compare the expected relation fingerprint.
-2. Return `relation_changed` and require refresh when kind, columns, or definition changed.
-3. Build the desired Schemii schema record with the edited full definition.
-4. Call the existing migration `preview()` with exact profile, database, namespace, desired schema, and destructive choice.
-5. Present generated SQL, warnings, dependencies, locks, unsupported operations, and destructive steps.
-6. Apply only the opaque current `planId` through existing transactional `apply()`.
-7. Recheck stored profile fingerprint and live schema fingerprint at apply; return `profile_changed` or `stale_plan` on mismatch.
+```text
+POST /api/postgres/profiles/{profileId}/views/preview
+```
 
-Ordinary views use existing `CREATE OR REPLACE VIEW` planning when PostgreSQL permits it. Output removal, rename, reorder, or type changes must be identified before replacement.
+The JSON object must contain exactly:
 
-Materialized view definition changes are explicit destructive recreation where replacement is unavailable. They require destructive preview selection and apply confirmation. No UI labels recreation as an ordinary save.
+```json
+{
+  "schemaId": "schema_one",
+  "expectedSchemaRevision": 7,
+  "layoutToken": "64-lowercase-hex-characters",
+  "database": "bookstore",
+  "namespace": "bookstore",
+  "relation": "order_summary",
+  "expectation": {"kind": "view", "fingerprint": "64-lowercase-hex-characters"},
+  "desired": {"kind": "view", "definition": "CREATE VIEW bookstore.order_summary AS SELECT 1"},
+  "allowDestructive": false
+}
+```
+
+For creation, `expectation` is exactly `{"absent":true}`. For replacement or deletion, it is exactly `kind` plus `fingerprint`. `operation` is `upsert` or `delete`. Upsert requires `desired` with exactly `kind` plus one non-empty, single SQL statement whose `CREATE [OR REPLACE] VIEW` or `CREATE MATERIALIZED VIEW` kind and namespace/name identity match the request. Delete omits `desired`. Unknown fields are rejected.
+
+Before planning, the schema store checks the exact schema ID, revision, complete layout token, saved PostgreSQL target, and stable saved-view identity. Creation requires no matching saved item; replacement and deletion require exactly one matching item of the expected kind. Preview then opens a repeatable-read read-only transaction, verifies the database and live expectation, and rechecks the stored profile fingerprint after inspection. Plans are versioned, opaque, process-local, profile-bound, atomically claimed during apply, and expire after 15 minutes by default. The public plan includes the operation, reviewed steps, warnings, and whether it is destructive, but not its private saved-schema binding, profile fingerprint, or preservation manifest.
+
+Implemented operations:
+
+- absent ordinary view: normalized to `CREATE VIEW`;
+- existing ordinary view: normalized to `CREATE OR REPLACE VIEW`;
+- absent materialized view: `CREATE MATERIALIZED VIEW`;
+- existing materialized view: reviewed transactional recreation preserving supported owner, ACL, relation/column comments, indexes/comments, reloptions, tablespace, access method, and populated/unpopulated intent;
+- ordinary/materialized kind conversion in either direction: rejected with `view_kind_conversion_unsupported`;
+- existing ordinary or materialized view deletion: reviewed non-`CASCADE` drop with exact identity/fingerprint revalidation.
+
+PostgreSQL validates ordinary replacement output-column compatibility during apply. Preview returns a warning rather than claiming to pre-detect every output removal, rename, reorder, or type change. Generated view mutation SQL never adds `CASCADE`.
+
+### Apply API
+
+```text
+POST /api/postgres/profiles/{profileId}/view-plans/{planId}/apply
+```
+
+The request body is exactly `{"confirmDestructive":false}` with a boolean value. Before opening PostgreSQL, the server resolves the plan, revalidates the schema revision/layout/target binding, and holds that schema's in-process lock through PostgreSQL apply and narrow saved-schema synchronization. It rejects expired/wrong-profile plans, changed profiles, and missing destructive confirmation.
+
+Apply uses one transaction and the saved PostgreSQL role. With default service settings it applies a 5-second `lock_timeout`, a 30-second `statement_timeout`, and a transaction-scoped advisory lock keyed to the namespace. For an existing ordinary view it executes `SELECT * FROM qualified_view LIMIT 0` before catalog reinspection; this takes access-share locks on the view and referenced relations, blocks conflicting target DDL, and does not request access-exclusive locks on base relations. PostgreSQL 17 rejects `LOCK TABLE` for materialized views, so apply uses `REFRESH MATERIALIZED VIEW ... WITH NO DATA` transactionally to acquire `AccessExclusiveLock`; rollback restores the original population state if apply fails. While that lock is held, Schemii rechecks the semantic fingerprint, supported metadata fingerprint, and direct dependents. Recreation executes under the original owner and restores reviewed metadata before commit. Stored rows are discarded and repopulated when the original view was populated; unpopulated views remain unpopulated. User triggers, extra rules, security labels, invalid indexes, non-permanent storage, non-owner grant histories, unavailable/truncated lineage, and any direct dependent block recreation. Delete verifies absence after the reviewed non-`CASCADE` drop. Any pre-commit failure rolls back all steps and returns `relation_changed`, the relevant conflict, or `apply_failed`. The consumed plan is removed after a successful commit.
+
+### Post-Commit Saved-Schema Sync
+
+After commit, the server appends a deterministic saved item for expected-absent creation, updates the exact stable saved item for replacement, or removes that exact semantic item for deletion. It preserves unrelated views and schema content and the complete layout byte-for-byte as parsed. Deletion intentionally retains any layout object formerly associated with the removed semantic item because layout is user-owned data. Sync increments the schema revision and returns the unchanged layout token.
+
+A post-commit identity/revision conflict returns `schemaSync.status: "conflict"`; a write failure returns `schemaSync.status: "storage_error"`. These statuses do not roll back an already committed PostgreSQL transaction. The UI says PostgreSQL committed, reloads the active schema/catalog, and never retries the plan automatically.
 
 ### Materialized Refresh
 
-Refresh is separate from migration apply:
-
-```text
-POST /api/postgres/profiles/{profileId}/relation/refresh
-```
-
-The request carries exact canonical source identity, `concurrently`, and an explicit confirmation. The server rechecks database, kind, fingerprint, role permission, population state, and concurrent-refresh eligibility immediately before execution. It uses the shared execution registry for timeout, cancellation, concurrency, and result status.
-
-Refresh never changes saved widget or view definitions. Standard refresh warns that reads may block; concurrent refresh explains its PostgreSQL unique-index requirement and longer resource use.
+No materialized-view refresh endpoint or UI control is implemented. `canRefresh` and `concurrentRefreshEligible` are inspection metadata only; they do not authorize or initiate refresh.
 
 ## Views Layout Persistence
 
 Keep one Schemii schema record, revision, and layout token. Do not create a second store or independent revision that could commit semantic and visual state out of order.
 
-Upgrade `schema.layout` to version 2:
+The implemented storage serializer normalizes saved layouts to version 2 while preserving existing extension fields:
 
 ```json
 {
@@ -243,11 +300,11 @@ Upgrade `schema.layout` to version 2:
 }
 ```
 
-Version-1 `tables` and `view` fields migrate losslessly into `layers.tables`. View objects use stable saved Schemii view IDs as keys and retain exact namespace/name/kind/live OID metadata for refresh matching. Match existing objects first by live OID, then exact namespace/name/kind. A relation fingerprint is not a layout key because semantic edits must not discard position.
+Version-1 `tables` and `view` fields migrate into `layers.tables`. Existing version-2 `layers.views`, including object records, viewport, and extension fields, is preserved by browser table-layout serialization. The current live Views workspace does not position cards on a saved canvas or update the Views viewport.
 
-Both layers' positions, colors, and viewport are user-owned. Introspection updates semantic content without regenerating established layout. The existing schema `revision`, protocol-2 layout token, `schema_conflict`, and `layout_conflict` cover the complete version-2 layout. Either conflict requires refresh; no stale tab may overwrite either layer.
+All stored layout is user-owned. The schema `revision`, protocol-2 layout token, `schema_conflict`, and `layout_conflict` cover the complete version-2 layout. Either conflict requires refresh; no stale tab may overwrite either layer. View mutation preview/apply requires the complete current token, and post-commit synchronization does not regenerate, normalize, or otherwise change layout.
 
-`schema_layout_token()` continues hashing the complete layout and therefore naturally covers version 2. `is_wholesale_layout_change()` must be upgraded to inspect established objects in both `layers.tables` and `layers.views`, with tests proving that table-only, view-only, and combined layout replacement attempts cannot bypass the current token guard. Existing version-1 records remain readable and writable during migration; the first successful save normalizes them to version 2 without changing parsed table layout.
+`schema_layout_token()` hashes the complete layout. `is_wholesale_layout_change()` checks established objects and viewports in both `layers.tables` and `layers.views`; tests cover table-only, view-only, combined, and viewport replacement attempts. Existing version-1 records remain readable, and the next browser save writes version 2 without changing the parsed table layout.
 
 ## Schemer Compatibility
 
@@ -258,19 +315,11 @@ Both layers' positions, colors, and viewport are user-owned. Introspection updat
 - Schemii write grants are not mounted by Schemer.
 - Shared execution/cancellation mechanics may be reused by Schemer only through its read-only policy.
 
-## Frontend Inspection Map
+## Tutorial v4 Coverage
 
-Phase 3 adds no runtime frontend behavior. The current browser-local prototype at `http://127.0.0.1:8080/` demonstrates the workflows governed by these contracts:
+The Mercury Books seed's v4 reconciliation adds four ordinary views (`book_catalog`, `order_summary`, `low_stock_books`, and `customer_order_totals`) and one materialized view (`monthly_sales`) with a qualifying unique `sales_month` index. It verifies the nine base tables, compares live definitions with temporary canonical definitions, creates missing reserved objects, and does not use `CREATE OR REPLACE`, refresh, or drop in the v4 reconciliation block. Recognized v4 objects with modified definitions are preserved; index restoration is skipped when modified `monthly_sales` is not compatible.
 
-1. SQL Console target header maps to exact target binding.
-2. Write toggle maps to ephemeral write grants.
-3. Run/Cancel maps to execution registry and cancellation.
-4. Views right inspector maps to exact relation catalog snapshots.
-5. Save draft maps to schema revision persistence.
-6. Commit changes maps to migration preview/apply.
-7. Relations, Column Flow, and Impact map to dependency and provenance catalog data.
-
-Backend phases must make these states live without changing their safety meaning.
+For an exact legacy-v3 upgrade, canonical `order_summary` with its legacy reserved comment is adopted and relabeled for v4. A legacy-v3 `order_summary` carrying that old reserved comment but a modified definition instead triggers the reserved-object collision error. This is intentional collision safety, not modified-object preservation.
 
 ## Acceptance Decisions
 
@@ -278,7 +327,8 @@ Backend phases must make these states live without changing their safety meaning
 - One submitted Console script is one all-or-nothing transaction.
 - Write mode requires an exact ephemeral grant and selected-role permission.
 - Real cancellation uses an execution registry and PostgreSQL cancellation.
-- Live catalog fingerprints guard Views inspection, editing, preview, refresh, and apply.
-- View DDL uses existing migration preview/apply only.
+- Live catalog fingerprints guard Views inspection, replacement preview, and apply; expected absence guards creation.
+- View DDL uses only the dedicated Schemii view preview/apply plan resource.
 - Views layout is a separate layer inside the existing versioned Schemii layout and conflict guard.
 - Schemer keeps its stronger dashboard and source boundaries.
+- Existing materialized changes, kind conversion, deletion, `CASCADE`, and materialized refresh are not implemented.

@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from schemii.schema_store import SchemaStore
+from schemii.schema_store import SchemaStore, SchemaStoreError
 from schemii.server import CONTENT_SECURITY_POLICY, _is_local_request, _proposal_manifest_fallback, make_handler
 from tests.http_test_support import FakePostgresService, RunningHttpServer
 
@@ -245,6 +245,159 @@ class ServerTests(unittest.TestCase):
         self.assertIn(("introspect", "local", "public"), self.service.calls)
         self.assertIn(("preview", "local", "public", schema, True), self.service.calls)
         self.assertIn(("apply", "local", "plan_one", True), self.service.calls)
+
+    def test_exact_view_preview_apply_and_post_commit_schema_sync(self):
+        record = {
+            "id": "schema_one",
+            "schema": {
+                "projectName": "Demo", "tables": [], "relationships": [], "functions": [],
+                "views": [{
+                    "id": "view_summary", "name": "summary", "namespace": "public",
+                    "materialized": False, "definition": 'CREATE VIEW "public"."summary" AS SELECT 1',
+                }],
+                "layout": {"version": 2, "layers": {"views": {"objects": {"view_summary": {"x": 10, "y": 20}}}}},
+                "postgres": {"sourceProfileId": "local", "database": "demo", "namespace": "public"},
+            },
+        }
+        saved = self.store.save("schema_one", record, expected_layout_token=None, layout_protocol=None)
+        self.service.view_layout_token = saved["layoutToken"]
+        preview = {
+            "schemaId": "schema_one", "expectedSchemaRevision": saved["revision"], "layoutToken": saved["layoutToken"],
+            "database": "demo", "namespace": "public", "relation": "summary",
+            "operation": "upsert",
+            "expectation": {"kind": "view", "fingerprint": "a" * 64},
+            "desired": {"kind": "view", "definition": 'CREATE VIEW "public"."summary" AS SELECT 2'},
+            "allowDestructive": False,
+        }
+        preview_path = "/api/postgres/profiles/local/views/preview"
+        self.assertEqual(self.request(preview_path, "POST", preview)[0], 403)
+        self.assertEqual(self.request(preview_path, "POST", {**preview, "extra": True}, authorized=True)[0], 400)
+        self.assertEqual(self.request(preview_path, "POST", preview, authorized=True)[0], 200)
+        self.assertIn((
+            "preview_view_mutation", "local", "demo", "public", "summary", "upsert", preview["expectation"], preview["desired"], False,
+            {"schemaId": "schema_one", "expectedSchemaRevision": saved["revision"], "layoutToken": saved["layoutToken"], "savedViewId": "view_summary"},
+        ), self.service.calls)
+
+        apply_path = "/api/postgres/profiles/local/view-plans/plan_view/apply"
+        self.assertEqual(self.request(apply_path, "POST", {}, authorized=True)[0], 400)
+        status, body, _ = self.request(apply_path, "POST", {"confirmDestructive": False}, authorized=True)
+        self.assertEqual(status, 200)
+        result = json.loads(body)
+        self.assertTrue(result["applied"])
+        self.assertEqual(result["schemaSync"]["status"], "saved")
+        binding_call = self.service.calls.index(("view_mutation_binding", "local", "plan_view"))
+        apply_call = self.service.calls.index(("apply_view_mutation", "local", "plan_view", False))
+        self.assertLess(binding_call, apply_call)
+        current = self.store.get("schema_one")
+        self.assertEqual(current["schema"]["views"][0]["queryDefinition"], "SELECT 2")
+        self.assertEqual(current["schema"]["layout"], record["schema"]["layout"])
+
+    def test_apply_revalidates_binding_before_postgres_mutation(self):
+        record = {
+            "id": "schema_one", "schema": {
+                "projectName": "Demo", "tables": [], "relationships": [], "functions": [],
+                "views": [{"id": "view_summary", "name": "summary", "namespace": "public", "definition": "old"}],
+                "postgres": {"sourceProfileId": "local", "database": "demo", "namespace": "public"},
+            },
+        }
+        saved = self.store.save("schema_one", record, expected_layout_token=None, layout_protocol=None)
+        self.service.view_layout_token = saved["layoutToken"]
+        changed = self.store.get("schema_one")
+        changed["schema"]["projectName"] = "Concurrent edit"
+        self.store.save("schema_one", changed, expected_layout_token=saved["layoutToken"], layout_protocol="2")
+
+        status, body, _ = self.request(
+            "/api/postgres/profiles/local/view-plans/plan_view/apply", "POST",
+            {"confirmDestructive": False}, authorized=True,
+        )
+        self.assertEqual(status, 409)
+        result = json.loads(body)
+        self.assertEqual(result["error"]["code"], "schema_conflict")
+        self.assertEqual(sum(call[0] == "apply_view_mutation" for call in self.service.calls), 0)
+
+    def test_apply_sync_appends_new_expected_absent_view(self):
+        record = {
+            "id": "schema_one", "custom": {"keep": True}, "schema": {
+                "projectName": "Demo", "tables": [], "relationships": [], "functions": [], "views": [],
+                "layout": {"version": 2, "layers": {"views": {"objects": {}, "viewport": {"x": 3, "y": 4, "zoom": 1}}}},
+                "postgres": {"sourceProfileId": "local", "database": "demo", "namespace": "public"},
+            },
+        }
+        saved = self.store.save("schema_one", record, expected_layout_token=None, layout_protocol=None)
+        self.service.view_layout_token = saved["layoutToken"]
+        self.service.view_expected_absent = True
+        self.service.view_expectation = {"absent": True}
+        self.service.view_saved_id = None
+
+        status, body, _ = self.request(
+            "/api/postgres/profiles/local/view-plans/plan_view/apply", "POST",
+            {"confirmDestructive": False}, authorized=True,
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["schemaSync"]["status"], "saved")
+        current = self.store.get("schema_one")
+        self.assertEqual([item["name"] for item in current["schema"]["views"]], ["summary"])
+        self.assertEqual(current["schema"]["layout"], record["schema"]["layout"])
+        self.assertEqual(current["custom"], record["custom"])
+
+    def test_apply_delete_removes_exact_saved_view_and_preserves_layout(self):
+        layout = {"version": 2, "layers": {"views": {"objects": {"view_summary": {"x": 10, "y": 20}}, "viewport": {"x": 3, "y": 4, "zoom": 1}}}}
+        record = {
+            "id": "schema_one", "custom": {"keep": True}, "schema": {
+                "projectName": "Demo", "tables": [], "relationships": [], "functions": [],
+                "views": [
+                    {"id": "view_summary", "name": "summary", "namespace": "public", "materialized": True},
+                    {"id": "view_other", "name": "other", "namespace": "public"},
+                ],
+                "layout": layout,
+                "postgres": {"sourceProfileId": "local", "database": "demo", "namespace": "public"},
+            },
+        }
+        saved = self.store.save("schema_one", record, expected_layout_token=None, layout_protocol=None)
+        self.service.view_layout_token = saved["layoutToken"]
+        self.service.view_operation = "delete"
+        self.service.view_expectation = {"kind": "materialized_view", "fingerprint": "a" * 64}
+
+        status, body, _ = self.request(
+            "/api/postgres/profiles/local/view-plans/plan_view/apply", "POST",
+            {"confirmDestructive": True}, authorized=True,
+        )
+
+        self.assertEqual(status, 200)
+        result = json.loads(body)
+        self.assertEqual(result["operation"], "delete")
+        self.assertEqual(result["schemaSync"]["status"], "saved")
+        current = self.store.get("schema_one")
+        self.assertEqual([item["id"] for item in current["schema"]["views"]], ["view_other"])
+        self.assertEqual(current["schema"]["layout"], layout)
+        self.assertEqual(current["custom"], record["custom"])
+
+    def test_post_commit_schema_sync_distinguishes_conflict_from_storage_error(self):
+        record = {
+            "id": "schema_one", "schema": {
+                "projectName": "Demo", "tables": [], "relationships": [], "functions": [],
+                "views": [{"id": "view_summary", "name": "summary", "namespace": "public", "definition": "old"}],
+                "postgres": {"sourceProfileId": "local", "database": "demo", "namespace": "public"},
+            },
+        }
+        saved = self.store.save("schema_one", record, expected_layout_token=None, layout_protocol=None)
+        self.service.view_layout_token = saved["layoutToken"]
+        original = self.store.sync_view_after_mutation
+        try:
+            for error_status, expected_status in ((409, "conflict"), (500, "storage_error")):
+                with self.subTest(expected_status=expected_status):
+                    self.store.sync_view_after_mutation = lambda *args, status=error_status, **kwargs: (_ for _ in ()).throw(
+                        SchemaStoreError(status, "schema_conflict" if status == 409 else "schema_store_error", "sync failed")
+                    )
+                    status, body, _ = self.request(
+                        "/api/postgres/profiles/local/view-plans/plan_view/apply", "POST",
+                        {"confirmDestructive": False}, authorized=True,
+                    )
+                    self.assertEqual(status, 200)
+                    self.assertEqual(json.loads(body)["schemaSync"]["status"], expected_status)
+        finally:
+            self.store.sync_view_after_mutation = original
 
     def test_schema_route_rejects_invalid_content_type(self):
         payload = {

@@ -1603,6 +1603,262 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             self._plans[plan_id] = stored
         return self._public_plan(stored)
 
+    def preview_view_mutation(
+        self, profile_id: str, database: str, namespace: str, relation: str,
+        operation: str, expectation: dict[str, Any], desired: dict[str, Any] | None, allow_destructive: bool,
+        schema_binding: dict[str, Any],
+    ) -> dict[str, Any]:
+        profile_id = self._validate_profile_id(profile_id)
+        database = self._validate_database(database)
+        namespace = self._validate_namespace(namespace)
+        relation = self._validate_relation_name(relation)
+        if operation not in {"upsert", "delete"}:
+            raise ValidationError("operation must be upsert or delete")
+        if not isinstance(allow_destructive, bool):
+            raise ValidationError("allowDestructive must be boolean")
+        if not isinstance(expectation, dict):
+            raise ValidationError("expectation must be an object")
+        if set(expectation) == {"absent"}:
+            if expectation["absent"] is not True:
+                raise ValidationError("expectation.absent must be true")
+        elif set(expectation) == {"kind", "fingerprint"}:
+            if expectation["kind"] not in {"view", "materialized_view"}:
+                raise ValidationError("expectation.kind is invalid")
+            if not isinstance(expectation["fingerprint"], str) or not FINGERPRINT_RE.fullmatch(expectation["fingerprint"]):
+                raise ValidationError("expectation.fingerprint is invalid")
+        else:
+            raise ValidationError("expectation must be exactly absent:true or kind plus fingerprint")
+        if operation == "delete":
+            if desired is not None or set(expectation) == {"absent"}:
+                raise ValidationError("Delete requires an existing expectation and no desired definition")
+            desired_kind = None
+            definition = None
+        else:
+            if not isinstance(desired, dict) or set(desired) != {"kind", "definition"}:
+                raise ValidationError("desired must contain exactly kind and definition")
+            desired_kind = desired["kind"]
+            if desired_kind not in {"view", "materialized_view"}:
+                raise ValidationError("desired.kind is invalid")
+            if not isinstance(desired["definition"], str) or not desired["definition"].strip():
+                raise ValidationError("desired.definition must be a non-empty SQL statement")
+            definition = _single_sql_statement(desired["definition"], "View definition")
+            ordinary = re.match(r"^CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\b", definition, re.I)
+            materialized = re.match(r"^CREATE\s+MATERIALIZED\s+VIEW\b", definition, re.I)
+            if (desired_kind == "view" and not ordinary) or (desired_kind == "materialized_view" and not materialized):
+                raise ValidationError("View definition kind does not match desired.kind")
+            _require_definition_identity(definition, "view", namespace, relation)
+
+        profile = self._profile(profile_id)
+        profile_fingerprint = self._profile_fingerprint(profile)
+        connection = self._connect_profile(profile)
+        live = None
+        preservation = None
+        try:
+            self._execute_statement(connection, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            try:
+                live = self._inspect_relation_connection(connection, profile_id, database, namespace, relation, None, None)
+            except NotFoundError:
+                live = None
+            if set(expectation) == {"absent"}:
+                if live is not None:
+                    raise ConflictError("relation_changed", "The expected-absent PostgreSQL relation now exists")
+            elif live is None or live["kind"] != expectation["kind"] or live["fingerprint"] != expectation["fingerprint"]:
+                raise ConflictError("relation_changed", "The PostgreSQL relation changed after editing began")
+            if live is not None and live["kind"] not in {"view", "materialized_view"}:
+                raise ConflictError("relation_changed", "The target identity is no longer a view")
+            if live is not None and desired_kind is not None and live["kind"] != desired_kind:
+                raise PostgresServiceError(409, "view_kind_conversion_unsupported", "Converting between ordinary and materialized views is unsupported")
+            destructive = operation == "delete" or (live is not None and live["kind"] == "materialized_view")
+            if destructive:
+                preservation = self._view_recreation_preservation(connection, namespace, relation) if live["kind"] == "materialized_view" else None
+                dependents = live.get("dependents", {})
+                blocked = []
+                if dependents.get("status") != "available" or dependents.get("truncated") or dependents.get("items"):
+                    blocked.append("direct dependents")
+                if preservation:
+                    blocked.extend(preservation["unsupported"])
+                if blocked:
+                    raise PostgresServiceError(
+                        409, "view_recreation_unsupported",
+                        "Destructive view recreation would lose or invalidate unsupported metadata",
+                        {"concerns": blocked},
+                    )
+                if not allow_destructive:
+                    raise ConflictError("destructive_preview_required", "View recreation requires allowDestructive")
+        finally:
+            try:
+                connection.rollback()
+            except Exception:
+                pass
+            self._close(connection)
+        if self._profile_fingerprint(self._profile(profile_id)) != profile_fingerprint:
+            raise ConflictError("profile_changed", "Connection profile changed during preview")
+        if desired_kind == "view":
+            command = "CREATE OR REPLACE VIEW" if live is not None else "CREATE VIEW"
+            definition = re.sub(r"^CREATE\s+(?:OR\s+REPLACE\s+)?VIEW", command, definition, count=1, flags=re.I)
+        steps = []
+        if live is not None and destructive:
+            keyword = "MATERIALIZED VIEW" if live["kind"] == "materialized_view" else "VIEW"
+            steps.append(self._step("drop", keyword.lower(), relation, f"DROP {keyword} {quote_identifier(namespace)}.{quote_identifier(relation)}", True))
+        if operation == "upsert":
+            if live is not None and live["kind"] == "materialized_view":
+                definition = self._materialized_storage_definition(definition, preservation)
+                definition = self._materialized_population_definition(definition, preservation["populated"])
+            steps.append(self._step(
+                "create_or_replace" if desired_kind == "view" and live is not None else "create",
+                "view" if desired_kind == "view" else "materialized view", relation, definition,
+            ))
+            if preservation:
+                steps.extend(self._materialized_restoration_steps(namespace, relation, preservation))
+        plan_id = "plan_" + secrets.token_hex(16)
+        now = self._clock()
+        stored = {
+            "id": plan_id, "planVersion": 2, "kind": "view_mutation", "operation": operation,
+            "profileId": profile_id, "database": database,
+            "namespace": namespace, "relation": relation, "profileFingerprint": profile_fingerprint,
+            "expectation": copy.deepcopy(expectation), "desiredKind": desired_kind, "desiredDefinition": definition,
+            "preservation": copy.deepcopy(preservation),
+            "schemaBinding": copy.deepcopy(schema_binding), "allowDestructive": allow_destructive,
+            "destructive": bool(live is not None and destructive), "steps": steps,
+            "warnings": ([{
+                "code": "view_output_compatibility_apply_validated",
+                "message": "PostgreSQL will validate CREATE OR REPLACE VIEW output-column compatibility during apply",
+            }] if live is not None and desired_kind == "view" and not destructive else []) + ([{
+                "code": "materialized_rows_repopulated",
+                "message": "Stored materialized-view rows will be discarded and the defining query will repopulate them before commit",
+            }] if operation == "upsert" and live is not None and live["kind"] == "materialized_view" and preservation["populated"] else []) + ([{
+                "code": "materialized_rows_deleted",
+                "message": "The materialized view and all rows stored in it will be permanently deleted",
+            }] if operation == "delete" and live is not None and live["kind"] == "materialized_view" else []),
+            "state": "ready",
+            "createdAt": now, "expiresAt": now + self._plan_ttl,
+        }
+        with self._lock:
+            self._purge_plans(now)
+            self._plans[plan_id] = stored
+        return self._public_plan(stored)
+
+    @staticmethod
+    def _materialized_population_definition(definition: str, populated: bool) -> str:
+        definition = re.sub(r"\s+WITH\s+(?:NO\s+)?DATA\s*;?\s*$", "", definition, flags=re.I)
+        return f"{definition.rstrip(';')} WITH {'DATA' if populated else 'NO DATA'};"
+
+    def _materialized_storage_definition(self, definition: str, manifest: dict[str, Any]) -> str:
+        clauses = []
+        if manifest.get("accessMethod"):
+            clauses.append(f"USING {quote_identifier(manifest['accessMethod'])}")
+        if manifest.get("reloptions"):
+            options = []
+            for option in manifest["reloptions"]:
+                name, separator, value = option.partition("=")
+                if not separator or not re.fullmatch(r"[a-z_][a-z0-9_.]*", name):
+                    raise PostgresServiceError(409, "view_recreation_unsupported", "Materialized view has unsupported relation options")
+                options.append(f"{name} = {_quote_literal(value)}")
+            clauses.append(f"WITH ({', '.join(options)})")
+        if manifest.get("tablespace"):
+            clauses.append(f"TABLESPACE {quote_identifier(manifest['tablespace'])}")
+        if not clauses:
+            return definition
+        return re.sub(r"\s+AS\b", f" {' '.join(clauses)} AS", definition, count=1, flags=re.I)
+
+    def _view_recreation_preservation(self, connection: Any, namespace: str, relation: str) -> dict[str, Any]:
+        rows = self._execute_rows(connection, """
+            SELECT c.oid, pg_catalog.pg_get_userbyid(c.relowner) AS owner,
+                   c.relacl IS NOT NULL AS explicit_acl,
+                   pg_catalog.obj_description(c.oid, 'pg_class') AS relation_comment,
+                   c.reloptions, ts.spcname AS tablespace, am.amname AS access_method,
+                   c.relispopulated AS populated,
+                   EXISTS (
+                       SELECT 1 FROM pg_catalog.pg_trigger t
+                       WHERE t.tgrelid = c.oid AND NOT t.tgisinternal
+                   ) AS triggers,
+                   EXISTS (
+                       SELECT 1 FROM pg_catalog.pg_rewrite r
+                       WHERE r.ev_class = c.oid AND r.rulename <> '_RETURN'
+                   ) AS rules,
+                   EXISTS (
+                       SELECT 1 FROM pg_catalog.pg_seclabel s
+                       WHERE s.classoid = 'pg_catalog.pg_class'::pg_catalog.regclass AND s.objoid = c.oid
+                   ) AS security_labels,
+                   c.relpersistence <> 'p' AS storage
+            FROM pg_catalog.pg_class c
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            LEFT JOIN pg_catalog.pg_tablespace ts ON ts.oid = NULLIF(c.reltablespace, 0)
+            LEFT JOIN pg_catalog.pg_am am ON am.oid = c.relam
+            WHERE n.nspname = %s AND c.relname = %s AND c.relkind IN ('v', 'm')
+        """, (namespace, relation))
+        if len(rows) != 1:
+            raise ConflictError("relation_changed", "The PostgreSQL relation changed during preview")
+        row = rows[0]
+        oid = row["oid"]
+        grants = self._execute_rows(connection, """
+            SELECT pg_catalog.pg_get_userbyid(x.grantor) AS grantor,
+                   CASE WHEN x.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(x.grantee) END AS grantee,
+                   x.privilege_type, x.is_grantable
+            FROM pg_catalog.pg_class c
+            CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) x
+            WHERE c.oid = %s ORDER BY 1, 2, 3
+        """, (oid,)) if row.get("explicit_acl") else []
+        default_grantees = self._execute_rows(connection, """
+            SELECT DISTINCT CASE WHEN x.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(x.grantee) END AS grantee
+            FROM pg_catalog.pg_default_acl d
+            CROSS JOIN LATERAL pg_catalog.aclexplode(d.defaclacl) x
+            WHERE d.defaclrole = (SELECT c.relowner FROM pg_catalog.pg_class c WHERE c.oid = %s)
+              AND d.defaclnamespace = (SELECT c.relnamespace FROM pg_catalog.pg_class c WHERE c.oid = %s)
+              AND d.defaclobjtype = 'r'
+        """, (oid, oid))
+        comments = self._execute_rows(connection, """
+            SELECT a.attname AS column_name, d.description
+            FROM pg_catalog.pg_description d
+            JOIN pg_catalog.pg_attribute a ON a.attrelid = d.objoid AND a.attnum = d.objsubid
+            WHERE d.classoid = 'pg_catalog.pg_class'::pg_catalog.regclass AND d.objoid = %s AND d.objsubid > 0
+            ORDER BY a.attnum
+        """, (oid,))
+        indexes = self._execute_rows(connection, """
+            SELECT ci.relname AS name, pg_catalog.pg_get_indexdef(i.indexrelid) AS definition,
+                   pg_catalog.obj_description(i.indexrelid, 'pg_class') AS comment,
+                   i.indisvalid, i.indisready
+            FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class ci ON ci.oid = i.indexrelid
+            WHERE i.indrelid = %s ORDER BY ci.relname
+        """, (oid,))
+        unsupported = [name for name in ("triggers", "rules", "security_labels", "storage") if row.get(name)]
+        if any(grant.get("grantor") != row.get("owner") for grant in grants):
+            unsupported.append("non-owner grantors")
+        if any(not item.get("indisvalid") or not item.get("indisready") for item in indexes):
+            unsupported.append("invalid indexes")
+        manifest = {
+            "owner": row.get("owner"), "explicitAcl": bool(row.get("explicit_acl")),
+            "grants": grants, "defaultGrantees": [item["grantee"] for item in default_grantees],
+            "relationComment": row.get("relation_comment"), "columnComments": comments,
+            "indexes": indexes, "reloptions": list(row.get("reloptions") or []),
+            "tablespace": row.get("tablespace"), "accessMethod": row.get("access_method"),
+            "populated": bool(row.get("populated")), "unsupported": unsupported,
+        }
+        manifest["fingerprint"] = canonical_fingerprint({key: value for key, value in manifest.items() if key not in {"populated", "fingerprint"}})
+        return manifest
+
+    def _materialized_restoration_steps(self, namespace: str, relation: str, manifest: dict[str, Any]) -> list[dict[str, Any]]:
+        qualified = f"{quote_identifier(namespace)}.{quote_identifier(relation)}"
+        steps = []
+        if manifest.get("relationComment") is not None:
+            steps.append(self._step("restore", "materialized view comment", relation, f"COMMENT ON MATERIALIZED VIEW {qualified} IS {_quote_literal(manifest['relationComment'])}"))
+        for comment in manifest.get("columnComments", []):
+            steps.append(self._step("restore", "column comment", comment["column_name"], f"COMMENT ON COLUMN {qualified}.{quote_identifier(comment['column_name'])} IS {_quote_literal(comment['description'])}"))
+        for index in manifest.get("indexes", []):
+            steps.append(self._step("restore", "index", index["name"], index["definition"]))
+            if index.get("comment") is not None:
+                steps.append(self._step("restore", "index comment", index["name"], f"COMMENT ON INDEX {quote_identifier(namespace)}.{quote_identifier(index['name'])} IS {_quote_literal(index['comment'])}"))
+        if manifest.get("explicitAcl"):
+            grantees = sorted({"PUBLIC", *manifest.get("defaultGrantees", []), *(grant["grantee"] for grant in manifest.get("grants", []))})
+            for grantee in grantees:
+                target = "PUBLIC" if grantee == "PUBLIC" else quote_identifier(grantee)
+                steps.append(self._step("restore", "permissions", relation, f"REVOKE ALL PRIVILEGES ON TABLE {qualified} FROM {target}"))
+            for grant in manifest.get("grants", []):
+                target = "PUBLIC" if grant["grantee"] == "PUBLIC" else quote_identifier(grant["grantee"])
+                suffix = " WITH GRANT OPTION" if grant.get("is_grantable") else ""
+                steps.append(self._step("restore", "permission", grant["privilege_type"], f"GRANT {grant['privilege_type']} ON TABLE {qualified} TO {target}{suffix}"))
+        return steps
+
     def _tables_with_rows(self, profile_id: str, namespace: str, table_names: set[str]) -> set[str]:
         if not table_names:
             return set()
@@ -1641,7 +1897,10 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
 
     @staticmethod
     def _public_plan(plan: dict[str, Any]) -> dict[str, Any]:
-        return copy.deepcopy({key: value for key, value in plan.items() if key not in {"createdAt", "desiredSchema"}})
+        return copy.deepcopy({
+            key: value for key, value in plan.items()
+            if key not in {"createdAt", "desiredSchema", "desiredDefinition", "schemaBinding", "profileFingerprint", "preservation", "state"}
+        })
 
     def _purge_plans(self, now: float) -> None:
         for plan_id in [key for key, plan in self._plans.items() if plan["expiresAt"] <= now]:
@@ -2405,6 +2664,12 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             materialized = (new.get(name) or old.get(name) or {}).get("materialized", False)
             can_replace = True
             type_changed = name in old and name in new and bool(old[name].get("materialized")) != bool(new[name].get("materialized"))
+            if name in old and name not in new:
+                warnings.append({"code": "dedicated_view_lifecycle_required", "message": f"Deleting view {name} requires the live Views workspace"})
+                continue
+            if name in old and (materialized or type_changed):
+                warnings.append({"code": "dedicated_view_lifecycle_required", "message": f"Changing materialized view {name} requires the live Views workspace"})
+                continue
             if name in old and (name not in new or materialized or type_changed):
                 keyword = "MATERIALIZED VIEW" if old[name].get("materialized") else "VIEW"
                 can_replace = add(self._step("drop", keyword.lower(), name, f"DROP {keyword} {quote_identifier(namespace)}.{quote_identifier(name)}", True))
@@ -2425,6 +2690,176 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
 
     # ---- apply ----------------------------------------------------------
 
+    def _acquire_namespace_mutation_lock(self, cursor: Any, namespace: str) -> None:
+        cursor.execute(f"SET LOCAL lock_timeout = '{self._lock_timeout_ms}ms'")
+        cursor.execute(f"SET LOCAL statement_timeout = '{self._statement_timeout_ms}ms'")
+        cursor.execute(
+            "SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext(%s)::bigint)",
+            (f"schemii:{namespace}",),
+        )
+
+    def view_mutation_binding(self, profile_id: str, plan_id: str) -> dict[str, Any]:
+        profile_id = self._validate_profile_id(profile_id)
+        if not isinstance(plan_id, str) or not PROFILE_ID_RE.fullmatch(plan_id):
+            raise ValidationError("plan_id is invalid")
+        with self._lock:
+            self._purge_plans(self._clock())
+            plan = copy.deepcopy(self._plans.get(plan_id))
+        if plan is None or plan.get("kind") != "view_mutation" or plan["profileId"] != profile_id:
+            raise NotFoundError("Plan was not found or has expired")
+        return {
+            "schemaBinding": plan["schemaBinding"], "database": plan["database"],
+            "namespace": plan["namespace"], "relation": plan["relation"],
+            "operation": plan["operation"], "expectation": plan["expectation"],
+        }
+
+    def apply_view_mutation(self, profile_id: str, plan_id: str, confirm_destructive: bool = False) -> dict[str, Any]:
+        profile_id = self._validate_profile_id(profile_id)
+        if not isinstance(plan_id, str) or not PROFILE_ID_RE.fullmatch(plan_id):
+            raise ValidationError("plan_id is invalid")
+        if not isinstance(confirm_destructive, bool):
+            raise ValidationError("confirmDestructive must be boolean")
+        with self._lock:
+            self._purge_plans(self._clock())
+            plan = copy.deepcopy(self._plans.get(plan_id))
+            profile = copy.deepcopy(self._read_profiles().get(profile_id))
+        if plan is None or plan.get("kind") != "view_mutation" or plan.get("planVersion") != 2 or plan["profileId"] != profile_id:
+            raise NotFoundError("Plan was not found or has expired")
+        if profile is None or self._profile_fingerprint(profile) != plan["profileFingerprint"]:
+            raise ConflictError("profile_changed", "Connection profile changed after preview")
+        if plan["destructive"] and not confirm_destructive:
+            raise ConflictError("destructive_confirmation_required", "Plan contains destructive steps")
+        with self._lock:
+            stored_plan = self._plans.get(plan_id)
+            if stored_plan is None or stored_plan.get("state") != "ready":
+                raise ConflictError("plan_in_use", "View plan is already being applied")
+            stored_plan["state"] = "applying"
+
+        connection = None
+        descriptor = None
+        committed_at = None
+        failed_step = None
+        try:
+            connection = self._connect_profile(profile)
+            cursor = connection.cursor()
+            try:
+                cursor.execute("BEGIN")
+                self._acquire_namespace_mutation_lock(cursor, plan["namespace"])
+                expectation = plan["expectation"]
+                if set(expectation) != {"absent"}:
+                    relation_sql = f"{quote_identifier(plan['namespace'])}.{quote_identifier(plan['relation'])}"
+                    if expectation["kind"] == "materialized_view":
+                        # PostgreSQL 17 rejects LOCK TABLE for materialized views. A no-data
+                        # refresh acquires AccessExclusiveLock and is rolled back on failure.
+                        cursor.execute(f"REFRESH MATERIALIZED VIEW {relation_sql} WITH NO DATA")
+                    else:
+                        # A view read takes AccessShare on the view and its base relations. It
+                        # blocks target DDL without AccessExclusive-locking the base relations.
+                        cursor.execute(f"SELECT * FROM {relation_sql} LIMIT 0")
+                try:
+                    current = self._inspect_relation_connection(
+                        connection, profile_id, plan["database"], plan["namespace"], plan["relation"], None, None,
+                    )
+                except NotFoundError:
+                    current = None
+                if set(expectation) == {"absent"}:
+                    if current is not None:
+                        raise ConflictError("relation_changed", "The expected-absent PostgreSQL relation now exists")
+                elif (
+                    current is None or current["kind"] != expectation["kind"]
+                    or current["fingerprint"] != expectation["fingerprint"]
+                ):
+                    raise ConflictError("relation_changed", "The PostgreSQL relation changed after preview")
+                if plan["destructive"]:
+                    preservation = self._view_recreation_preservation(connection, plan["namespace"], plan["relation"]) if current and current["kind"] == "materialized_view" else None
+                    dependents = current.get("dependents", {}) if current else {}
+                    blocked = []
+                    if dependents.get("status") != "available" or dependents.get("truncated") or dependents.get("items"):
+                        blocked.append("direct dependents")
+                    if preservation:
+                        blocked.extend(preservation["unsupported"])
+                        if preservation["fingerprint"] != plan["preservation"]["fingerprint"]:
+                            raise ConflictError("relation_changed", "Materialized view metadata changed after preview")
+                    if blocked:
+                        raise PostgresServiceError(
+                            409, "view_recreation_unsupported",
+                            "Destructive view recreation would lose or invalidate unsupported metadata",
+                            {"concerns": blocked},
+                        )
+                owner = (plan.get("preservation") or {}).get("owner")
+                if owner and plan["operation"] == "upsert":
+                    cursor.execute(f"SET LOCAL ROLE {quote_identifier(owner)}")
+                for index, step in enumerate(plan["steps"]):
+                    failed_step = (index, step)
+                    cursor.execute(step["sql"])
+                failed_step = None
+                if owner and plan["operation"] == "upsert":
+                    cursor.execute("RESET ROLE")
+                if plan["operation"] == "delete":
+                    try:
+                        self._inspect_relation_connection(connection, profile_id, plan["database"], plan["namespace"], plan["relation"], None, None)
+                    except NotFoundError:
+                        pass
+                    else:
+                        raise ConflictError("relation_changed", "PostgreSQL relation still exists after delete")
+                else:
+                    descriptor = self._inspect_relation_connection(
+                        connection, profile_id, plan["database"], plan["namespace"], plan["relation"], plan["desiredKind"], None,
+                    )
+                connection.commit()
+                committed_at = _utc_now()
+            except PostgresServiceError:
+                connection.rollback()
+                raise
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                close = getattr(cursor, "close", None)
+                if close:
+                    close()
+        except PostgresServiceError:
+            raise
+        except Exception as exc:
+            message = "View mutation failed and was rolled back"
+            if failed_step is not None:
+                index, step = failed_step
+                message = f"View mutation step {index + 1} failed: {step['action']} {step['objectType']} {step['name']}. All changes were rolled back"
+            raise PostgresServiceError(422, "apply_failed", message) from exc
+        finally:
+            if connection is not None:
+                self._close(connection)
+            if committed_at is None:
+                with self._lock:
+                    stored_plan = self._plans.get(plan_id)
+                    if stored_plan and stored_plan.get("state") == "applying":
+                        stored_plan["state"] = "ready"
+        with self._lock:
+            self._plans.pop(plan_id, None)
+        try:
+            self._append_history({
+                "id": "migration_" + secrets.token_hex(12), "planId": plan_id,
+                "profileId": profile_id, "database": plan["database"], "namespace": plan["namespace"],
+                "appliedAt": committed_at, "sourceFingerprint": plan["expectation"].get("fingerprint"),
+                "resultFingerprint": descriptor["fingerprint"] if descriptor else None, "destructive": plan["destructive"],
+                "operation": plan["operation"],
+                "steps": copy.deepcopy(plan["steps"]),
+            })
+        except PostgresServiceError:
+            descriptor["historyWarning"] = "Migration committed, but its local history entry could not be written"
+        result = {
+            "applied": True, "planId": plan_id, "operation": plan["operation"],
+            "schemaBinding": plan["schemaBinding"], "expectedAbsent": set(plan["expectation"]) == {"absent"},
+        }
+        if descriptor:
+            result.update(descriptor=descriptor, desiredDefinition=plan["desiredDefinition"], queryDefinition=descriptor.get("definition", {}).get("sql"))
+        else:
+            result["deleted"] = {
+                "profileId": profile_id, "database": plan["database"], "namespace": plan["namespace"],
+                "relation": plan["relation"], "kind": plan["expectation"]["kind"],
+            }
+        return result
+
     def apply(self, profile_id: str, plan_id: str, confirm_destructive: bool = False) -> dict[str, Any]:
         profile_id = self._validate_profile_id(profile_id)
         if not isinstance(plan_id, str) or not PROFILE_ID_RE.fullmatch(plan_id):
@@ -2436,6 +2871,8 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             plan = copy.deepcopy(self._plans.get(plan_id))
             profile = copy.deepcopy(self._read_profiles().get(profile_id))
         if plan is None or plan["profileId"] != profile_id:
+            raise NotFoundError("Plan was not found or has expired")
+        if plan.get("kind") == "view_mutation":
             raise NotFoundError("Plan was not found or has expired")
         if profile is None or self._profile_fingerprint(profile) != plan["profileFingerprint"]:
             raise ConflictError("profile_changed", "Connection profile changed after preview")
@@ -2449,9 +2886,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             cursor = connection.cursor()
             try:
                 cursor.execute("BEGIN")
-                cursor.execute(f"SET LOCAL lock_timeout = '{self._lock_timeout_ms}ms'")
-                cursor.execute(f"SET LOCAL statement_timeout = '{self._statement_timeout_ms}ms'")
-                cursor.execute("SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext(%s))", (f"schemii:{plan['namespace']}",))
+                self._acquire_namespace_mutation_lock(cursor, plan["namespace"])
                 current = self._introspect_connection(connection, profile_id, plan["namespace"])
                 if current["postgres"]["fingerprint"] != plan["liveFingerprint"]:
                     raise ConflictError("stale_plan", "Database schema changed after preview")

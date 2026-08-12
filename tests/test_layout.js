@@ -62,7 +62,7 @@ const stored = context.schemaForStorage(runtime, { x: 11, y: 22, zoom: 1.25 });
 assert.equal(stored.tables[0].x, undefined);
 assert.equal(stored.tables[0].y, undefined);
 assert.equal(stored.tables[0].color, undefined);
-assert.deepEqual(JSON.parse(JSON.stringify(stored.layout.tables.table_accounts)), {
+assert.deepEqual(JSON.parse(JSON.stringify(stored.layout.layers.tables.objects.table_accounts)), {
   x: 321,
   y: 654,
   color: "#65a9ff",
@@ -75,7 +75,50 @@ const hydrated = context.migrateSchema(JSON.parse(JSON.stringify(stored)));
 assert.equal(hydrated.tables[0].x, 321);
 assert.equal(hydrated.tables[0].y, 654);
 assert.equal(hydrated.tables[0].color, "#65a9ff");
-assert.deepEqual(JSON.parse(JSON.stringify(hydrated.layout.view)), { x: 11, y: 22, zoom: 1.25 });
+assert.deepEqual(JSON.parse(JSON.stringify(hydrated.layout.layers.tables.viewport)), { x: 11, y: 22, zoom: 1.25 });
+
+const versionOne = JSON.parse(JSON.stringify(runtime));
+versionOne.layout = {
+  version: 1,
+  customLayout: { retained: true },
+  tables: { table_accounts: { x: 12, y: 34, color: "#f4b942", customObject: "retained" } },
+  view: { x: 5, y: 6, zoom: 0.75, grid: "retained" }
+};
+const storedV1 = context.schemaForStorage(context.migrateSchema(versionOne));
+assert.equal(storedV1.layout.version, 2);
+assert.deepEqual(JSON.parse(JSON.stringify(storedV1.layout.customLayout)), { retained: true });
+assert.equal(storedV1.layout.layers.tables.objects.table_accounts.customObject, "retained");
+assert.deepEqual(JSON.parse(JSON.stringify(storedV1.layout.layers.tables.viewport)), { x: 5, y: 6, zoom: 0.75, grid: "retained" });
+
+const versionTwo = JSON.parse(JSON.stringify(runtime));
+versionTwo.layout = {
+  version: 2,
+  customLayout: { retained: "v2" },
+  layers: {
+    tables: {
+      customLayer: 1,
+      objects: { table_accounts: { x: 21, y: 43, color: "#65a9ff", customObject: 2 } },
+      viewport: { x: 7, y: 8, zoom: 1.5, customViewport: 3 }
+    },
+    views: {
+      customLayer: 4,
+      objects: { view_summary: { x: 88, y: 99, color: "#123456", customObject: 5 } },
+      viewport: { x: 9, y: 10, zoom: 0.9, customViewport: 6 }
+    },
+    customLayer: { retained: 7 }
+  }
+};
+const migratedV2 = context.migrateSchema(versionTwo);
+assert.equal(migratedV2.tables[0].x, 21);
+assert.equal(migratedV2.tables[0].y, 43);
+assert.equal(migratedV2.tables[0].color, "#65a9ff");
+const storedV2 = context.schemaForStorage(migratedV2, { x: 70, y: 80, zoom: 2 });
+assert.deepEqual(JSON.parse(JSON.stringify(storedV2.layout.customLayout)), { retained: "v2" });
+assert.deepEqual(JSON.parse(JSON.stringify(storedV2.layout.layers.customLayer)), { retained: 7 });
+assert.equal(storedV2.layout.layers.tables.customLayer, 1);
+assert.equal(storedV2.layout.layers.tables.objects.table_accounts.customObject, 2);
+assert.equal(storedV2.layout.layers.tables.viewport.customViewport, 3);
+assert.deepEqual(JSON.parse(JSON.stringify(storedV2.layout.layers.views)), JSON.parse(JSON.stringify(versionTwo.layout.layers.views)));
 
 const renamed = context.preserveTableLayout({
   postgres: { namespace: "public" },

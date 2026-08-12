@@ -65,6 +65,9 @@ const elements = {
   prototypeViewNamespace: document.querySelector("#prototype-view-namespace"),
   prototypeViewName: document.querySelector("#prototype-view-name"),
   prototypeViewSql: document.querySelector("#prototype-view-sql"),
+  prototypeViewCommitForm: document.querySelector("#prototype-view-commit-form"),
+  prototypeViewCommitReview: document.querySelector("#prototype-view-commit-review"),
+  confirmPrototypeViewCommit: document.querySelector("#confirm-prototype-view-commit"),
   toolRail: document.querySelector("#tool-rail"),
   stage: document.querySelector("#stage"),
   selectionMarquee: document.querySelector("#selection-marquee"),
@@ -94,6 +97,11 @@ const elements = {
   relationInstruction: document.querySelector("#relationship-instruction"),
   undoButton: document.querySelector("#undo-button"),
   redoButton: document.querySelector("#redo-button"),
+  viewsBrowseButton: document.querySelector("#views-browse-button"),
+  viewsCreateButton: document.querySelector("#views-create-button"),
+  viewsRefreshButton: document.querySelector("#views-refresh-button"),
+  viewsDeleteButton: document.querySelector("#views-delete-button"),
+  standaloneSqlNewQuery: document.querySelector("#sql-new-query-button"),
   zoomDisplay: document.querySelector("#zoom-display"),
   schemaDialog: document.querySelector("#schema-dialog"),
   schemaLibrary: document.querySelector("#schema-library"),
@@ -171,7 +179,6 @@ const elements = {
   clearSqlConsole: document.querySelector("#clear-sql-console"),
   standaloneSqlButton: document.querySelector("#sql-workspace-button"),
   standaloneSqlWorkspace: document.querySelector("#standalone-sql-workspace"),
-  standaloneSqlClose: document.querySelector("#close-standalone-sql"),
   standaloneSqlProfile: document.querySelector("#standalone-sql-profile"),
   standaloneSqlDatabase: document.querySelector("#standalone-sql-database"),
   standaloneSqlNamespace: document.querySelector("#standalone-sql-namespace"),
@@ -182,10 +189,10 @@ const elements = {
   standaloneSqlWriteWarning: document.querySelector("#standalone-sql-write-warning"),
   standaloneSqlWriteTarget: document.querySelector("#standalone-sql-write-target"),
   standaloneSqlHistory: document.querySelector("#standalone-sql-history"),
-  standaloneSqlHistoryToggle: document.querySelector("#toggle-standalone-sql-history"),
+  standaloneSqlHistoryToggle: document.querySelector("#sql-queries-button"),
   standaloneSqlHistoryClose: document.querySelector("#close-standalone-sql-history"),
   standaloneSqlSavedList: document.querySelector("#standalone-sql-saved-list"),
-  standaloneSqlSave: document.querySelector("#save-standalone-sql"),
+  standaloneSqlSave: document.querySelector("#sql-save-query-button"),
   standaloneSqlSaveSidebar: document.querySelector("#save-standalone-sql-sidebar"),
   standaloneSqlSaveDialog: document.querySelector("#standalone-sql-save-dialog"),
   standaloneSqlSaveForm: document.querySelector("#standalone-sql-save-form"),
@@ -197,9 +204,9 @@ const elements = {
   standaloneSqlInput: document.querySelector("#standalone-sql-input"),
   standaloneSqlCopy: document.querySelector("#copy-standalone-sql"),
   standaloneSqlClear: document.querySelector("#clear-standalone-sql"),
-  standaloneSqlCancel: document.querySelector("#cancel-standalone-sql"),
-  standaloneSqlRun: document.querySelector("#run-standalone-sql"),
-  standaloneSqlRunAll: document.querySelector("#run-all-standalone-sql"),
+  standaloneSqlCancel: document.querySelector("#sql-stop-button"),
+  standaloneSqlRun: document.querySelector("#sql-run-button"),
+  standaloneSqlRunAll: document.querySelector("#sql-run-all-button"),
   standaloneSqlResultStatus: document.querySelector("#standalone-sql-result-status"),
   standaloneSqlResult: document.querySelector("#standalone-sql-result"),
   standaloneSqlResultTabs: document.querySelector("#standalone-sql-result-tabs"),
@@ -354,27 +361,25 @@ let viewsPrototypeState = {
   layer: "tables",
   catalogOpen: false,
   inspectedRelation: null,
-  lineageMode: "relations",
+  expandedSources: new Set(),
   activePane: "lineage",
   paneTimer: null,
   sideTimer: null,
   layerTimer: null,
-  selectedId: "order_summary",
+  selectedId: null,
   editingId: null,
-  views: [
-    { id: "order_summary", name: "order_summary", namespace: "bookstore", kind: "view", sources: ["orders", "customers"], dependents: ["daily_revenue"], columns: ["order_id", "customer_name", "status", "order_total"], query: 'SELECT o.id AS order_id, c.display_name AS customer_name, o.status, o.total AS order_total\nFROM "bookstore"."orders" AS o\nJOIN "bookstore"."customers" AS c ON c.id = o.customer_id' },
-    { id: "customer_lifetime", name: "customer_lifetime", namespace: "bookstore", kind: "view", sources: ["customers", "orders", "payments"], dependents: [], columns: ["customer_id", "display_name", "order_count", "lifetime_value"], query: 'SELECT c.id AS customer_id, c.display_name, count(DISTINCT o.id) AS order_count, sum(p.amount) AS lifetime_value\nFROM "bookstore"."customers" AS c\nLEFT JOIN "bookstore"."orders" AS o ON o.customer_id = c.id\nLEFT JOIN "bookstore"."payments" AS p ON p.order_id = o.id\nGROUP BY c.id, c.display_name' },
-    { id: "daily_revenue", name: "daily_revenue", namespace: "bookstore", kind: "materialized", sources: ["order_summary", "payments"], dependents: ["finance_dashboard"], columns: ["revenue_day", "paid_orders", "gross_revenue"], query: 'SELECT date_trunc(\'day\', p.paid_at) AS revenue_day, count(*) AS paid_orders, sum(p.amount) AS gross_revenue\nFROM "bookstore"."payments" AS p\nGROUP BY 1' }
-  ],
+  views: [],
+  descriptors: new Map(),
+  catalogGeneration: 0,
+  relationGenerations: new Map(),
+  definitionHistories: new Map(),
+  loading: false,
+  error: null,
+  targetKey: null,
+  pendingPlan: null,
+  editorExpectation: null,
+  catalogFilter: "all",
   editorBody: "",
-};
-const prototypeRelationCatalog = {
-  orders: { kind: "Table", columns: [["id", "uuid", "Primary key"], ["customer_id", "uuid", "Foreign key"], ["status", "order_status", "Not null"], ["total", "numeric(12,2)", "Not null"], ["created_at", "timestamptz", "Not null"]], constraints: ["orders_pkey", "orders_customer_id_fkey"] },
-  customers: { kind: "Table", columns: [["id", "uuid", "Primary key"], ["display_name", "text", "Not null"], ["email", "citext", "Unique"], ["created_at", "timestamptz", "Not null"]], constraints: ["customers_pkey", "customers_email_key"] },
-  payments: { kind: "Table", columns: [["id", "uuid", "Primary key"], ["order_id", "uuid", "Foreign key"], ["amount", "numeric(12,2)", "Not null"], ["paid_at", "timestamptz", "Nullable"]], constraints: ["payments_pkey", "payments_order_id_fkey"] },
-  order_summary: { kind: "View", columns: [["order_id", "uuid", "From orders.id"], ["customer_name", "text", "From customers.display_name"], ["status", "order_status", "From orders.status"], ["order_total", "numeric(12,2)", "From orders.total"]], constraints: [] },
-  daily_revenue: { kind: "Materialized view", columns: [["revenue_day", "timestamptz", "date_trunc expression"], ["paid_orders", "bigint", "count aggregate"], ["gross_revenue", "numeric", "sum aggregate"]], constraints: [] },
-  finance_dashboard: { kind: "Dashboard source", columns: [["revenue_day", "timestamptz", "Temporal dimension"], ["paid_orders", "bigint", "Volume metric"], ["gross_revenue", "numeric", "Revenue metric"], ["target_revenue", "numeric", "Calculated target"]], constraints: [] },
 };
 let standaloneSqlState = {
   open: false,
@@ -465,32 +470,325 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-function prototypeViewDefinition(viewItem) {
-  if (viewItem.definitionDraft !== undefined) return viewItem.definitionDraft;
+function activeViewsBinding() {
+  const record = schemaLibrary.schemas.find(item => item.id === activeSchemaId);
+  const source = record?.schema?.postgres;
+  if (!record || !source || typeof source.sourceProfileId !== "string" || typeof source.database !== "string" || typeof source.namespace !== "string"
+      || !source.sourceProfileId || !source.database || !source.namespace || !Number.isInteger(record.revision) || record.revision < 1
+      || typeof record.layoutToken !== "string" || !/^[0-9a-f]{64}$/.test(record.layoutToken)) return null;
+  return { schemaId: record.id, revision: record.revision, layoutToken: record.layoutToken, profileId: source.sourceProfileId, database: source.database, namespace: source.namespace };
+}
+
+function viewsBindingKey(binding) {
+  return binding ? [binding.schemaId, binding.revision, binding.layoutToken, binding.profileId, binding.database, binding.namespace].join("\u0000") : "";
+}
+
+function requireExactTarget(payload, binding, relation = null) {
+  if (!payload || payload.profileId !== binding.profileId || payload.database !== binding.database || payload.namespace !== binding.namespace
+      || (relation !== null && payload.relation !== relation)) throw new Error("PostgreSQL returned a different Views target. Refresh the saved schema before continuing");
+}
+
+function validateLineageEnvelope(value, binding, label) {
+  if (!value || value.status !== "available" || !Array.isArray(value.items) || typeof value.truncated !== "boolean") throw new Error(`${label} lineage is unavailable or invalid`);
+  return value.items.map(item => {
+    if (!item || item.database !== binding.database || typeof item.namespace !== "string" || !item.namespace || typeof item.relation !== "string" || !item.relation
+        || !["table", "view", "materialized_view", "foreign_table"].includes(item.kind)) throw new Error(`${label} lineage contains an invalid relation identity`);
+    return { database: item.database, namespace: item.namespace, relation: item.relation, kind: item.kind };
+  });
+}
+
+function validateRelationDescriptor(payload, binding, relation, expectedKind) {
+  requireExactTarget(payload, binding, relation);
+  if (payload.kind !== expectedKind || !["table", "view", "materialized_view"].includes(payload.kind) || typeof payload.fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(payload.fingerprint)) throw new Error("PostgreSQL returned an invalid or changed relation identity");
+  if (!Array.isArray(payload.columns)) throw new Error("PostgreSQL returned an invalid column snapshot");
+  const columns = payload.columns.map((column, index) => {
+    if (!column || typeof column.name !== "string" || !column.name || typeof column.type !== "string" || !column.type
+        || typeof column.nullable !== "boolean" || !Number.isInteger(column.ordinal) || column.ordinal < 1 || column.ordinal !== index + 1
+        || !Array.isArray(column.suggestions)) throw new Error("PostgreSQL returned an invalid column snapshot");
+    return { name: column.name, type: column.type, nullable: column.nullable, ordinal: column.ordinal };
+  });
+  const unavailable = value => value && value.status === "unavailable" && typeof value.reason === "string";
+  const availableDefinition = payload.definition?.status === "available" && payload.definition.format === "query" && typeof payload.definition.sql === "string" && payload.definition.sql.length > 0;
+  if (!availableDefinition && !unavailable(payload.definition)) throw new Error("PostgreSQL returned an invalid definition envelope");
+  if (!(payload.owner?.status === "available" && typeof payload.owner.name === "string" && payload.owner.name) && !unavailable(payload.owner)) throw new Error("PostgreSQL returned an invalid owner envelope");
+  if (!payload.permissions || payload.permissions.status !== "available" || typeof payload.permissions.advisory !== "boolean"
+      || (payload.permissions.role !== null && typeof payload.permissions.role !== "string") || typeof payload.permissions.canSelect !== "boolean"
+      || typeof payload.permissions.canAlter !== "boolean" || typeof payload.permissions.canRefresh !== "boolean") throw new Error("PostgreSQL returned an invalid permissions envelope");
+  if (!payload.columnProvenance || payload.columnProvenance.status !== "unavailable" || payload.columnProvenance.reason !== "not_supported") throw new Error("PostgreSQL returned an invalid provenance envelope");
+  if (payload.kind === "materialized_view") {
+    if (!payload.materialized || payload.materialized.status !== "available" || typeof payload.materialized.populated !== "boolean" || typeof payload.materialized.concurrentRefreshEligible !== "boolean") throw new Error("PostgreSQL returned invalid materialized-view metadata");
+  } else if (!unavailable(payload.materialized)) throw new Error("PostgreSQL returned an invalid materialization envelope");
+  const dependencies = payload.kind === "table" ? [] : validateLineageEnvelope(payload.dependencies, binding, "Upstream");
+  const dependents = payload.kind === "table" ? [] : validateLineageEnvelope(payload.dependents, binding, "Downstream");
+  if (payload.kind === "table" && (!unavailable(payload.dependencies) || !unavailable(payload.dependents))) throw new Error("PostgreSQL returned invalid table lineage envelopes");
+  return { ...payload, columns, dependencies, dependents };
+}
+
+function relationIdentityKey(identity) {
+  return JSON.stringify([identity.database, identity.namespace, identity.relation, identity.kind]);
+}
+
+function descriptorToView(descriptor) {
+  return {
+    id: descriptor.relation, name: descriptor.relation, namespace: descriptor.namespace, kind: descriptor.kind,
+    fingerprint: descriptor.fingerprint, columns: descriptor.columns, sources: descriptor.dependencies, dependents: descriptor.dependents,
+    query: descriptor.definition.status === "available" ? descriptor.definition.sql : "", definition: descriptor.definition,
+    owner: descriptor.owner, permissions: descriptor.permissions, materialized: descriptor.materialized,
+    provenance: { availability: "unavailable", reason: "Column provenance is unavailable from PostgreSQL; source columns are shown without invented output mappings." },
+  };
+}
+
+function prototypeKindClass(viewItem) {
+  return viewItem.kind === "materialized_view" ? "materialized" : viewItem.kind;
+}
+
+async function inspectViewsRelation(identity, { knownFingerprint = null, select = false } = {}) {
+  const binding = activeViewsBinding();
+  if (!binding || identity.database !== binding.database || identity.namespace !== binding.namespace) throw new Error("Only relations in the saved schema namespace can be inspected");
+  const identityKey = relationIdentityKey(identity);
+  const generation = (viewsPrototypeState.relationGenerations.get(identityKey) ?? 0) + 1;
+  viewsPrototypeState.relationGenerations.set(identityKey, generation);
+  const query = new URLSearchParams({ database: binding.database, namespace: binding.namespace, relation: identity.relation, expectedKind: identity.kind });
+  if (knownFingerprint) query.set("expectedFingerprint", knownFingerprint);
+  const payload = await postgresRequest(`/api/postgres/profiles/${encodeURIComponent(binding.profileId)}/relation?${query}`, { method: "GET" });
+  if (generation !== viewsPrototypeState.relationGenerations.get(identityKey) || viewsBindingKey(binding) !== viewsBindingKey(activeViewsBinding())) return null;
+  const descriptor = validateRelationDescriptor(payload, binding, identity.relation, identity.kind);
+  viewsPrototypeState.descriptors.set(identityKey, descriptor);
+  if (select && ["view", "materialized_view"].includes(descriptor.kind)) {
+    const index = viewsPrototypeState.views.findIndex(item => item.id === descriptor.relation);
+    const viewItem = descriptorToView(descriptor);
+    if (index >= 0) viewsPrototypeState.views[index] = viewItem; else viewsPrototypeState.views.push(viewItem);
+    viewsPrototypeState.selectedId = descriptor.relation;
+  }
+  return descriptor;
+}
+
+async function loadViewsCatalog({ preserveSelection = true } = {}) {
+  const binding = activeViewsBinding();
+  const generation = ++viewsPrototypeState.catalogGeneration;
+  viewsPrototypeState.relationGenerations.clear();
+  viewsPrototypeState.definitionHistories.clear();
+  viewsPrototypeState.targetKey = null;
+  viewsPrototypeState.loading = true;
+  viewsPrototypeState.error = null;
+  if (viewsPrototypeState.layer === "views") renderViewsPrototype();
+  if (!binding) {
+    viewsPrototypeState.loading = false;
+    viewsPrototypeState.views = [];
+    viewsPrototypeState.selectedId = null;
+    if (viewsPrototypeState.layer === "views") renderViewsPrototype();
+    return;
+  }
+  try {
+    const query = new URLSearchParams({ database: binding.database, namespace: binding.namespace });
+    const payload = await postgresRequest(`/api/postgres/profiles/${encodeURIComponent(binding.profileId)}/relations?${query}`, { method: "GET" });
+    if (generation !== viewsPrototypeState.catalogGeneration || viewsBindingKey(binding) !== viewsBindingKey(activeViewsBinding())) return;
+    requireExactTarget(payload, binding);
+    if (!Array.isArray(payload.relations)) throw new Error("PostgreSQL returned an invalid Views catalog");
+    const catalog = payload.relations.map(item => {
+      if (!item || typeof item.name !== "string" || !item.name || !["table", "view", "materialized_view"].includes(item.kind)) throw new Error("PostgreSQL returned an invalid Views catalog identity");
+      return item;
+    }).filter(item => item.kind === "view" || item.kind === "materialized_view");
+    const previous = preserveSelection ? viewsPrototypeState.selectedId : null;
+    const previousFingerprint = viewsPrototypeState.views.find(item => item.id === previous)?.fingerprint ?? null;
+    viewsPrototypeState.views = catalog.map(item => ({ id: item.name, name: item.name, namespace: binding.namespace, kind: item.kind, columns: [], sources: [], dependents: [], loading: true }));
+    viewsPrototypeState.selectedId = catalog.some(item => item.name === previous) ? previous : catalog[0]?.name ?? null;
+    viewsPrototypeState.descriptors.clear();
+    viewsPrototypeState.inspectedRelation = null;
+    viewsPrototypeState.catalogOpen = false;
+    viewsPrototypeState.loading = false;
+    viewsPrototypeState.targetKey = viewsBindingKey(binding);
+    if (viewsPrototypeState.layer === "views") renderViewsPrototype();
+    if (viewsPrototypeState.selectedId) {
+      const selected = catalog.find(item => item.name === viewsPrototypeState.selectedId);
+      await inspectViewsRelation({ database: binding.database, namespace: binding.namespace, relation: selected.name, kind: selected.kind }, { knownFingerprint: previousFingerprint, select: true });
+      if (generation === viewsPrototypeState.catalogGeneration && viewsPrototypeState.layer === "views") renderViewsPrototype();
+    }
+  } catch (error) {
+    if (generation !== viewsPrototypeState.catalogGeneration) return;
+    viewsPrototypeState.loading = false;
+    viewsPrototypeState.targetKey = null;
+    viewsPrototypeState.error = error.message || "Views could not be loaded";
+    if (["relation_changed", "profile_changed", "database_changed", "schema_target_changed"].includes(error.code)) viewsPrototypeState.error += ". Refresh the saved schema before continuing";
+    if (viewsPrototypeState.layer === "views") renderViewsPrototype();
+  }
+}
+
+function livePrototypeViewDefinition(viewItem) {
+  if (viewItem.loading) return "-- Loading verified PostgreSQL definition...";
+  if (viewItem.definition?.status === "unavailable") return `-- Definition unavailable: ${viewItem.definition.reason}`;
   const identity = `"${viewItem.namespace.replaceAll('"', '""')}"."${viewItem.name.replaceAll('"', '""')}"`;
-  const create = viewItem.kind === "materialized" ? "CREATE MATERIALIZED VIEW" : "CREATE OR REPLACE VIEW";
-  return `${create} ${identity} AS\n${viewItem.query.trim().replace(/;$/, "")}${viewItem.kind === "materialized" ? "\nWITH DATA" : ""};`;
+  const create = viewItem.kind === "materialized_view" ? "CREATE MATERIALIZED VIEW" : "CREATE OR REPLACE VIEW";
+  return `${create} ${identity} AS\n${viewItem.query.trim().replace(/;$/, "")}${viewItem.kind === "materialized_view" ? "\nWITH DATA" : ""};`;
+}
+
+function prototypeViewDefinition(viewItem) {
+  return viewItem.definitionDraft ?? livePrototypeViewDefinition(viewItem);
 }
 
 function selectedPrototypeView() {
   return viewsPrototypeState.views.find(viewItem => viewItem.id === viewsPrototypeState.selectedId) ?? viewsPrototypeState.views[0];
 }
 
+function selectedViewDefinitionHistory() {
+  const selected = selectedPrototypeView();
+  if (!selected) return null;
+  let history = viewsPrototypeState.definitionHistories.get(selected.id);
+  if (!history) {
+    history = { undo: [], redo: [] };
+    viewsPrototypeState.definitionHistories.set(selected.id, history);
+  }
+  return history;
+}
+
+function recordViewDefinitionEdit(viewItem, definition) {
+  const previous = viewItem.definitionDraft ?? prototypeViewDefinition(viewItem);
+  if (definition === previous) return;
+  const history = selectedViewDefinitionHistory();
+  history.undo.push(previous);
+  if (history.undo.length > 100) history.undo.shift();
+  history.redo = [];
+  viewItem.definitionDraft = definition;
+  updateHistoryControls();
+}
+
+function restoreViewDefinitionDraft(direction) {
+  const selected = selectedPrototypeView();
+  const history = selectedViewDefinitionHistory();
+  const source = direction === "undo" ? history?.undo : history?.redo;
+  const target = direction === "undo" ? history?.redo : history?.undo;
+  if (!selected || !source?.length) return showToast(`Nothing to ${direction}`);
+  target.push(selected.definitionDraft ?? prototypeViewDefinition(selected));
+  const definition = source.pop();
+  if (definition === livePrototypeViewDefinition(selected)) delete selected.definitionDraft;
+  else selected.definitionDraft = definition;
+  renderViewsPrototype();
+  setViewsActivePane("definition");
+  const editor = elements.viewsConceptStage.querySelector("[data-prototype-definition-editor]");
+  editor?.focus();
+  editor?.setSelectionRange(editor.value.length, editor.value.length);
+  showToast(direction === "undo" ? "Definition change undone" : "Definition change redone");
+}
+
+function activeRailWorkspace() {
+  if (standaloneSqlState.open) return "sql";
+  return viewsPrototypeState.layer === "views" ? "views" : "tables";
+}
+
+function updateWorkspaceRail() {
+  const workspace = activeRailWorkspace();
+  elements.toolRail.dataset.workspace = workspace;
+  elements.toolRail.querySelectorAll("[data-rail-workspace]").forEach(control => {
+    const context = control.dataset.railWorkspace;
+    control.hidden = context !== "context" && context !== workspace;
+  });
+  const selectedView = selectedPrototypeView();
+  elements.viewsBrowseButton.classList.toggle("active", workspace === "views" && viewsPrototypeState.catalogOpen);
+  elements.viewsBrowseButton.disabled = !selectedView || viewsPrototypeState.loading;
+  elements.viewsBrowseButton.setAttribute("aria-expanded", String(workspace === "views" && viewsPrototypeState.catalogOpen));
+  elements.viewsBrowseButton.setAttribute("aria-label", viewsPrototypeState.catalogOpen ? "Hide views" : "Browse views");
+  elements.viewsBrowseButton.dataset.tooltip = viewsPrototypeState.catalogOpen ? "Hide views" : "Browse views";
+  elements.viewsCreateButton.disabled = !activeViewsBinding() || viewsPrototypeState.loading;
+  elements.viewsRefreshButton.disabled = !activeViewsBinding() || viewsPrototypeState.loading;
+  elements.viewsDeleteButton.disabled = !selectedView?.permissions?.canAlter;
+  elements.viewsDeleteButton.setAttribute("aria-label", selectedView ? `Delete ${prototypeKindLabel(selectedView).toLowerCase()} ${selectedView.namespace}.${selectedView.name}` : "Delete selected view");
+  elements.viewsDeleteButton.dataset.tooltip = selectedView ? `Delete ${selectedView.kind === "materialized_view" ? "materialized view" : "view"}` : "Delete selected view";
+  elements.standaloneSqlHistoryToggle.classList.toggle("active", workspace === "sql" && !standaloneSqlState.historyCollapsed);
+  if (workspace === "sql") {
+    elements.standaloneSqlRun.hidden = standaloneSqlState.running;
+    elements.standaloneSqlRunAll.hidden = standaloneSqlState.running;
+    elements.standaloneSqlCancel.hidden = !standaloneSqlState.running;
+  }
+}
+
 function prototypeKindLabel(viewItem) {
-  return viewItem.kind === "materialized" ? "Materialized view" : "View";
+  if (viewItem.kind === "materialized_view") return "Materialized view";
+  if (viewItem.kind === "foreign_table") return "Foreign table";
+  return viewItem.kind === "table" ? "Table" : "View";
 }
 
 function prototypeKindIcon(viewItem) {
-  return viewItem.kind === "materialized"
+  return viewItem.kind === "materialized_view"
     ? '<svg viewBox="0 0 20 20" aria-hidden="true"><rect x="4" y="4" width="12" height="4" rx="1"/><rect x="4" y="9" width="12" height="3" rx="1"/><rect x="4" y="13" width="12" height="3" rx="1"/></svg>'
     : '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 3.5h7l3 3v10H5zM12 3.5v3h3M8 10h4M8 13h4"/></svg>';
 }
 
+function canInspectViewsRelation(identity) {
+  return ["table", "view", "materialized_view"].includes(identity.kind);
+}
+
+function prototypeSourceExpansionKey(viewId, source) {
+  return `${viewId}\u0000${source.namespace}\u0000${source.relation}\u0000${source.kind}`;
+}
+
+function prototypeSourceColumnProjections() {
+  return null;
+}
+
+function prototypeSourceCard(source, selected, index) {
+  const inspectable = canInspectViewsRelation(source);
+  const sourceView = viewsPrototypeState.views.find(viewItem => viewItem.id === source.relation && viewItem.namespace === source.namespace);
+  const relation = viewsPrototypeState.descriptors.get(relationIdentityKey(source));
+  const expanded = inspectable && viewsPrototypeState.expandedSources.has(prototypeSourceExpansionKey(selected.id, source));
+  const detailsId = `prototype-source-columns-${index}`;
+  const columns = relation?.columns ?? sourceView?.columns ?? [];
+  const columnRows = columns.map(column => {
+    return `<li class="prototype-source-column unavailable"><span><strong>${escapeHtml(column.name)}</strong><small>${escapeHtml(column.type)}</small></span><span class="prototype-source-projections"><em>Mapping unavailable</em></span></li>`;
+  }).join("");
+  return `<article class="prototype-source-expandable ${expanded ? "expanded" : ""}">
+    <button class="prototype-source-summary ${viewsPrototypeState.inspectedRelation === relationIdentityKey(source) ? "selected" : ""}" type="button" ${inspectable ? `data-toggle-source-columns="${escapeHtml(relationIdentityKey(source))}" aria-expanded="${expanded}" aria-controls="${detailsId}" aria-label="${expanded ? "Collapse" : "Expand"} columns for ${escapeHtml(source.relation)}"` : `disabled aria-label="Inspection unavailable for ${escapeHtml(source.relation)}"`}>
+      <span>${sourceView ? prototypeKindIcon(sourceView) : '<svg viewBox="0 0 20 20" aria-hidden="true"><ellipse cx="10" cy="5" rx="6" ry="2.5"/><path d="M4 5v7c0 1.4 2.7 2.5 6 2.5s6-1.1 6-2.5V5"/></svg>'}</span>
+      <small>${escapeHtml(prototypeKindLabel(source))}</small><strong>${escapeHtml(source.namespace)}.${escapeHtml(source.relation)}</strong>${inspectable ? '<i aria-hidden="true">⌄</i>' : '<i aria-hidden="true">Inspection unavailable</i>'}
+    </button>
+    ${inspectable ? `<div class="prototype-source-columns" id="${detailsId}" ${expanded ? "" : "hidden"}>${columnRows ? `<ul>${columnRows}</ul>` : '<p>Loading actual source columns...</p>'}<div class="prototype-source-legend"><span>Column provenance unavailable</span></div><button class="prototype-source-inspect" type="button" data-prototype-relation="${escapeHtml(relationIdentityKey(source))}" ${source.namespace === selected.namespace ? "" : "disabled"}>Inspect relation</button></div>` : ""}
+  </article>`;
+}
+
+function togglePrototypeSourceColumns(button) {
+  const source = selectedPrototypeView()?.sources.find(item => relationIdentityKey(item) === button.dataset.toggleSourceColumns);
+  if (!source || !canInspectViewsRelation(source)) return;
+  const key = prototypeSourceExpansionKey(viewsPrototypeState.selectedId, source);
+  const card = button.closest(".prototype-source-expandable");
+  const details = document.getElementById(button.getAttribute("aria-controls"));
+  const expanding = button.getAttribute("aria-expanded") !== "true";
+  if (!card || !details) return;
+
+  if (expanding) viewsPrototypeState.expandedSources.add(key);
+  else viewsPrototypeState.expandedSources.delete(key);
+  button.setAttribute("aria-expanded", String(expanding));
+  button.setAttribute("aria-label", `${expanding ? "Collapse" : "Expand"} columns for ${source.relation}`);
+  card.classList.toggle("expanded", expanding);
+  const wasHidden = details.hidden;
+  if (expanding && wasHidden) details.hidden = false;
+  const currentHeight = wasHidden ? 0 : details.getBoundingClientRect().height;
+  details.getAnimations().forEach(animation => animation.cancel());
+
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    details.hidden = !expanding;
+    return;
+  }
+
+  const startHeight = currentHeight;
+  const endHeight = expanding ? details.offsetHeight : 0;
+  const animation = details.animate([
+    { height: `${startHeight}px`, opacity: expanding ? 0 : 1, transform: expanding ? "translateY(-5px)" : "translateY(0)" },
+    { height: `${endHeight}px`, opacity: expanding ? 1 : 0, transform: expanding ? "translateY(0)" : "translateY(-5px)" },
+  ], { duration: 220, easing: "cubic-bezier(.22,1,.36,1)" });
+  animation.finished.then(() => {
+    if (button.getAttribute("aria-expanded") === "false") details.hidden = true;
+  }).catch(() => {});
+  if (expanding && source.namespace === activeViewsBinding()?.namespace && !viewsPrototypeState.descriptors.has(relationIdentityKey(source))) {
+    inspectViewsRelation(source).then(() => {
+      if (button.isConnected && button.getAttribute("aria-expanded") === "true") renderViewsPrototype();
+    }).catch(error => showToast(error.message));
+  }
+}
+
 function prototypeViewCard(viewItem, extraClass = "") {
   const selected = viewItem.id === viewsPrototypeState.selectedId;
-  return `<button class="prototype-view-card ${viewItem.kind} ${selected ? "selected" : ""} ${extraClass}" type="button" data-prototype-view-id="${escapeHtml(viewItem.id)}" aria-pressed="${selected}">
+  return `<button class="prototype-view-card ${prototypeKindClass(viewItem)} ${selected ? "selected" : ""} ${extraClass}" type="button" data-prototype-view-id="${escapeHtml(viewItem.id)}" aria-pressed="${selected}">
     <span class="prototype-view-kind-mark">${prototypeKindIcon(viewItem)}</span>
-    <span><small>${escapeHtml(prototypeKindLabel(viewItem))}</small><strong>${escapeHtml(viewItem.name)}</strong><em>${viewItem.columns.length} output columns</em></span>
+    <span><small>${escapeHtml(prototypeKindLabel(viewItem))}</small><strong>${escapeHtml(viewItem.name)}</strong><em>${viewItem.loading ? "Loading contract..." : `${viewItem.columns.length} output columns`}</em></span>
   </button>`;
 }
 
@@ -535,49 +833,66 @@ function renderTwinCanvasConcept() {
 
 function renderLineageFocusConcept() {
   const selected = selectedPrototypeView();
-  const sourceCards = selected.sources.map(source => {
-    const sourceView = viewsPrototypeState.views.find(viewItem => viewItem.id === source);
-    return `<button class="${viewsPrototypeState.inspectedRelation === source ? "selected" : ""}" type="button" data-prototype-relation="${escapeHtml(source)}"><span>${sourceView ? prototypeKindIcon(sourceView) : '<svg viewBox="0 0 20 20" aria-hidden="true"><ellipse cx="10" cy="5" rx="6" ry="2.5"/><path d="M4 5v7c0 1.4 2.7 2.5 6 2.5s6-1.1 6-2.5V5"/></svg>'}</span><small>${sourceView ? prototypeKindLabel(sourceView) : "Table"}</small><strong>${escapeHtml(source)}</strong></button>`;
+  const binding = activeViewsBinding();
+  if (selected && viewsPrototypeState.targetKey !== viewsBindingKey(binding)) {
+    viewsPrototypeState.views = [];
+    viewsPrototypeState.selectedId = null;
+    viewsPrototypeState.descriptors.clear();
+    viewsPrototypeState.inspectedRelation = null;
+    viewsPrototypeState.catalogOpen = false;
+    return renderLineageFocusConcept();
+  }
+  if (!selected) {
+    const message = !binding ? "Link and save this schema to an exact PostgreSQL profile, database, and namespace to use Views."
+      : viewsPrototypeState.loading ? "Loading live PostgreSQL views..."
+        : viewsPrototypeState.error || "No views or materialized views exist in the saved namespace.";
+    return `<div class="views-focus-shell"><div class="views-focus-concept"><section class="prototype-focus-lineage views-live-state"><strong>${escapeHtml(message)}</strong></section></div></div>`;
+  }
+  const selectedFields = selected.columns.map(column => {
+    return `<span class="prototype-focus-field"><strong>${escapeHtml(column.name)}</strong><span>${escapeHtml(column.type)}</span></span>`;
   }).join("");
+  const sourceCards = selected.sources.length
+    ? selected.sources.map((source, index) => prototypeSourceCard(source, selected, index)).join("")
+    : '<div class="prototype-source-unavailable"><strong>No upstream relations</strong><span>The live PostgreSQL catalog reports no relation dependencies.</span></div>';
   const dependents = selected.dependents.length
-    ? selected.dependents.map(dependent => `<button class="dependent ${viewsPrototypeState.inspectedRelation === dependent ? "selected" : ""}" type="button" data-prototype-relation="${escapeHtml(dependent)}"><span>&rarr;</span><small>Downstream ${prototypeRelationCatalog[dependent]?.kind ?? "relation"}</small><strong>${escapeHtml(dependent)}</strong></button>`).join("")
+    ? selected.dependents.map(dependent => `<button class="dependent ${viewsPrototypeState.inspectedRelation === relationIdentityKey(dependent) ? "selected" : ""}" type="button" data-prototype-relation="${escapeHtml(relationIdentityKey(dependent))}" ${dependent.namespace === selected.namespace && canInspectViewsRelation(dependent) ? "" : "disabled"}><span>&rarr;</span><small>Downstream ${escapeHtml(prototypeKindLabel(dependent))}${canInspectViewsRelation(dependent) ? "" : " · inspection unavailable"}</small><strong>${escapeHtml(dependent.namespace)}.${escapeHtml(dependent.relation)}</strong></button>`).join("")
     : '<article class="dependent empty"><span>&rarr;</span><small>Downstream</small><strong>No downstream objects</strong></article>';
-  const lineageContent = viewsPrototypeState.lineageMode === "columns"
-    ? renderPrototypeColumnLineage(selected)
-    : viewsPrototypeState.lineageMode === "impact"
-      ? renderPrototypeImpactLineage(selected)
-      : `<div class="prototype-focus-sources"><header><span>Upstream</span><small>${selected.sources.length} relations</small></header>${sourceCards}</div><div class="prototype-focus-arrows" aria-hidden="true"><i></i><i></i><i></i></div><button class="prototype-focus-hero ${viewsPrototypeState.inspectedRelation === selected.id ? "selected" : ""}" type="button" data-prototype-relation="${escapeHtml(selected.id)}">${prototypeKindIcon(selected)}<span>${escapeHtml(prototypeKindLabel(selected))}</span><h3>${escapeHtml(selected.name)}</h3><p>${selected.columns.length} projected columns · inspect output contract</p></button><div class="prototype-focus-arrows outbound" aria-hidden="true"><i></i></div><div class="prototype-focus-dependents"><header><span>Downstream</span><small>${selected.dependents.length} consumers</small></header>${dependents}</div>`;
+  const selectedIdentity = relationIdentityKey({ database: binding.database, namespace: selected.namespace, relation: selected.name, kind: selected.kind });
+  const relationMap = `<div class="prototype-relations-map"><div class="prototype-focus-sources"><header><span>Upstream</span><small>${selected.sources.length} relations</small></header>${sourceCards}</div><div class="prototype-focus-arrows" aria-hidden="true"><i></i></div><button class="prototype-focus-hero ${viewsPrototypeState.inspectedRelation === selectedIdentity ? "selected" : ""}" type="button" data-prototype-relation="${escapeHtml(selectedIdentity)}"><span class="prototype-focus-identity">${prototypeKindIcon(selected)}<span><small>${escapeHtml(prototypeKindLabel(selected))}</small><h3>${escapeHtml(selected.name)}</h3></span></span><span class="prototype-focus-fields">${selectedFields || '<span class="prototype-focus-field"><strong>Loading output contract...</strong></span>'}</span><p>${selected.columns.length} projected columns · inspect output contract</p></button><div class="prototype-focus-arrows outbound" aria-hidden="true"><i></i></div><div class="prototype-focus-dependents"><header><span>Downstream</span><small>${selected.dependents.length} consumers</small></header>${dependents}</div></div>`;
+  const lineageContent = `${relationMap}${renderPrototypeImpactSummary(selected)}`;
   const sideOpen = viewsPrototypeState.catalogOpen || viewsPrototypeState.inspectedRelation;
   const sidePanel = viewsPrototypeState.inspectedRelation ? renderPrototypeRelationInspector(viewsPrototypeState.inspectedRelation) : prototypeCatalogPanel();
   return `<div class="views-focus-shell ${sideOpen ? "catalog-open" : ""}">
     <aside class="prototype-view-catalog prototype-focus-catalog ${viewsPrototypeState.inspectedRelation ? "relation-inspector" : ""}" aria-label="${viewsPrototypeState.inspectedRelation ? "Read-only relation inspector" : "View catalog"}" aria-hidden="${!sideOpen}" ${sideOpen ? "" : "inert"}>${sidePanel}</aside>
     <div class="views-focus-concept" data-active-pane="${viewsPrototypeState.activePane}">
       <section class="prototype-focus-lineage">
-        <header class="views-lineage-head"><button class="views-pane-heading" type="button" data-views-pane="lineage" aria-expanded="${viewsPrototypeState.activePane === "lineage"}"><span class="eyebrow">Browser-local prototype · no persistence</span><span><strong>View lineage</strong><span class="prototype-kind-badge ${selected.kind}">${escapeHtml(prototypeKindLabel(selected))}</span></span><small>${escapeHtml(selected.namespace)}.${escapeHtml(selected.name)}</small></button><div class="views-prototype-actions"><button class="shared-icon-button views-catalog-toggle ${viewsPrototypeState.catalogOpen ? "active" : ""}" type="button" data-toggle-prototype-catalog aria-label="${viewsPrototypeState.catalogOpen ? "Hide views" : "Browse views"}" aria-expanded="${viewsPrototypeState.catalogOpen}" data-tooltip="${viewsPrototypeState.catalogOpen ? "Hide views" : "Browse views"}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4.5 4.5h11v3h-11zM4.5 9h11v3h-11zM4.5 13.5h11v2h-11z"/></svg></button><button class="shared-icon-button views-create-button" type="button" data-create-prototype-view aria-label="Create view" data-tooltip="Create view"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v12M4 10h12"/></svg></button></div></header>
-        <div class="prototype-lineage-body" ${viewsPrototypeState.activePane === "lineage" ? "" : "hidden"}><nav class="prototype-lineage-modes" aria-label="Lineage presentation"><button class="${viewsPrototypeState.lineageMode === "relations" ? "active" : ""}" type="button" data-lineage-mode="relations">Relations</button><button class="${viewsPrototypeState.lineageMode === "columns" ? "active" : ""}" type="button" data-lineage-mode="columns">Column flow</button><button class="${viewsPrototypeState.lineageMode === "impact" ? "active" : ""}" type="button" data-lineage-mode="impact">Impact</button></nav><div class="prototype-focus-flow ${viewsPrototypeState.lineageMode !== "relations" ? `mode-${viewsPrototypeState.lineageMode}` : ""}">${lineageContent}</div></div>
+        <header class="views-lineage-head"><button class="views-pane-heading" type="button" data-views-pane="lineage" aria-expanded="${viewsPrototypeState.activePane === "lineage"}"><span class="eyebrow">Live PostgreSQL catalog</span><span><strong>View lineage</strong><span class="prototype-kind-badge ${prototypeKindClass(selected)}">${escapeHtml(prototypeKindLabel(selected))}</span></span><small>${escapeHtml(selected.namespace)}.${escapeHtml(selected.name)}</small></button></header>
+        <div class="prototype-lineage-body" ${viewsPrototypeState.activePane === "lineage" ? "" : "hidden"}><div class="prototype-focus-flow">${lineageContent}</div></div>
       </section>
-      <section class="prototype-focus-definition"><button class="views-pane-heading" type="button" data-views-pane="definition" aria-expanded="${viewsPrototypeState.activePane === "definition"}"><span><span class="eyebrow">Browser-local editable draft</span><strong>PostgreSQL definition</strong></span><span class="prototype-kind-badge ${selected.kind}">${escapeHtml(prototypeKindLabel(selected))}</span></button><div class="prototype-focus-definition-content" ${viewsPrototypeState.activePane === "definition" ? "" : "hidden"}><textarea class="prototype-definition-editor" data-prototype-definition-editor aria-label="Editable PostgreSQL view definition" spellcheck="false">${escapeHtml(prototypeViewDefinition(selected))}</textarea><footer><span data-prototype-draft-status>${selected.savedDraft === selected.definitionDraft && selected.savedDraft !== undefined ? "Draft saved in browser memory" : "Unsaved browser-local changes"}</span><div class="prototype-definition-actions"><button class="button button-ghost" type="button" data-save-prototype-definition>Save draft</button><button class="button button-primary" type="button" data-commit-prototype-definition>Commit changes</button></div></footer></div></section>
+      <section class="prototype-focus-definition"><button class="views-pane-heading" type="button" data-views-pane="definition" aria-expanded="${viewsPrototypeState.activePane === "definition"}"><span><span class="eyebrow">Reviewed PostgreSQL definition</span><strong>PostgreSQL definition</strong></span><span class="prototype-kind-badge ${prototypeKindClass(selected)}">${escapeHtml(prototypeKindLabel(selected))}</span></button><div class="prototype-focus-definition-content" ${viewsPrototypeState.activePane === "definition" ? "" : "hidden"}><textarea class="prototype-definition-editor" data-prototype-definition-editor aria-label="Editable PostgreSQL view definition" spellcheck="false" ${selected.definition?.status === "available" && selected.permissions?.canAlter ? "" : "readonly"}>${escapeHtml(prototypeViewDefinition(selected))}</textarea><footer><span data-prototype-draft-status>${selected.definition?.status === "available" ? "Live definition; preview required before apply" : "Definition unavailable"}</span><div class="prototype-definition-actions"><button class="button button-primary" type="button" data-commit-prototype-definition ${selected.definition?.status === "available" && selected.permissions?.canAlter ? "" : "disabled"}>Preview changes</button></div></footer></div></section>
     </div>
   </div>`;
 }
 
-function renderPrototypeRelationInspector(relationName) {
-  const viewItem = viewsPrototypeState.views.find(item => item.id === relationName);
-  const relation = prototypeRelationCatalog[relationName] ?? (viewItem ? { kind: prototypeKindLabel(viewItem), columns: viewItem.columns.map(column => [column, "Derived", "Output"]), constraints: [] } : { kind: "Relation", columns: [], constraints: [] });
-  const relationship = relationName === selectedPrototypeView().id ? `${selectedPrototypeView().sources.length} upstream · ${selectedPrototypeView().dependents.length} downstream` : selectedPrototypeView().sources.includes(relationName) ? `Source of ${selectedPrototypeView().name}` : selectedPrototypeView().dependents.includes(relationName) ? `Consumes ${selectedPrototypeView().name}` : "Related object";
-  return `<header><span><span class="eyebrow">Read-only inspector</span><strong>${escapeHtml(relationName)}</strong></span><button class="shared-icon-button" type="button" data-close-prototype-side aria-label="Close relation inspector"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button></header><section><span class="prototype-section-label">Identity</span><dl class="prototype-relation-identity"><div><dt>Namespace</dt><dd>bookstore</dd></div><div><dt>Kind</dt><dd>${escapeHtml(relation.kind)}</dd></div><div><dt>Lineage role</dt><dd>${escapeHtml(relationship)}</dd></div></dl></section><section class="prototype-relation-columns"><span class="prototype-section-label">Columns · ${relation.columns.length}</span>${relation.columns.map(([name, type, note]) => `<article><strong>${escapeHtml(name)}</strong><span>${escapeHtml(type)}</span><small>${escapeHtml(note)}</small></article>`).join("")}</section><section><span class="prototype-section-label">Constraints</span><div class="prototype-column-chips">${relation.constraints.length ? relation.constraints.map(item => `<span>${escapeHtml(item)}</span>`).join("") : "<small>Derived relations have no table constraints.</small>"}</div></section><footer>Catalog snapshot · editing unavailable</footer>`;
+function renderPrototypeRelationInspector(identityKey) {
+  const descriptor = viewsPrototypeState.descriptors.get(identityKey);
+  const binding = activeViewsBinding();
+  const selectedView = selectedPrototypeView();
+  const identity = binding && selectedView ? [...selectedView.sources, ...selectedView.dependents, { database: binding.database, namespace: selectedView.namespace, relation: selectedView.name, kind: selectedView.kind }].find(item => relationIdentityKey(item) === identityKey) : null;
+  if (!identity) return `<header><strong>Relation unavailable</strong></header>`;
+  if (!descriptor) return `<header><span><span class="eyebrow">Live relation inspector</span><strong>${escapeHtml(identity.relation)}</strong></span><button class="shared-icon-button" type="button" data-close-prototype-side aria-label="Close relation inspector"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button></header><section><strong>Loading verified PostgreSQL metadata...</strong></section>`;
+  const selected = selectedPrototypeView();
+  const relationship = identity.relation === selected.id ? `${selected.sources.length} upstream · ${selected.dependents.length} downstream` : selected.sources.some(item => relationIdentityKey(item) === identityKey) ? `Source of ${selected.name}` : `Consumes ${selected.name}`;
+  const owner = descriptor.owner.status === "available" ? descriptor.owner.name : `Unavailable: ${descriptor.owner.reason}`;
+  const materialized = descriptor.materialized.status === "available" ? `Populated ${descriptor.materialized.populated ? "yes" : "no"} · concurrent refresh ${descriptor.materialized.concurrentRefreshEligible ? "eligible" : "unavailable"}` : "Not applicable";
+  return `<header><span><span class="eyebrow">Live relation inspector</span><strong>${escapeHtml(identity.relation)}</strong></span><button class="shared-icon-button" type="button" data-close-prototype-side aria-label="Close relation inspector"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button></header><section><span class="prototype-section-label">Identity</span><dl class="prototype-relation-identity"><div><dt>Namespace</dt><dd>${escapeHtml(identity.namespace)}</dd></div><div><dt>Kind</dt><dd>${escapeHtml(prototypeKindLabel(identity))}</dd></div><div><dt>Lineage role</dt><dd>${escapeHtml(relationship)}</dd></div><div><dt>Owner</dt><dd>${escapeHtml(owner)}</dd></div><div><dt>Permissions</dt><dd>Select ${descriptor.permissions.canSelect ? "yes" : "no"} · alter ${descriptor.permissions.canAlter ? "yes" : "no"}</dd></div><div><dt>Materialized</dt><dd>${escapeHtml(materialized)}</dd></div></dl></section><section class="prototype-relation-columns"><span class="prototype-section-label">Columns · ${descriptor.columns.length}</span>${descriptor.columns.map(column => `<article><strong>${escapeHtml(column.name)}</strong><span>${escapeHtml(column.type)}</span><small>${column.nullable ? "Nullable" : "Not null"}</small></article>`).join("")}</section><section><span class="prototype-section-label">Column provenance</span><div class="prototype-column-chips"><small>Unavailable from PostgreSQL. No source-to-output mappings are inferred.</small></div></section><footer>Verified live catalog snapshot</footer>`;
 }
 
-function renderPrototypeColumnLineage(viewItem) {
-  const mappings = viewItem.name === "order_summary"
-    ? [["orders.id", "Direct", "order_id"], ["customers.display_name", "JOIN lookup", "customer_name"], ["orders.status", "Direct", "status"], ["orders.total", "Alias", "order_total"]]
-    : viewItem.columns.map((column, index) => [`${viewItem.sources[index % viewItem.sources.length]}.${column}`, index > 1 ? "Aggregate" : "Direct", column]);
-  return `<section class="prototype-column-lineage"><header><span><span class="eyebrow">Projection provenance</span><strong>Column flow</strong></span><small>Trace every output to its expression and source</small></header><div class="prototype-column-lineage-context"><button type="button" data-prototype-relation="${escapeHtml(viewItem.id)}"><small>Output relation</small><strong>${escapeHtml(viewItem.name)}</strong><span>${viewItem.columns.length} columns</span></button><article><small>Query shape</small><strong>${viewItem.sources.length > 1 ? "Multi-relation join" : "Single source"}</strong><span>${viewItem.sources.length} upstream relations</span></article></div><div class="prototype-column-mappings">${mappings.map(([source, transform, output]) => `<button type="button" data-prototype-relation="${escapeHtml(source.split(".")[0])}"><span><small>Source column</small><strong>${escapeHtml(source)}</strong></span><em>${escapeHtml(transform)}</em><b>&rarr;</b><span><small>Output column</small><strong>${escapeHtml(output)}</strong></span></button>`).join("")}</div></section>`;
-}
-
-function renderPrototypeImpactLineage(viewItem) {
+function renderPrototypeImpactSummary(viewItem) {
   const downstream = viewItem.dependents[0];
-  return `<section class="prototype-impact-lineage"><header><span><span class="eyebrow">Migration readiness</span><strong>Change impact</strong></span><small>Review risk boundaries before committing the definition</small></header><div class="prototype-impact-summary"><button type="button" data-prototype-relation="${escapeHtml(viewItem.sources[0])}"><strong>${viewItem.sources.length}</strong><span>upstream relations</span><small>Inspect source contract</small></button><button type="button" data-prototype-relation="${escapeHtml(viewItem.id)}"><strong>${viewItem.columns.length}</strong><span>output columns</span><small>Inspect selected view</small></button><button type="button" ${downstream ? `data-prototype-relation="${escapeHtml(downstream)}"` : "disabled"}><strong>${viewItem.dependents.length}</strong><span>downstream consumers</span><small>${downstream ? "Inspect consumer" : "No consumers"}</small></button></div><div class="prototype-impact-list"><button type="button" data-prototype-relation="${escapeHtml(viewItem.sources[0])}"><span>High</span><strong>Referenced source columns</strong><small>Type changes or removals can invalidate the definition at migration time.</small></button><button type="button" data-prototype-relation="${escapeHtml(viewItem.id)}"><span>Medium</span><strong>Published output contract</strong><small>${viewItem.columns.join(", ")}</small></button>${downstream ? `<button type="button" data-prototype-relation="${escapeHtml(downstream)}"><span>Review</span><strong>Downstream consumer</strong><small>${escapeHtml(downstream)} reads this view's projected shape.</small></button>` : '<article><span>Clear</span><strong>No downstream consumers</strong><small>This catalog snapshot has no registered dependents.</small></article>'}</div><footer><span>Prototype assessment</span><strong>${viewItem.kind === "materialized" ? "Recreation and refresh review required" : "Replacement preview required"}</strong><small>Live catalog validation remains required before commit.</small></footer></section>`;
+  const identity = { database: activeViewsBinding().database, namespace: viewItem.namespace, relation: viewItem.name, kind: viewItem.kind };
+  const upstream = viewItem.sources[0];
+  return `<section class="prototype-impact-compact" aria-label="Change impact"><header><span>Change impact</span><small>Migration readiness</small></header><div><button type="button" ${upstream?.namespace === viewItem.namespace && canInspectViewsRelation(upstream) ? `data-prototype-relation="${escapeHtml(relationIdentityKey(upstream))}"` : "disabled"}><strong>${viewItem.sources.length}</strong><span>Upstream</span></button><button type="button" data-prototype-relation="${escapeHtml(relationIdentityKey(identity))}"><strong>${viewItem.columns.length}</strong><span>Outputs</span></button><button type="button" ${downstream?.namespace === viewItem.namespace && canInspectViewsRelation(downstream) ? `data-prototype-relation="${escapeHtml(relationIdentityKey(downstream))}"` : "disabled"}><strong>${viewItem.dependents.length}</strong><span>Consumers</span></button><article><span>Review</span><strong>${viewItem.kind === "materialized_view" ? "Recreate and refresh" : "Replacement preview"}</strong></article></div></section>`;
 }
 
 function renderCatalogWorkbenchConcept() {
@@ -592,10 +907,13 @@ function renderCatalogWorkbenchConcept() {
 
 function renderViewsPrototype() {
   elements.viewsConceptStage.innerHTML = renderLineageFocusConcept();
+  updateWorkspaceRail();
+  updateHistoryControls();
 }
 
 function prototypeCatalogPanel() {
-  return `<header><span><span class="eyebrow">Relation browser</span><strong>Views</strong></span><button class="shared-icon-button" type="button" data-close-prototype-side aria-label="Close view catalog"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button><input data-prototype-view-filter aria-label="Filter prototype views" placeholder="Search views..."/></header><div class="prototype-catalog-filters"><button class="active" type="button">All</button><button type="button">Views</button><button type="button">Materialized</button></div><div>${viewsPrototypeState.views.map(viewItem => prototypeViewCard(viewItem, "catalog-row")).join("")}</div>`;
+  const filter = viewsPrototypeState.catalogFilter;
+  return `<header><span><span class="eyebrow">Live relation browser</span><strong>Views</strong></span><button class="shared-icon-button" type="button" data-close-prototype-side aria-label="Close view catalog"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button><input data-prototype-view-filter aria-label="Filter live views" placeholder="Search views..."/></header><div class="prototype-catalog-filters"><button class="${filter === "all" ? "active" : ""}" data-view-kind-filter="all" type="button">All</button><button class="${filter === "view" ? "active" : ""}" data-view-kind-filter="view" type="button">Views</button><button class="${filter === "materialized_view" ? "active" : ""}" data-view-kind-filter="materialized_view" type="button">Materialized</button></div><div>${viewsPrototypeState.views.map(viewItem => prototypeViewCard(viewItem, "catalog-row")).join("") || '<p class="views-catalog-empty">No live views in this namespace.</p>'}</div>`;
 }
 
 function swapPrototypeSidePanel(content, relationName = null, focusSearch = false) {
@@ -616,26 +934,60 @@ function swapPrototypeSidePanel(content, relationName = null, focusSearch = fals
   }, 130);
 }
 
-function setPrototypeViewCatalogOpen(open) {
-  const replacingInspector = open && Boolean(viewsPrototypeState.inspectedRelation);
-  viewsPrototypeState.catalogOpen = open;
-  if (open) viewsPrototypeState.inspectedRelation = null;
-  if (replacingInspector) {
-    swapPrototypeSidePanel(prototypeCatalogPanel(), null, true);
+function openPrototypeRelationInspector(relationName) {
+  const shell = elements.viewsConceptStage.querySelector(".views-focus-shell");
+  const panel = elements.viewsConceptStage.querySelector(".prototype-focus-catalog");
+  if (!shell || !panel) return renderViewsPrototype();
+  if (shell.classList.contains("catalog-open") && viewsPrototypeState.inspectedRelation === relationName) {
+    viewsPrototypeState.inspectedRelation = null;
+    setPrototypeViewCatalogOpen(false);
     return;
   }
+  viewsPrototypeState.catalogOpen = false;
+  viewsPrototypeState.inspectedRelation = relationName;
+  updateWorkspaceRail();
+  if (shell.classList.contains("catalog-open")) swapPrototypeSidePanel(renderPrototypeRelationInspector(relationName), relationName);
+  else {
+    panel.innerHTML = renderPrototypeRelationInspector(relationName);
+    panel.classList.add("relation-inspector");
+    panel.setAttribute("aria-label", "Read-only relation inspector");
+    panel.setAttribute("aria-hidden", "false");
+    panel.inert = false;
+    void shell.offsetWidth;
+    requestAnimationFrame(() => shell.classList.add("catalog-open"));
+  }
+
+  const selected = selectedPrototypeView();
+  const binding = activeViewsBinding();
+  const identity = selected && binding ? [...selected.sources, ...selected.dependents, { database: binding.database, namespace: selected.namespace, relation: selected.name, kind: selected.kind }].find(item => relationIdentityKey(item) === relationName) : null;
+  if (identity && canInspectViewsRelation(identity) && identity.namespace === binding.namespace && !viewsPrototypeState.descriptors.has(relationName)) {
+    inspectViewsRelation(identity).then(() => {
+      if (viewsPrototypeState.inspectedRelation === relationName) swapPrototypeSidePanel(renderPrototypeRelationInspector(relationName), relationName);
+    }).catch(error => showToast(`${error.message}. Refresh the saved schema before continuing`));
+  }
+}
+
+function setPrototypeViewCatalogOpen(open) {
   const shell = elements.viewsConceptStage.querySelector(".views-focus-shell");
   const catalog = elements.viewsConceptStage.querySelector(".prototype-focus-catalog");
+  const catalogMissing = open && (!catalog?.querySelector("[data-prototype-view-filter]") || catalog.classList.contains("relation-inspector"));
+  viewsPrototypeState.catalogOpen = open;
+  if (open) {
+    viewsPrototypeState.inspectedRelation = null;
+    if (catalogMissing && catalog) {
+      clearTimeout(viewsPrototypeState.sideTimer);
+      catalog.classList.remove("side-exit", "side-enter", "side-positioning", "relation-inspector");
+      catalog.innerHTML = prototypeCatalogPanel();
+      catalog.setAttribute("aria-label", "View catalog");
+    }
+  }
   shell?.classList.toggle("catalog-open", open);
   if (catalog) {
     catalog.inert = !open;
     catalog.setAttribute("aria-hidden", String(!open));
   }
-  const toggle = elements.viewsConceptStage.querySelector("[data-toggle-prototype-catalog]");
-  toggle?.classList.toggle("active", open);
-  toggle?.setAttribute("aria-expanded", String(open));
-  toggle?.setAttribute("aria-label", open ? "Hide views" : "Browse views");
-  if (toggle) toggle.dataset.tooltip = open ? "Hide views" : "Browse views";
+  updateWorkspaceRail();
+  if (open) catalog?.querySelector("[data-prototype-view-filter]")?.focus();
 }
 
 function setViewsActivePane(pane) {
@@ -676,6 +1028,7 @@ function setDesignLayer(layer) {
   const viewsOpen = nextLayer === "views";
   if (viewsPrototypeState.layer === nextLayer && (viewsOpen ? elements.viewsPrototypeWorkspace.classList.contains("open") : elements.viewsPrototypeWorkspace.hidden)) return;
   viewsPrototypeState.layer = nextLayer;
+  updateWorkspaceRail();
   clearTimeout(viewsPrototypeState.layerTimer);
   elements.viewsPrototypeWorkspace.inert = !viewsOpen;
   elements.viewsPrototypeWorkspace.setAttribute("aria-hidden", String(!viewsOpen));
@@ -689,6 +1042,7 @@ function setDesignLayer(layer) {
   if (viewsOpen) {
     elements.viewsPrototypeWorkspace.hidden = false;
     renderViewsPrototype();
+    if (viewsPrototypeState.targetKey !== viewsBindingKey(activeViewsBinding()) || viewsPrototypeState.error) loadViewsCatalog({ preserveSelection: false });
     elements.mainLayout.classList.add("views-layer-open", "views-layer-entering");
     requestAnimationFrame(() => elements.viewsPrototypeWorkspace.classList.add("open"));
     viewsPrototypeState.layerTimer = setTimeout(() => elements.mainLayout.classList.remove("views-layer-entering"), 300);
@@ -702,27 +1056,115 @@ function setDesignLayer(layer) {
 }
 
 function openPrototypeViewEditor(viewId = null, duplicate = false) {
+  const binding = activeViewsBinding();
+  if (!binding) return showToast("Save a schema linked to an exact PostgreSQL target before editing views");
   const existing = viewId ? viewsPrototypeState.views.find(viewItem => viewItem.id === viewId) : null;
   viewsPrototypeState.editingId = duplicate ? null : existing?.id ?? null;
-  const draft = existing ? { ...existing, name: duplicate ? `${existing.name}_copy` : existing.name } : { name: "new_view", namespace: "bookstore", kind: "view", query: 'SELECT\n    source.id\nFROM "bookstore"."source_table" AS source' };
+  if (existing && existing.definition?.status !== "available") return showToast("The PostgreSQL definition is unavailable and cannot be edited");
+  const draft = existing ? { ...existing, name: duplicate ? `${existing.name}_copy` : existing.name } : { name: "new_view", namespace: binding.namespace, kind: "view", query: "SELECT 1 AS value" };
+  if (duplicate) delete draft.definitionDraft;
+  viewsPrototypeState.editorExpectation = existing && !duplicate ? { kind: existing.kind, fingerprint: existing.fingerprint } : { absent: true };
   viewsPrototypeState.editorBody = draft.query;
   elements.prototypeViewEditorTitle.textContent = existing && !duplicate ? `Edit ${existing.name}` : "Create view";
-  elements.prototypeViewNamespace.value = draft.namespace;
+  elements.prototypeViewNamespace.value = binding.namespace;
   elements.prototypeViewName.value = draft.name;
-  elements.prototypeViewEditorForm.elements["prototype-view-kind"].value = draft.kind;
+  elements.prototypeViewName.readOnly = Boolean(existing && !duplicate);
+  elements.prototypeViewEditorForm.elements["prototype-view-kind"].value = draft.kind === "materialized_view" ? "materialized_view" : "view";
   elements.prototypeViewSql.value = prototypeViewDefinition(draft);
   elements.prototypeViewEditorDialog.showModal();
   elements.prototypeViewSql.focus();
 }
 
+function deleteSelectedPrototypeView() {
+  const selected = selectedPrototypeView();
+  if (!selected?.permissions?.canAlter) return;
+  viewsPrototypeState.editingId = selected.id;
+  viewsPrototypeState.editorExpectation = { kind: selected.kind, fingerprint: selected.fingerprint };
+  elements.prototypeViewName.value = selected.name;
+  elements.prototypeViewEditorForm.elements["prototype-view-kind"].value = selected.kind;
+  return previewViewOperation("delete", null, true);
+}
+
 function rewritePrototypeViewTemplate() {
   const kind = elements.prototypeViewEditorForm.elements["prototype-view-kind"].value;
-  const namespace = elements.prototypeViewNamespace.value.trim() || "bookstore";
+  const namespace = activeViewsBinding()?.namespace;
+  if (!namespace) return;
   const name = elements.prototypeViewName.value.trim() || "new_view";
   const current = elements.prototypeViewSql.value;
   const bodyMatch = current.match(/\bAS\s*\n([\s\S]*?)(?:\nWITH\s+(?:NO\s+)?DATA)?;?\s*$/i);
   if (bodyMatch?.[1]?.trim()) viewsPrototypeState.editorBody = bodyMatch[1].trim();
   elements.prototypeViewSql.value = prototypeViewDefinition({ kind, namespace, name, query: viewsPrototypeState.editorBody });
+}
+
+function viewsMutationBody(operation, definition, allowDestructive) {
+  const binding = activeViewsBinding();
+  const relation = elements.prototypeViewName.value.trim();
+  const kind = elements.prototypeViewEditorForm.elements["prototype-view-kind"].value;
+  if (!binding || !relation || !["view", "materialized_view"].includes(kind)) throw new Error("The saved Views target or relation identity is invalid");
+  return {
+    schemaId: binding.schemaId, expectedSchemaRevision: binding.revision, layoutToken: binding.layoutToken,
+    database: binding.database, namespace: binding.namespace, relation,
+    operation, expectation: clone(viewsPrototypeState.editorExpectation), allowDestructive,
+    ...(operation === "upsert" ? { desired: { kind, definition } } : {}),
+  };
+}
+
+function renderViewPlanReview(plan) {
+  if (!plan || typeof plan.id !== "string" || typeof plan.destructive !== "boolean" || !Array.isArray(plan.steps) || !Array.isArray(plan.warnings)) throw new Error("The server returned an invalid view plan");
+  const steps = plan.steps.map((step, index) => {
+    if (!step || typeof step.action !== "string" || typeof step.objectType !== "string" || typeof step.name !== "string" || typeof step.sql !== "string") throw new Error("The server returned an invalid reviewed step");
+    return `<article><strong>${index + 1}. ${escapeHtml(step.action)} ${escapeHtml(step.objectType)} ${escapeHtml(step.name)}</strong><pre>${escapeHtml(step.sql)}</pre></article>`;
+  }).join("");
+  const warnings = plan.warnings.map(warning => `<li>${escapeHtml(typeof warning === "string" ? warning : warning.message || warning.code || "Warning")}</li>`).join("");
+  const deleting = plan.operation === "delete";
+  const materialized = plan.expectation?.kind === "materialized_view";
+  const title = deleting ? `Delete ${materialized ? "materialized view" : "view"}` : plan.destructive ? "Recreate materialized view" : "Reviewed plan";
+  const consequence = deleting
+    ? materialized ? "This permanently drops the materialized view and all rows stored in it. Source-table rows are not deleted. No CASCADE will be used." : "This permanently drops the view. Source-table rows are not deleted. No CASCADE will be used."
+    : plan.destructive ? "Stored materialized-view rows will be discarded. PostgreSQL will repopulate the relation before commit when it was previously populated." : "PostgreSQL will apply only these reviewed steps.";
+  const acknowledgement = deleting ? `I understand this ${materialized ? "materialized view and its stored rows" : "view"} will be permanently deleted` : "I confirm this destructive materialized-view recreation and repopulation";
+  elements.prototypeViewCommitReview.innerHTML = `<strong>${title}</strong><p>${consequence}</p>${steps}${warnings ? `<ul>${warnings}</ul>` : ""}${plan.destructive ? `<label class="views-destructive-confirm"><input type="checkbox" data-confirm-destructive-view/> ${acknowledgement}</label>` : ""}`;
+  elements.confirmPrototypeViewCommit.textContent = deleting ? `Delete ${materialized ? "materialized view" : "view"}` : "Apply reviewed plan";
+  elements.confirmPrototypeViewCommit.disabled = Boolean(plan.destructive);
+}
+
+async function previewViewOperation(operation, definition = null, allowDestructive = false) {
+  try {
+    const bindingKey = viewsBindingKey(activeViewsBinding());
+    const body = viewsMutationBody(operation, definition, allowDestructive);
+    const plan = await postgresRequest(`/api/postgres/profiles/${encodeURIComponent(activeViewsBinding().profileId)}/views/preview`, { method: "POST", body: JSON.stringify(body) });
+    if (bindingKey !== viewsBindingKey(activeViewsBinding())) return showToast("The active saved schema changed. Preview again");
+    renderViewPlanReview(plan);
+    viewsPrototypeState.pendingPlan = { plan, bindingKey: viewsBindingKey(activeViewsBinding()) };
+    elements.prototypeViewEditorDialog.close();
+    elements.prototypeViewCommitDialog.showModal();
+  } catch (error) {
+    if (error.code === "destructive_preview_required" && !allowDestructive) {
+      if (!confirm("This change requires a destructive recreation preview. Preview destructive steps?")) return;
+      return previewViewOperation(operation, definition, true);
+    }
+    const refresh = ["relation_changed", "profile_changed", "database_changed", "schema_conflict", "layout_conflict", "schema_target_changed", "schema_view_changed"].includes(error.code);
+    showToast(`${error.message}${refresh ? ". Refresh the saved schema before continuing" : ""}`);
+  }
+}
+
+function previewViewDefinition(definition, allowDestructive = false) {
+  return previewViewOperation("upsert", definition, allowDestructive);
+}
+
+async function reloadActiveSchemaRecord() {
+  const response = await fetch("/api/schemas");
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || !Array.isArray(payload.schemas)) throw new Error("The saved schema could not be refreshed");
+  const record = payload.schemas.find(item => item.id === activeSchemaId);
+  if (!record) throw new Error("The active saved schema no longer exists");
+  const library = readSchemaLibrary();
+  library.schemas = payload.schemas;
+  library.activeId = activeSchemaId;
+  writeSchemaLibrary(library);
+  schema = migrateSchema(clone(record.schema));
+  view = clone(schema.layout.layers.tables.viewport);
+  render();
 }
 
 function standaloneSqlTarget() {
@@ -851,6 +1293,7 @@ function setStandaloneSqlHistoryCollapsed(collapsed) {
   elements.standaloneSqlWorkspace.classList.toggle("history-collapsed", collapsed);
   elements.standaloneSqlHistoryToggle.setAttribute("aria-expanded", String(!collapsed));
   elements.standaloneSqlHistoryToggle.setAttribute("aria-label", collapsed ? "Open saved queries" : "Close saved queries");
+  updateWorkspaceRail();
 }
 
 function openStandaloneSqlSaveDialog() {
@@ -1221,6 +1664,7 @@ function finishStandaloneSqlRun(executionId) {
   elements.standaloneSqlRunAll.disabled = false;
   elements.standaloneSqlCancel.disabled = true;
   elements.standaloneSqlCancel.hidden = true;
+  updateWorkspaceRail();
 }
 
 async function runStandaloneSql(runAll = false) {
@@ -1247,6 +1691,7 @@ async function runStandaloneSql(runAll = false) {
   elements.standaloneSqlRunAll.disabled = true;
   elements.standaloneSqlCancel.disabled = false;
   elements.standaloneSqlCancel.hidden = false;
+  updateWorkspaceRail();
   const writeMode = Boolean(viewState.writeMode && viewState.writeGrantId);
   const writeGrantId = writeMode ? viewState.writeGrantId : null;
   replaceStandaloneSqlUnpinnedTabs([{ id: `running-${executionId}`, label: runAll ? "Run all" : "Run", meta: "Running", kind: "loading", pinned: false, message: `Executing a ${writeMode ? "write" : "read-only"} PostgreSQL transaction...` }], viewState);
@@ -1323,9 +1768,19 @@ function abandonStandaloneSqlRun() {
   elements.standaloneSqlRunAll.disabled = false;
   elements.standaloneSqlCancel.disabled = true;
   elements.standaloneSqlCancel.hidden = true;
+  updateWorkspaceRail();
 }
 
 function openStandaloneSqlWorkspace() {
+  if (viewsPrototypeState.layer === "views") {
+    clearTimeout(viewsPrototypeState.layerTimer);
+    elements.viewsPrototypeWorkspace.classList.remove("open");
+    elements.viewsPrototypeWorkspace.inert = true;
+    elements.viewsPrototypeWorkspace.setAttribute("aria-hidden", "true");
+    viewsPrototypeState.layerTimer = setTimeout(() => {
+      if (standaloneSqlState.open) elements.viewsPrototypeWorkspace.hidden = true;
+    }, 280);
+  }
   syncStandaloneSqlTarget(true);
   renderStandaloneSqlHistory();
   renderStandaloneSqlView(currentStandaloneSqlView());
@@ -1336,13 +1791,19 @@ function openStandaloneSqlWorkspace() {
   elements.standaloneSqlWorkspace.inert = false;
   elements.standaloneSqlWorkspace.setAttribute("aria-hidden", "false");
   elements.mainLayout.classList.add("sql-workspace-open");
+  updateWorkspaceRail();
   elements.standaloneSqlButton.classList.add("active");
   elements.standaloneSqlButton.setAttribute("aria-expanded", "true");
+  elements.standaloneSqlButton.setAttribute("aria-pressed", "true");
+  elements.designLayerSwitch.querySelectorAll("[data-design-layer]").forEach(button => {
+    button.classList.remove("active");
+    button.setAttribute("aria-pressed", "false");
+  });
   requestAnimationFrame(() => elements.standaloneSqlWorkspace.classList.add("open"));
   elements.standaloneSqlInput.focus();
 }
 
-async function closeStandaloneSqlWorkspace() {
+async function closeStandaloneSqlWorkspace({ restoreLayer = true } = {}) {
   if (standaloneSqlState.closing) return;
   standaloneSqlState.closing = true;
   abandonStandaloneSqlRun();
@@ -1360,10 +1821,25 @@ async function closeStandaloneSqlWorkspace() {
   updateHistoryControls();
   elements.standaloneSqlWorkspace.classList.remove("open");
   elements.mainLayout.classList.remove("sql-workspace-open");
+  updateWorkspaceRail();
   elements.standaloneSqlButton.classList.remove("active");
   elements.standaloneSqlButton.setAttribute("aria-expanded", "false");
+  elements.standaloneSqlButton.setAttribute("aria-pressed", "false");
+  elements.designLayerSwitch.querySelectorAll("[data-design-layer]").forEach(button => {
+    const active = button.dataset.designLayer === viewsPrototypeState.layer;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
   elements.standaloneSqlWorkspace.inert = true;
   elements.standaloneSqlWorkspace.setAttribute("aria-hidden", "true");
+  if (restoreLayer && viewsPrototypeState.layer === "views") {
+    clearTimeout(viewsPrototypeState.layerTimer);
+    elements.viewsPrototypeWorkspace.hidden = false;
+    elements.viewsPrototypeWorkspace.inert = false;
+    elements.viewsPrototypeWorkspace.setAttribute("aria-hidden", "false");
+    renderViewsPrototype();
+    requestAnimationFrame(() => elements.viewsPrototypeWorkspace.classList.add("open"));
+  }
   setTimeout(() => { if (!standaloneSqlState.open) elements.standaloneSqlWorkspace.hidden = true; }, 270);
   elements.standaloneSqlButton.focus();
 }
@@ -1828,9 +2304,16 @@ async function shutdownSchemii() {
 
 function schemaForStorage(schemaValue, viewState = null) {
   const stored = clone(schemaValue);
-  const tableLayout = {};
+  const sourceLayout = stored.layout && typeof stored.layout === "object" ? stored.layout : {};
+  const sourceLayers = sourceLayout.layers && typeof sourceLayout.layers === "object" ? sourceLayout.layers : {};
+  const sourceTableLayer = sourceLayers.tables && typeof sourceLayers.tables === "object" ? sourceLayers.tables : {};
+  const sourceTableLayout = sourceTableLayer.objects && typeof sourceTableLayer.objects === "object"
+    ? sourceTableLayer.objects
+    : sourceLayout.tables && typeof sourceLayout.tables === "object" ? sourceLayout.tables : {};
+  const tableLayout = clone(sourceTableLayout);
   for (const table of stored.tables) {
     tableLayout[table.id] = {
+      ...(tableLayout[table.id] && typeof tableLayout[table.id] === "object" ? tableLayout[table.id] : {}),
       x: Number.isFinite(table.x) ? table.x : 0,
       y: Number.isFinite(table.y) ? table.y : 0,
       color: table.color || COLORS[0],
@@ -1842,11 +2325,14 @@ function schemaForStorage(schemaValue, viewState = null) {
     delete table.y;
     delete table.color;
   }
-  stored.layout = {
-    version: 1,
-    tables: tableLayout,
-    view: clone(viewState ?? stored.layout?.view ?? { x: 45, y: 35, zoom: 1 })
-  };
+  const viewport = clone(viewState ?? sourceTableLayer.viewport ?? sourceLayout.view ?? { x: 45, y: 35, zoom: 1 });
+  stored.layout = { ...sourceLayout, version: 2, layers: {
+    ...sourceLayers,
+    tables: { ...sourceTableLayer, objects: tableLayout, viewport: { ...(sourceTableLayer.viewport ?? {}), ...viewport } },
+    views: sourceLayers.views && typeof sourceLayers.views === "object" ? sourceLayers.views : { objects: {}, viewport: { x: 45, y: 35, zoom: 1 } }
+  } };
+  delete stored.layout.tables;
+  delete stored.layout.view;
   return stored;
 }
 
@@ -2005,7 +2491,7 @@ async function initializeSchemaLibrary() {
     activeSchemaId = records[0].id;
     schemaLibrary = { activeId: activeSchemaId, schemas: records };
     schema = migrateSchema(clone(records.find(record => record.id === activeSchemaId).schema));
-    view = clone(schema.layout.view);
+    view = clone(schema.layout.layers.tables.viewport);
     elements.saveStatus.textContent = "Saved to file";
     render();
   } catch (error) {
@@ -2109,7 +2595,14 @@ function migrateSchema(schema) {
   }
   if (typeof schema.projectName !== "string") schema.projectName = "Untitled schema";
   if (!Array.isArray(schema.relationships)) schema.relationships = [];
-  const storedLayout = schema.layout?.tables && typeof schema.layout.tables === "object" ? schema.layout.tables : {};
+  const sourceLayout = schema.layout && typeof schema.layout === "object" ? schema.layout : {};
+  const sourceLayers = sourceLayout.layers && typeof sourceLayout.layers === "object" ? sourceLayout.layers : {};
+  const sourceTableLayer = sourceLayers.tables && typeof sourceLayers.tables === "object" ? sourceLayers.tables : {};
+  const legacyTables = sourceLayout.tables && typeof sourceLayout.tables === "object" ? sourceLayout.tables : {};
+  const storedLayout = sourceTableLayer.objects && typeof sourceTableLayer.objects === "object" ? sourceTableLayer.objects : legacyTables;
+  const tableViewport = sourceTableLayer.viewport && typeof sourceTableLayer.viewport === "object"
+    ? sourceTableLayer.viewport
+    : sourceLayout.view && typeof sourceLayout.view === "object" ? sourceLayout.view : { x: 45, y: 35, zoom: 1 };
   for (const [tableIndex, table] of schema.tables.entries()) {
     if (!table || typeof table !== "object" || !Array.isArray(table.columns)) {
       throw new Error("Invalid table in schema file");
@@ -2210,8 +2703,13 @@ function migrateSchema(schema) {
       throw new Error("Invalid relationship in schema file");
     }
   }
-  if (!schema.layout || typeof schema.layout !== "object") schema.layout = { version: 1, tables: {}, view: { x: 45, y: 35, zoom: 1 } };
-  if (!schema.layout.view || typeof schema.layout.view !== "object") schema.layout.view = { x: 45, y: 35, zoom: 1 };
+  schema.layout = { ...sourceLayout, version: 2, layers: {
+    ...sourceLayers,
+    tables: { ...sourceTableLayer, objects: storedLayout, viewport: tableViewport },
+    views: sourceLayers.views && typeof sourceLayers.views === "object" ? sourceLayers.views : { objects: {}, viewport: { x: 45, y: 35, zoom: 1 } }
+  } };
+  delete schema.layout.tables;
+  delete schema.layout.view;
   return schema;
 }
 
@@ -2497,7 +2995,7 @@ function persistSchemaRecord(schemaId, schemaValue) {
       id: schemaId,
       revision: record?.revision ?? 0,
       layoutToken: record?.layoutToken,
-      schema: schemaForStorage(schemaValue, schemaId === activeSchemaId ? view : schemaValue.layout?.view),
+      schema: schemaForStorage(schemaValue, schemaId === activeSchemaId ? view : schemaValue.layout?.layers?.tables?.viewport),
       updatedAt: record?.updatedAt ?? new Date().toISOString()
     };
     const result = await putRecordFile(savedRecord);
@@ -2555,6 +3053,12 @@ function updateHistoryControls() {
     elements.redoButton.disabled = false;
     return;
   }
+  if (viewsPrototypeState.layer === "views") {
+    const history = selectedViewDefinitionHistory();
+    elements.undoButton.disabled = !history?.undo.length;
+    elements.redoButton.disabled = !history?.redo.length;
+    return;
+  }
   elements.undoButton.disabled = undoStack.length === 0;
   elements.redoButton.disabled = redoStack.length === 0;
 }
@@ -2597,6 +3101,7 @@ function undo() {
     elements.standaloneSqlInput.dispatchEvent(new Event("input", { bubbles: true }));
     return;
   }
+  if (viewsPrototypeState.layer === "views") return restoreViewDefinitionDraft("undo");
   const snapshot = undoStack.pop();
   if (!snapshot) return showToast("Nothing to undo");
   redoStack.push(captureHistoryState());
@@ -2612,6 +3117,7 @@ function redo() {
     elements.standaloneSqlInput.dispatchEvent(new Event("input", { bubbles: true }));
     return;
   }
+  if (viewsPrototypeState.layer === "views") return restoreViewDefinitionDraft("redo");
   const snapshot = redoStack.pop();
   if (!snapshot) return showToast("Nothing to redo");
   undoStack.push(captureHistoryState());
@@ -2704,7 +3210,7 @@ async function openSchema(schemaId, { fit = true } = {}) {
   schema = migrateSchema(clone(record.schema));
   library.activeId = activeSchemaId;
   writeSchemaLibrary(library);
-  view = clone(schema.layout.view);
+  view = clone(schema.layout.layers.tables.viewport);
   resetSchemaSession();
   if (elements.schemaDialog.open) elements.schemaDialog.close();
   render();
@@ -6408,6 +6914,7 @@ document.querySelector("#export-sql-button").addEventListener("click", () => {
 document.addEventListener("pointerdown", event => {
   if (exportMenu.open && !event.target.closest("#export-menu")) exportMenu.removeAttribute("open");
   if (appMenu.open && !event.target.closest("#app-menu")) appMenu.removeAttribute("open");
+  if (elements.standaloneSqlViewMenu.open && !event.target.closest("#standalone-sql-view-menu")) elements.standaloneSqlViewMenu.removeAttribute("open");
   if (!event.target.closest("#object-icon-menu")) closeObjectIconMenu();
 });
 elements.objectIconMenu.addEventListener("click", event => {
@@ -6459,48 +6966,59 @@ elements.schemaLibrary.addEventListener("click", event => {
   if (button.dataset.libraryAction === "delete") deleteSavedSchema(button.dataset.schemaId);
 });
 
-elements.designLayerSwitch.addEventListener("click", event => {
+elements.designLayerSwitch.addEventListener("click", async event => {
   const button = event.target.closest("[data-design-layer]");
-  if (button) setDesignLayer(button.dataset.designLayer);
+  if (!button) return;
+  if (standaloneSqlState.open) {
+    await closeStandaloneSqlWorkspace({ restoreLayer: false });
+    if (standaloneSqlState.open) return;
+  }
+  setDesignLayer(button.dataset.designLayer);
 });
+elements.viewsBrowseButton.addEventListener("click", () => setPrototypeViewCatalogOpen(!viewsPrototypeState.catalogOpen));
+elements.viewsCreateButton.addEventListener("click", () => openPrototypeViewEditor());
+elements.viewsRefreshButton.addEventListener("click", () => { void loadViewsCatalog(); });
+elements.viewsDeleteButton.addEventListener("click", deleteSelectedPrototypeView);
 elements.viewsConceptStage.addEventListener("click", event => {
   const paneToggle = event.target.closest("[data-views-pane]");
   const catalogToggle = event.target.closest("[data-toggle-prototype-catalog]");
   if (paneToggle) return toggleViewsActivePane(paneToggle.dataset.viewsPane);
-  const lineageMode = event.target.closest("[data-lineage-mode]");
-  if (lineageMode) {
-    viewsPrototypeState.lineageMode = lineageMode.dataset.lineageMode;
-    return renderViewsPrototype();
-  }
   if (catalogToggle) {
     setPrototypeViewCatalogOpen(!viewsPrototypeState.catalogOpen);
-    if (viewsPrototypeState.catalogOpen) elements.viewsConceptStage.querySelector("[data-prototype-view-filter]")?.focus();
+    return;
+  }
+  const sourceToggle = event.target.closest("[data-toggle-source-columns]");
+  if (sourceToggle) return togglePrototypeSourceColumns(sourceToggle);
+  if (event.target.closest("[data-refresh-views]")) return loadViewsCatalog();
+  const kindFilter = event.target.closest("[data-view-kind-filter]");
+  if (kindFilter) {
+    viewsPrototypeState.catalogFilter = kindFilter.dataset.viewKindFilter;
+    elements.viewsConceptStage.querySelectorAll("[data-view-kind-filter]").forEach(button => button.classList.toggle("active", button === kindFilter));
+    const search = elements.viewsConceptStage.querySelector("[data-prototype-view-filter]")?.value.trim().toLowerCase() ?? "";
+    elements.viewsConceptStage.querySelectorAll(".prototype-focus-catalog [data-prototype-view-id]").forEach(card => {
+      const item = viewsPrototypeState.views.find(viewItem => viewItem.id === card.dataset.prototypeViewId);
+      card.hidden = (viewsPrototypeState.catalogFilter !== "all" && item?.kind !== viewsPrototypeState.catalogFilter) || (Boolean(search) && !card.textContent.toLowerCase().includes(search));
+    });
     return;
   }
   const relationButton = event.target.closest("[data-prototype-relation]");
-  if (relationButton) {
-    viewsPrototypeState.catalogOpen = false;
-    viewsPrototypeState.inspectedRelation = relationButton.dataset.prototypeRelation;
-    const panelOpen = elements.viewsConceptStage.querySelector(".views-focus-shell")?.classList.contains("catalog-open");
-    if (panelOpen) return swapPrototypeSidePanel(renderPrototypeRelationInspector(viewsPrototypeState.inspectedRelation), viewsPrototypeState.inspectedRelation);
-    return renderViewsPrototype();
-  }
+  if (relationButton) return openPrototypeRelationInspector(relationButton.dataset.prototypeRelation);
   if (event.target.closest("[data-create-prototype-view]")) return openPrototypeViewEditor();
-  if (event.target.closest("[data-save-prototype-definition]")) {
-    const selected = selectedPrototypeView();
-    selected.savedDraft = selected.definitionDraft ?? prototypeViewDefinition(selected);
-    elements.viewsConceptStage.querySelector("[data-prototype-draft-status]").textContent = "Draft saved in browser memory";
-    showToast("View definition draft saved in browser memory");
-    return;
+  if (event.target.closest("[data-delete-prototype-view]")) {
+    return deleteSelectedPrototypeView();
   }
   if (event.target.closest("[data-commit-prototype-definition]")) {
-    elements.prototypeViewCommitDialog.showModal();
-    return;
+    const selected = selectedPrototypeView();
+    viewsPrototypeState.editingId = selected.id;
+    viewsPrototypeState.editorExpectation = { kind: selected.kind, fingerprint: selected.fingerprint };
+    elements.prototypeViewName.value = selected.name;
+    elements.prototypeViewEditorForm.elements["prototype-view-kind"].value = selected.kind;
+    return previewViewDefinition(selected.definitionDraft ?? prototypeViewDefinition(selected));
   }
   if (event.target.closest("[data-close-prototype-side]")) {
     viewsPrototypeState.inspectedRelation = null;
     setPrototypeViewCatalogOpen(false);
-    return elements.viewsConceptStage.querySelector("[data-toggle-prototype-catalog]")?.focus();
+    return elements.viewsBrowseButton.focus();
   }
   const viewCard = event.target.closest("[data-prototype-view-id]");
   const editButton = event.target.closest("[data-prototype-edit]");
@@ -6509,28 +7027,37 @@ elements.viewsConceptStage.addEventListener("click", event => {
   if (duplicateButton) return openPrototypeViewEditor(duplicateButton.dataset.prototypeDuplicate, true);
   if (!viewCard) return;
   viewsPrototypeState.selectedId = viewCard.dataset.prototypeViewId;
+  viewsPrototypeState.expandedSources.clear();
+  const selected = viewsPrototypeState.views.find(item => item.id === viewsPrototypeState.selectedId);
   renderViewsPrototype();
-});
-elements.prototypeViewCommitDialog.addEventListener("close", () => {
-  if (elements.prototypeViewCommitDialog.returnValue !== "confirm") return;
-  const selected = selectedPrototypeView();
-  selected.savedDraft = selected.definitionDraft ?? prototypeViewDefinition(selected);
-  renderViewsPrototype();
-  showToast("Prototype commit reviewed; no PostgreSQL request was made");
+  if (selected?.loading) inspectViewsRelation({ database: activeViewsBinding().database, namespace: selected.namespace, relation: selected.name, kind: selected.kind }, { select: true }).then(renderViewsPrototype).catch(error => showToast(error.message));
 });
 elements.viewsConceptStage.addEventListener("input", event => {
   const definitionEditor = event.target.closest("[data-prototype-definition-editor]");
   if (definitionEditor) {
-    selectedPrototypeView().definitionDraft = definitionEditor.value;
-    elements.viewsConceptStage.querySelector("[data-prototype-draft-status]").textContent = "Unsaved browser-local changes";
+    const selected = selectedPrototypeView();
+    recordViewDefinitionEdit(selected, definitionEditor.value);
+    elements.viewsConceptStage.querySelector("[data-prototype-draft-status]").textContent = "Unsaved changes; preview required";
     return;
   }
   const filter = event.target.closest("[data-prototype-view-filter]");
   if (!filter) return;
-  const query = filter.value.trim().toLowerCase();
+  const query = filter.value.toLowerCase();
   elements.viewsConceptStage.querySelectorAll(".prototype-focus-catalog [data-prototype-view-id]").forEach(card => {
-    card.hidden = Boolean(query) && !card.textContent.toLowerCase().includes(query);
+    const item = viewsPrototypeState.views.find(viewItem => viewItem.id === card.dataset.prototypeViewId);
+    card.hidden = (viewsPrototypeState.catalogFilter !== "all" && item?.kind !== viewsPrototypeState.catalogFilter) || (Boolean(query) && !card.textContent.toLowerCase().includes(query));
   });
+});
+elements.viewsConceptStage.addEventListener("keydown", event => {
+  if (!event.target.closest("[data-prototype-definition-editor]") || !(event.ctrlKey || event.metaKey)) return;
+  const key = event.key.toLowerCase();
+  if (key === "z") {
+    event.preventDefault();
+    if (event.shiftKey) redo(); else undo();
+  } else if (key === "y") {
+    event.preventDefault();
+    redo();
+  }
 });
 document.querySelector("#close-prototype-view-editor").addEventListener("click", () => elements.prototypeViewEditorDialog.close());
 document.querySelector("#cancel-prototype-view-editor").addEventListener("click", () => elements.prototypeViewEditorDialog.close());
@@ -6541,30 +7068,71 @@ elements.prototypeViewNamespace.addEventListener("input", rewritePrototypeViewTe
 elements.prototypeViewName.addEventListener("input", rewritePrototypeViewTemplate);
 elements.prototypeViewEditorForm.addEventListener("submit", event => {
   event.preventDefault();
-  const namespace = elements.prototypeViewNamespace.value.trim() || "bookstore";
-  const name = elements.prototypeViewName.value.trim() || "new_view";
-  const kind = elements.prototypeViewEditorForm.elements["prototype-view-kind"].value;
   const definition = elements.prototypeViewSql.value.trim();
-  const queryMatch = definition.match(/\bAS\s*\n([\s\S]*?)(?:\nWITH\s+(?:NO\s+)?DATA)?;?\s*$/i);
-  const query = queryMatch?.[1]?.trim() || viewsPrototypeState.editorBody;
-  const existing = viewsPrototypeState.views.find(viewItem => viewItem.id === viewsPrototypeState.editingId);
-  if (existing) {
-    Object.assign(existing, { namespace, name, kind, query });
-    viewsPrototypeState.selectedId = existing.id;
-  } else {
-    const created = { id: uid("prototype_view"), namespace, name, kind, query, sources: ["source_table"], dependents: [], columns: ["id", "display_value"] };
-    viewsPrototypeState.views.push(created);
-    viewsPrototypeState.selectedId = created.id;
+  if (!definition) return showToast("Enter a complete view definition");
+  previewViewDefinition(definition);
+});
+document.querySelector("#close-prototype-view-commit").addEventListener("click", () => elements.prototypeViewCommitDialog.close());
+document.querySelector("#cancel-prototype-view-commit").addEventListener("click", () => elements.prototypeViewCommitDialog.close());
+elements.prototypeViewCommitReview.addEventListener("change", event => {
+  if (event.target.matches("[data-confirm-destructive-view]")) elements.confirmPrototypeViewCommit.disabled = !event.target.checked;
+});
+elements.prototypeViewCommitForm.addEventListener("submit", async event => {
+  event.preventDefault();
+  const pending = viewsPrototypeState.pendingPlan;
+  if (!pending || pending.bindingKey !== viewsBindingKey(activeViewsBinding())) return showToast("The active saved schema changed. Preview again");
+  const confirmDestructive = Boolean(pending.plan.destructive && elements.prototypeViewCommitReview.querySelector("[data-confirm-destructive-view]")?.checked);
+  if (pending.plan.destructive && !confirmDestructive) return;
+  elements.confirmPrototypeViewCommit.disabled = true;
+  try {
+    const binding = activeViewsBinding();
+    const result = await postgresRequest(`/api/postgres/profiles/${encodeURIComponent(binding.profileId)}/view-plans/${encodeURIComponent(pending.plan.id)}/apply`, { method: "POST", body: JSON.stringify({ confirmDestructive }) });
+    elements.prototypeViewCommitDialog.close();
+    viewsPrototypeState.pendingPlan = null;
+    if (!result?.applied || !result.schemaSync || !["upsert", "delete"].includes(result.operation) || (result.operation === "upsert" ? !result.descriptor : !result.deleted)) throw new Error("PostgreSQL returned an invalid view apply result");
+    if (result.schemaSync.status === "conflict") {
+      showToast("PostgreSQL committed, but the saved schema changed. Refreshing the schema; the plan will not be retried");
+      await reloadActiveSchemaRecord();
+      return loadViewsCatalog({ preserveSelection: true });
+    }
+    if (result.schemaSync.status === "storage_error") {
+      showToast("PostgreSQL committed, but the saved schema could not be synchronized. Refreshing; the plan will not be retried");
+      await reloadActiveSchemaRecord();
+      return loadViewsCatalog({ preserveSelection: false });
+    }
+    if (result.schemaSync.status !== "saved" || !Number.isInteger(result.schemaSync.revision) || typeof result.schemaSync.layoutToken !== "string") throw new Error("PostgreSQL committed, but schema synchronization returned an invalid result");
+    const record = schemaLibrary.schemas.find(item => item.id === activeSchemaId);
+    record.revision = result.schemaSync.revision;
+    record.layoutToken = result.schemaSync.layoutToken;
+    record.updatedAt = result.schemaSync.updatedAt;
+    await reloadActiveSchemaRecord();
+    if (result.operation === "delete") {
+      const deletedIndex = viewsPrototypeState.views.findIndex(item => item.id === result.deleted.relation);
+      viewsPrototypeState.views = viewsPrototypeState.views.filter(item => item.id !== result.deleted.relation);
+      viewsPrototypeState.selectedId = viewsPrototypeState.views[Math.min(deletedIndex, viewsPrototypeState.views.length - 1)]?.id ?? null;
+      viewsPrototypeState.inspectedRelation = null;
+      viewsPrototypeState.expandedSources.clear();
+      await loadViewsCatalog({ preserveSelection: true });
+      showToast(result.deleted.kind === "materialized_view" ? "Materialized view and its stored rows deleted" : "View deleted");
+    } else {
+      viewsPrototypeState.selectedId = result.descriptor.relation;
+      const appliedIndex = viewsPrototypeState.views.findIndex(item => item.id === result.descriptor.relation);
+      if (appliedIndex >= 0) viewsPrototypeState.views[appliedIndex] = descriptorToView(validateRelationDescriptor(result.descriptor, activeViewsBinding(), result.descriptor.relation, result.descriptor.kind));
+      await loadViewsCatalog({ preserveSelection: true });
+      showToast("View changes applied and saved schema synchronized");
+    }
+  } catch (error) {
+    const refresh = ["relation_changed", "profile_changed", "database_changed", "schema_conflict", "layout_conflict"].includes(error.code);
+    showToast(`${error.message}${refresh ? ". Refresh the saved schema before continuing" : ""}`);
+  } finally {
+    elements.confirmPrototypeViewCommit.disabled = false;
   }
-  elements.prototypeViewEditorDialog.close();
-  renderViewsPrototype();
-  showToast("View draft kept in browser memory");
 });
 
 elements.standaloneSqlButton.addEventListener("click", () => {
-  if (standaloneSqlState.open) closeStandaloneSqlWorkspace(); else openStandaloneSqlWorkspace();
+  if (!standaloneSqlState.open) openStandaloneSqlWorkspace();
 });
-elements.standaloneSqlClose.addEventListener("click", closeStandaloneSqlWorkspace);
+elements.standaloneSqlNewQuery.addEventListener("click", addStandaloneSqlView);
 elements.standaloneSqlHistory.addEventListener("click", event => {
   const item = event.target.closest("button[data-sql]");
   if (!item) return;
@@ -6960,6 +7528,7 @@ window.addEventListener("resize", () => {
 });
 document.addEventListener("visibilitychange", () => { if (!document.hidden) checkPostgresDrift(); });
 setInterval(checkPostgresDrift, 15000);
+updateWorkspaceRail();
 
 initializeSchemaLibrary().finally(() => {
   requestAnimationFrame(() => requestAnimationFrame(() => {

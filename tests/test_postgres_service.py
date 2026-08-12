@@ -49,7 +49,13 @@ class Cursor:
                     self.rows = response["rows"]
                     self.description = [Column(name) for name in response.get("columns", [])]
                 else:
-                    self.rows = response
+                    self.rows = [dict(row) if isinstance(row, dict) else row for row in response]
+                    if "server_version_num" in sql:
+                        for row in self.rows:
+                            row.setdefault("server_version_num", 160000)
+                    if "c.oid AS live_oid" in sql:
+                        for row in self.rows:
+                            row.setdefault("live_oid", 1)
                     if self.rows and isinstance(self.rows[0], dict):
                         self.description = [Column(name) for name in self.rows[0]]
                 break
@@ -188,7 +194,8 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertEqual([item["kind"] for item in result["relations"]], ["table", "view", "materialized_view"])
         catalog_query = next(sql for sql, _ in connection.executed if "c.relname AS relation_name" in sql)
         self.assertIn("c.relkind IN ('r', 'p', 'v', 'm')", catalog_query)
-        self.assertEqual(connection.executed[0][0], "SET TRANSACTION READ ONLY")
+        self.assertEqual(connection.executed[0][0], "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        self.assertEqual(connection.rollbacks, 1)
         self.assertTrue(connection.closed)
 
     def test_relation_catalog_rejects_unverified_database(self):
@@ -199,6 +206,7 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertEqual(error.exception.status, 409)
         self.assertEqual(error.exception.code, "database_changed")
         self.assertFalse(any("c.relname AS relation_name" in sql for sql, _ in connection.executed))
+        self.assertEqual(connection.rollbacks, 1)
         self.assertTrue(connection.closed)
 
     def test_relation_inspection_returns_ordered_columns_and_stable_fingerprint(self):
@@ -235,6 +243,114 @@ class PostgresServiceTests(unittest.TestCase):
         }]}
         definition_service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: Connection(responses=changed_definition))
         self.assertNotEqual(first["fingerprint"], definition_service.inspect_relation("local", "demo", "reporting", "order_summary")["fingerprint"])
+
+    def test_relation_inspection_adds_advisory_capabilities_and_bounded_oid_free_lineage(self):
+        dependents = [
+            {"namespace": "reports", "relation_name": f"summary_{number:03}", "relation_kind": "view"}
+            for number in range(501)
+        ]
+        responses = {
+            "SELECT current_database() AS database": [{"database": "demo", "server_version_num": 160000}],
+            "c.relkind AS catalog_kind": [{
+                "live_oid": 20, "catalog_kind": "v", "relation_kind": "view",
+                "view_definition": "SELECT * FROM sales.orders", "owner_name": "reporter",
+                "current_role": "reader", "can_alter": False, "can_select": True,
+                "can_refresh": False, "materialized_populated": True,
+            }],
+            "a.attname AS column_name": [],
+            "relation_dependencies": [
+                {"namespace": "sales", "relation_name": "orders", "relation_kind": "table"},
+                {"namespace": "shared", "relation_name": "rates", "relation_kind": "foreign_table"},
+            ],
+            "relation_dependents": dependents,
+        }
+        connection = Connection(responses=responses)
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connection)
+        result = service.inspect_relation("local", "demo", "reports", "order_summary")
+
+        self.assertEqual(result["owner"], {"status": "available", "name": "reporter"})
+        self.assertEqual(result["permissions"], {
+            "status": "available", "role": "reader", "advisory": True,
+            "canSelect": True, "canAlter": False, "canRefresh": False,
+        })
+        self.assertEqual(result["columnProvenance"], {"status": "unavailable", "reason": "not_supported"})
+        self.assertEqual(result["materialized"], {"status": "unavailable", "reason": "not_applicable"})
+        self.assertEqual(result["dependencies"], {
+            "status": "available", "truncated": False, "items": [
+                {"database": "demo", "namespace": "sales", "relation": "orders", "kind": "table"},
+                {"database": "demo", "namespace": "shared", "relation": "rates", "kind": "foreign_table"},
+            ],
+        })
+        self.assertEqual(len(result["dependents"]["items"]), 500)
+        self.assertTrue(result["dependents"]["truncated"])
+        self.assertNotIn("liveOid", json.dumps(result["dependencies"]))
+        lineage_queries = [item for item in connection.executed if "relation_depend" in item[0]]
+        self.assertEqual([item[1] for item in lineage_queries], [(20, 20, 501), (20, 20, 501)])
+        self.assertTrue(all("SELECT DISTINCT" in item[0] for item in lineage_queries))
+
+        changed = {**responses, "c.relkind AS catalog_kind": [{
+            **responses["c.relkind AS catalog_kind"][0], "owner_name": "other",
+            "current_role": "other_reader", "can_alter": True, "can_select": False,
+        }]}
+        changed_service = PostgresService(
+            self.temporary_directory.name, connect_factory=lambda **kwargs: Connection(responses=changed)
+        )
+        self.assertEqual(
+            result["fingerprint"],
+            changed_service.inspect_relation("local", "demo", "reports", "order_summary")["fingerprint"],
+        )
+
+    def test_materialized_relation_reports_population_refresh_capability_and_index_eligibility(self):
+        for populated, has_index, expected in ((True, True, True), (True, False, False), (False, True, False)):
+            with self.subTest(populated=populated, has_index=has_index):
+                responses = {
+                    "SELECT current_database() AS database": [{"database": "demo", "server_version_num": 170000}],
+                    "c.relkind AS catalog_kind": [{
+                        "live_oid": 30, "catalog_kind": "m", "relation_kind": "materialized_view",
+                        "view_definition": "SELECT 1", "owner_name": None, "current_role": "maintainer",
+                        "can_alter": False, "can_select": True, "can_refresh": True,
+                        "materialized_populated": populated,
+                    }],
+                    "a.attname AS column_name": [],
+                    "concurrent_refresh_index": [{"has_refresh_index": has_index}],
+                    "relation_dependencies": [],
+                    "relation_dependents": [],
+                }
+                connection = Connection(responses=responses)
+                service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connection)
+                result = service.inspect_relation("local", "demo", "reports", "daily_sales")
+                self.assertEqual(result["owner"], {"status": "unavailable", "reason": "not_permitted"})
+                self.assertTrue(result["permissions"]["canRefresh"])
+                self.assertEqual(result["materialized"], {
+                    "status": "available", "populated": populated, "concurrentRefreshEligible": expected,
+                })
+                relation_query = next(sql for sql, _ in connection.executed if "c.relkind AS catalog_kind" in sql)
+                self.assertIn("has_table_privilege(c.oid, 'MAINTAIN')", relation_query)
+                index_query = next(sql for sql, _ in connection.executed if "concurrent_refresh_index" in sql)
+                for condition in (
+                    "i.indisunique", "i.indisvalid", "i.indisready", "i.indimmediate",
+                    "i.indpred IS NULL", "i.indexprs IS NULL",
+                ):
+                    self.assertIn(condition, index_query)
+
+    def test_relation_inspection_uses_oid_bound_columns_and_rolls_back(self):
+        connection = Connection(responses={
+            "SELECT current_database() AS database": [{"database": "demo", "server_version_num": 160000}],
+            "c.relkind AS catalog_kind": [{
+                "live_oid": 77, "catalog_kind": "r", "relation_kind": "table", "view_definition": None,
+            }],
+            "a.attname AS column_name": [],
+        })
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connection)
+        result = service.inspect_relation("local", "demo", "public", "orders")
+        column_query = next(item for item in connection.executed if "a.attname AS column_name" in item[0])
+        self.assertIn("a.attrelid = %s", column_query[0])
+        self.assertEqual(column_query[1], (77,))
+        unavailable = {"status": "unavailable", "reason": "not_applicable"}
+        self.assertEqual(result["dependencies"], unavailable)
+        self.assertEqual(result["dependents"], unavailable)
+        self.assertEqual(connection.executed[0][0], "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        self.assertEqual(connection.rollbacks, 1)
 
     def test_relation_definitions_are_bounded_and_tables_do_not_claim_complete_ddl(self):
         base = {
@@ -876,6 +992,11 @@ class PostgresServiceTests(unittest.TestCase):
         plan = service.preview("local", "public", desired)
         result = service.apply("local", plan["id"])
         self.assertEqual(connection.commits, 1)
+        advisory = next(item for item in connection.executed if "pg_advisory_xact_lock" in item[0])
+        self.assertEqual(
+            advisory,
+            ("SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext(%s)::bigint)", ("schemii:public",)),
+        )
         self.assertEqual(result["postgres"]["fingerprint"], "refreshed")
         self.assertNotIn(plan["id"], service._plans)
         history = service.list_history("local")

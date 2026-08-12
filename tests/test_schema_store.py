@@ -1,6 +1,7 @@
 import json
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -8,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from schemii.schema_store import SchemaStore, SchemaStoreError
+from schemii.schema_store import SchemaStore, SchemaStoreError, schema_layout_token
 
 
 def record(schema_id, project_name="Untitled schema"):
@@ -131,6 +132,74 @@ class SchemaStoreTests(unittest.TestCase):
         )
         self.assertNotEqual(saved["layoutToken"], first["layoutToken"])
 
+    def test_v2_table_view_and_viewport_replacements_require_layout_token(self):
+        original = record("schema_one")
+        original["schema"]["layout"] = {
+            "version": 2,
+            "layers": {
+                "tables": {
+                    "objects": {
+                        f"table_{index}": {"x": index, "y": 0, "color": "yellow"}
+                        for index in range(8)
+                    },
+                    "viewport": {"x": 0, "y": 0, "zoom": 1},
+                },
+                "views": {
+                    "objects": {
+                        f"view_{index}": {"x": index, "y": 10, "color": "blue"}
+                        for index in range(8)
+                    },
+                    "viewport": {"x": 20, "y": 30, "zoom": 1},
+                },
+            },
+        }
+        first = self.store.save(
+            "schema_one", original, expected_layout_token=None, layout_protocol=None
+        )
+
+        for changed_layer in ("tables", "views", "both", "viewport"):
+            changed = json.loads(json.dumps(original))
+            changed["revision"] = first["revision"]
+            if changed_layer == "viewport":
+                changed["schema"]["layout"]["layers"]["views"]["viewport"]["x"] = 999
+            else:
+                names = ("tables", "views") if changed_layer == "both" else (changed_layer,)
+                for name in names:
+                    changed["schema"]["layout"]["layers"][name]["objects"] = {}
+            with self.subTest(changed_layer=changed_layer):
+                with self.assertRaises(SchemaStoreError) as error:
+                    self.store.save(
+                        "schema_one", changed, expected_layout_token=None, layout_protocol="2"
+                    )
+                self.assertEqual(error.exception.payload["error"]["code"], "layout_conflict")
+
+    def test_stale_v2_token_allows_a_narrow_object_save(self):
+        original = record("schema_one")
+        original["schema"]["layout"] = {
+            "version": 2,
+            "layers": {
+                "tables": {
+                    "objects": {
+                        f"table_{index}": {"x": index, "y": 0, "color": "yellow"}
+                        for index in range(8)
+                    },
+                    "viewport": {"x": 0, "y": 0, "zoom": 1},
+                },
+                "views": {"objects": {}, "viewport": {"x": 0, "y": 0, "zoom": 1}},
+            },
+        }
+        first = self.store.save(
+            "schema_one", original, expected_layout_token=None, layout_protocol=None
+        )
+        changed = json.loads(json.dumps(original))
+        changed["revision"] = first["revision"]
+        changed["schema"]["layout"]["layers"]["tables"]["objects"]["table_0"]["x"] = 100
+
+        saved = self.store.save(
+            "schema_one", changed, expected_layout_token=None, layout_protocol="2"
+        )
+        self.assertEqual(saved["revision"], 2)
+
     def test_invalid_records_paths_and_delete_contract(self):
         for schema_id, payload in (("../bad", record("../bad")), ("schema_one", [])):
             with self.subTest(schema_id=schema_id), self.assertRaises(SchemaStoreError):
@@ -146,6 +215,67 @@ class SchemaStoreTests(unittest.TestCase):
         )
         self.assertEqual(self.store.delete("schema_one"), {"deleted": "schema_one"})
         self.assertFalse((self.schema_dir / "schema_one.json").exists())
+
+    def test_view_mutation_reservation_blocks_concurrent_save_until_release(self):
+        original = record("schema_one")
+        original["schema"].update({
+            "views": [{"id": "view_summary", "name": "summary", "namespace": "public"}],
+            "postgres": {"sourceProfileId": "local", "database": "demo", "namespace": "public"},
+        })
+        saved = self.store.save("schema_one", original, expected_layout_token=None, layout_protocol=None)
+        entered = threading.Event()
+        completed = threading.Event()
+
+        def concurrent_save():
+            entered.set()
+            changed = self.store.get("schema_one")
+            changed["schema"]["projectName"] = "Concurrent"
+            self.store.save(
+                "schema_one", changed,
+                expected_layout_token=saved["layoutToken"], layout_protocol="2",
+            )
+            completed.set()
+
+        with self.store.reserve_view_mutation_binding(
+            "schema_one", saved["revision"], saved["layoutToken"],
+            "local", "demo", "public", "summary",
+            "upsert", {"kind": "view", "fingerprint": "a" * 64}, "view_summary",
+        ):
+            thread = threading.Thread(target=concurrent_save)
+            thread.start()
+            self.assertTrue(entered.wait(1))
+            self.assertFalse(completed.wait(0.05))
+        thread.join(1)
+        self.assertTrue(completed.is_set())
+
+    def test_view_mutation_reservation_does_not_block_another_schema(self):
+        for schema_id in ("schema_one", "schema_two"):
+            item = record(schema_id)
+            item["schema"].update({
+                "views": [{"id": "view_summary", "name": "summary", "namespace": "public"}],
+                "postgres": {"sourceProfileId": "local", "database": "demo", "namespace": "public"},
+            })
+            self.store.save(schema_id, item, expected_layout_token=None, layout_protocol=None)
+        one = self.store.get("schema_one")
+        completed = threading.Event()
+
+        def save_other_schema():
+            other = self.store.get("schema_two")
+            self.store.save(
+                "schema_two", other,
+                expected_layout_token=schema_layout_token(other), layout_protocol="2",
+            )
+            completed.set()
+
+        with self.store.reserve_view_mutation_binding(
+            "schema_one", one["revision"], schema_layout_token(one),
+            "local", "demo", "public", "summary",
+            "upsert", {"kind": "view", "fingerprint": "a" * 64}, "view_summary",
+        ):
+            thread = threading.Thread(target=save_other_schema)
+            thread.start()
+            self.assertTrue(completed.wait(1))
+        thread.join(1)
 
 
 if __name__ == "__main__":

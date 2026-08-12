@@ -54,6 +54,11 @@ class FakePostgresService:
         self.descriptor = descriptor
         self.preview_rows = list(preview_rows or [])
         self.test_result = dict(test_result or {"ok": True})
+        self.view_layout_token = "0" * 64
+        self.view_expected_absent = False
+        self.view_operation = "upsert"
+        self.view_expectation = {"kind": "view", "fingerprint": "a" * 64}
+        self.view_saved_id = "view_summary"
 
     def list_profiles(self):
         return self.profiles
@@ -158,3 +163,36 @@ class FakePostgresService:
     def apply(self, profile_id, plan_id, confirm_destructive):
         self.calls.append(("apply", profile_id, plan_id, confirm_destructive))
         return {"projectName": "demo.public", "tables": [], "relationships": [], "functions": []}
+
+    def preview_view_mutation(self, profile_id, database, namespace, relation, operation, expectation, desired, allow_destructive, schema_binding):
+        self.calls.append(("preview_view_mutation", profile_id, database, namespace, relation, operation, expectation, desired, allow_destructive, schema_binding))
+        return {"id": "plan_view", "operation": operation, "destructive": operation == "delete", "steps": [], "warnings": []}
+
+    def apply_view_mutation(self, profile_id, plan_id, confirm_destructive):
+        self.calls.append(("apply_view_mutation", profile_id, plan_id, confirm_destructive))
+        common = {
+            "applied": True, "planId": plan_id,
+            "operation": self.view_operation,
+            "schemaBinding": {"schemaId": "schema_one", "expectedSchemaRevision": 1, "layoutToken": self.view_layout_token, "savedViewId": self.view_saved_id},
+            "expectedAbsent": self.view_expected_absent,
+        }
+        if self.view_operation == "delete":
+            return {**common, "deleted": {
+                "profileId": profile_id, "database": "demo", "namespace": "public", "relation": "summary", "kind": self.view_expectation["kind"],
+            }}
+        return {**common,
+            "descriptor": {
+                "profileId": profile_id, "database": "demo", "namespace": "public", "relation": "summary",
+                "kind": "view", "fingerprint": "b" * 64,
+            },
+            "desiredDefinition": 'CREATE OR REPLACE VIEW "public"."summary" AS SELECT 2',
+            "queryDefinition": "SELECT 2",
+        }
+
+    def view_mutation_binding(self, profile_id, plan_id):
+        self.calls.append(("view_mutation_binding", profile_id, plan_id))
+        return {
+            "schemaBinding": {"schemaId": "schema_one", "expectedSchemaRevision": 1, "layoutToken": self.view_layout_token, "savedViewId": self.view_saved_id},
+            "database": "demo", "namespace": "public", "relation": "summary",
+            "operation": self.view_operation, "expectation": self.view_expectation,
+        }

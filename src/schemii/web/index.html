@@ -65,46 +65,83 @@
       </header>
 
       <main class="main-layout" id="main-layout">
-        <nav class="design-layer-switch" id="design-layer-switch" aria-label="Design layer">
-          <button class="active" type="button" data-design-layer="tables" aria-pressed="true">Tables</button>
-          <button type="button" data-design-layer="views" aria-pressed="false">Views</button>
+        <nav class="design-layer-switch" id="design-layer-switch" aria-label="Workspace">
+          <button class="shared-icon-button active" type="button" data-design-layer="tables" aria-label="Tables" data-tooltip="Tables" aria-pressed="true">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3.5" y="4" width="13" height="12" rx="1.5"/><path d="M3.5 8h13M8 8v8M12.5 8v8"/></svg>
+          </button>
+          <button class="shared-icon-button" type="button" data-design-layer="views" aria-label="Views" data-tooltip="Views" aria-pressed="false">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 3.5h7l3 3v10H5zM12 3.5v3h3M8 10h4M8 13h4"/></svg>
+          </button>
+          <button class="shared-icon-button sql-workspace-selector" id="sql-workspace-button" type="button" data-tooltip="SQL Console" aria-label="Open SQL Console" aria-controls="standalone-sql-workspace" aria-expanded="false" aria-pressed="false">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4.5" width="14" height="11" rx="1.5"/><path d="m6 8 2 2-2 2M10.5 12h3.5"/></svg>
+          </button>
         </nav>
         <aside class="tool-rail" id="tool-rail" aria-label="Workspace tools">
-          <button class="rail-button active" id="select-tool" type="button" data-tooltip="Select and move" aria-label="Select and move">
+          <button class="rail-button active" id="select-tool" type="button" data-rail-workspace="tables" data-tooltip="Select and move" aria-label="Select and move">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 3 12 8-6.3 1.2L9 18Z" /></svg>
           </button>
-          <button class="rail-button" id="add-table-button" type="button" data-tooltip="Add table" aria-label="Add table">
+          <button class="rail-button" id="add-table-button" type="button" data-rail-workspace="tables" data-tooltip="Add table" aria-label="Add table">
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M4 10h16M9 10v9M15 10v9"/></svg>
           </button>
-          <button class="rail-button" id="relationship-tool" type="button" data-tooltip="Add relationship" aria-label="Add relationship">
+          <button class="rail-button" id="relationship-tool" type="button" data-rail-workspace="tables" data-tooltip="Add relationship" aria-label="Add relationship">
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="7" r="2.5"/><circle cx="18" cy="17" r="2.5"/><path d="M8.5 7h3a3 3 0 0 1 3 3v4a3 3 0 0 0 3 3"/></svg>
           </button>
-          <div class="rail-divider"></div>
+          <button class="rail-button" id="views-browse-button" type="button" data-rail-workspace="views" data-tooltip="Browse views" aria-label="Browse views" aria-expanded="false" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v4H5zM5 11h14v4H5zM5 17h14v2H5z"/></svg>
+          </button>
+          <button class="rail-button" id="views-create-button" type="button" data-rail-workspace="views" data-tooltip="Create view" aria-label="Create view" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+          <button class="rail-button" id="views-refresh-button" type="button" data-rail-workspace="views" data-tooltip="Refresh views" aria-label="Refresh views" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 8a8 8 0 1 0 1 7M19 3v5h-5"/></svg>
+          </button>
+          <button class="rail-button rail-danger" id="views-delete-button" type="button" data-rail-workspace="views" data-tooltip="Delete selected view" aria-label="Delete selected view" disabled hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M9 4h6l1 3H8l1-3ZM7 7l1 13h8l1-13M10 10v6M14 10v6"/></svg>
+          </button>
+          <button class="rail-button" id="sql-new-query-button" type="button" data-rail-workspace="sql" data-tooltip="New query" aria-label="New query" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4h9l3 3v13H6zM15 4v4h4M9 13h6M12 10v6"/></svg>
+          </button>
+          <button class="rail-button" id="sql-queries-button" type="button" data-rail-workspace="sql" data-tooltip="Saved queries" aria-label="Open saved queries" aria-expanded="false" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4h12v16H6zM9 9h6M9 13h6"/></svg>
+          </button>
+          <button class="rail-button" id="sql-save-query-button" type="button" data-rail-workspace="sql" data-tooltip="Save query" aria-label="Save current query" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h12l2 2v14H5zM8 4v6h8V4M8 20v-6h8v6"/></svg>
+          </button>
+          <button class="rail-button standalone-sql-write-button" id="standalone-sql-write-toggle" type="button" data-rail-workspace="sql" aria-label="Select a PostgreSQL target to enable write mode" aria-pressed="false" aria-describedby="standalone-sql-write-help" data-tooltip="Select a PostgreSQL target first" disabled hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="11" width="12" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 7.8-1.2"/></svg>
+          </button>
+          <button class="rail-button" id="sql-run-button" type="button" data-rail-workspace="sql" data-tooltip="Run current statement" aria-label="Run current statement" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7z"/></svg>
+          </button>
+          <button class="rail-button" id="sql-run-all-button" type="button" data-rail-workspace="sql" data-tooltip="Run all statements" aria-label="Run all statements" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 5 8 7-8 7zM14 5l6 7-6 7z"/></svg>
+          </button>
+          <button class="rail-button rail-stop" id="sql-stop-button" type="button" data-rail-workspace="sql" data-tooltip="Stop query" aria-label="Stop query" disabled hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1"/></svg>
+          </button>
+          <div class="rail-divider" data-rail-workspace="context"></div>
           <button class="rail-button" id="undo-button" type="button" data-tooltip="Undo (Ctrl/Cmd+Z)" aria-label="Undo" aria-keyshortcuts="Control+Z Meta+Z" disabled>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 7-4 4 4 4M5 11h7a6 6 0 0 1 6 6"/></svg>
           </button>
           <button class="rail-button" id="redo-button" type="button" data-tooltip="Redo (Ctrl/Cmd+Shift+Z)" aria-label="Redo" aria-keyshortcuts="Control+Shift+Z Meta+Shift+Z Control+Y Meta+Y" disabled>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 7 4 4-4 4M19 11h-7a6 6 0 0 0-6 6"/></svg>
           </button>
-          <div class="rail-divider"></div>
-          <button class="rail-button" id="fit-button" type="button" data-tooltip="Fit diagram" aria-label="Fit diagram">
+          <div class="rail-divider" data-rail-workspace="tables"></div>
+          <button class="rail-button" id="fit-button" type="button" data-rail-workspace="tables" data-tooltip="Fit diagram" aria-label="Fit diagram">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H4v4M16 4h4v4M8 20H4v-4M16 20h4v-4"/></svg>
           </button>
-          <button class="rail-button" id="zoom-in-button" type="button" data-tooltip="Zoom in" aria-label="Zoom in">
+          <button class="rail-button" id="zoom-in-button" type="button" data-rail-workspace="tables" data-tooltip="Zoom in" aria-label="Zoom in">
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 4 4M10.5 7.5v6M7.5 10.5h6"/></svg>
           </button>
-          <button class="rail-button" id="zoom-out-button" type="button" data-tooltip="Zoom out" aria-label="Zoom out">
+          <button class="rail-button" id="zoom-out-button" type="button" data-rail-workspace="tables" data-tooltip="Zoom out" aria-label="Zoom out">
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 4 4M7.5 10.5h6"/></svg>
           </button>
-          <div class="rail-divider"></div>
+          <div class="rail-divider" data-rail-workspace="tables"></div>
           <button class="rail-button" id="functions-button" type="button" data-tooltip="Manage functions" aria-label="Manage functions">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4 19 4 19 9 5 9Z M5 15 19 15 19 20 5 20Z M12 9v6" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linejoin="round"/></svg>
           </button>
           <button class="rail-button" id="postgres-button" type="button" data-tooltip="PostgreSQL sync" aria-label="PostgreSQL sync">
             <svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>
-          </button>
-          <button class="rail-button sql-workspace-rail-button" id="sql-workspace-button" type="button" data-tooltip="SQL Console" aria-label="Open SQL Console" aria-controls="standalone-sql-workspace" aria-expanded="false">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="14" rx="2"/><path d="m7 10 2.5 2L7 14M12 15h5"/></svg>
           </button>
           <div class="rail-divider"></div>
           <button class="rail-button ai-rail-button" id="ai-button" type="button" data-tooltip="AI schema assistant" aria-label="AI schema assistant" aria-expanded="false">
@@ -193,11 +230,6 @@
                   <div><dt>Database</dt><dd id="standalone-sql-database">Not selected</dd></div>
                   <div><dt>Namespace</dt><dd id="standalone-sql-namespace">Not selected</dd></div>
                 </dl>
-                <div class="standalone-sql-head-actions">
-                  <button class="shared-icon-button standalone-sql-write-button" id="standalone-sql-write-toggle" type="button" aria-label="Select a PostgreSQL target to enable write mode" aria-pressed="false" aria-describedby="standalone-sql-write-help" data-tooltip="Select a PostgreSQL target first" disabled><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="5" y="9" width="10" height="7" rx="2"/><path d="M7 9V7a3 3 0 0 1 5.8-1"/></svg></button>
-                  <button class="shared-icon-button standalone-sql-queries-toggle" id="toggle-standalone-sql-history" type="button" aria-label="Open saved queries" aria-expanded="false" data-tooltip="Queries"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 4.5h10v11H5zM8 8h4M8 11h4"/></svg><span>Queries</span></button>
-                  <button class="shared-icon-button" id="close-standalone-sql" type="button" aria-label="Close SQL Console" data-tooltip="Close SQL Console"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button>
-                </div>
               </header>
               <div class="standalone-sql-write-warning" id="standalone-sql-write-warning" hidden><strong>WRITE MODE ENABLED</strong><span>Successful scripts commit transactionally using the selected PostgreSQL role. Target: <b id="standalone-sql-write-target">No PostgreSQL target selected</b></span><small>Functions may have external or nontransactional side effects.</small></div>
               <p class="sr-only" id="standalone-sql-write-help">Write mode applies only to the current query. Successful writes commit transactionally; PostgreSQL functions may have external or nontransactional side effects.</p>
@@ -220,16 +252,13 @@
                   <footer>
                     <span>Run with <kbd>Ctrl</kbd> + <kbd>Enter</kbd></span>
                     <button type="button" id="copy-standalone-sql">Copy</button>
-                    <button type="button" id="save-standalone-sql">Save query</button>
                     <button type="button" id="clear-standalone-sql">Clear</button>
-                    <button type="button" id="run-all-standalone-sql">Run all</button>
-                    <button class="button button-primary" type="button" id="run-standalone-sql">Run</button>
                   </footer>
                 </div>
               </div>
             </section>
             <section class="standalone-sql-result-panel" aria-label="SQL results">
-              <header class="standalone-sql-result-head"><button class="standalone-sql-pane-heading" id="show-standalone-sql-result" type="button" aria-expanded="false"><span><span class="eyebrow">PostgreSQL transaction response</span><strong>Results</strong></span></button><div><span class="standalone-sql-result-status" id="standalone-sql-result-status">Not run</span><button type="button" id="cancel-standalone-sql" disabled hidden>Cancel</button></div></header>
+              <header class="standalone-sql-result-head"><button class="standalone-sql-pane-heading" id="show-standalone-sql-result" type="button" aria-expanded="false"><span><span class="eyebrow">PostgreSQL transaction response</span><strong>Results</strong></span></button><div><span class="standalone-sql-result-status" id="standalone-sql-result-status">Not run</span></div></header>
               <div class="standalone-sql-result" id="standalone-sql-result" aria-live="polite" hidden><nav class="standalone-sql-result-tabs" id="standalone-sql-result-tabs" aria-label="SQL result tabs" role="tablist"></nav><div class="standalone-sql-result-body" id="standalone-sql-result-body"><div class="standalone-sql-empty"><span>SQL</span><strong>Ready to run</strong><p>Select an exact PostgreSQL target, then run one or more statements in a read-only transaction.</p></div></div></div>
             </section>
           </div>
@@ -689,24 +718,24 @@ ALTER TABLE "public"."books"
     <dialog id="prototype-view-editor-dialog" class="prototype-view-editor-dialog" aria-labelledby="prototype-view-editor-title">
       <form id="prototype-view-editor-form">
         <header class="prototype-view-editor-head">
-          <div><span class="eyebrow">Browser-local definition</span><h2 id="prototype-view-editor-title">Create view</h2><p>Start with a complete PostgreSQL statement, then edit the query body directly.</p></div>
+          <div><span class="eyebrow">Live PostgreSQL definition</span><h2 id="prototype-view-editor-title">Create view</h2><p>Preview a complete, identity-bound PostgreSQL statement before applying it.</p></div>
           <button class="shared-icon-button" id="close-prototype-view-editor" type="button" aria-label="Close view editor"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button>
         </header>
         <div class="prototype-view-editor-meta">
-          <fieldset><legend>View kind</legend><label><input type="radio" name="prototype-view-kind" value="view" checked/><span><strong>View</strong><small>Always reads current rows</small></span></label><label><input type="radio" name="prototype-view-kind" value="materialized"/><span><strong>Materialized view</strong><small>Stores rows until refreshed</small></span></label></fieldset>
-          <label><span>Namespace</span><input id="prototype-view-namespace" value="bookstore" autocomplete="off"/></label>
+          <fieldset><legend>View kind</legend><label><input type="radio" name="prototype-view-kind" value="view" checked/><span><strong>View</strong><small>Always reads current rows</small></span></label><label><input type="radio" name="prototype-view-kind" value="materialized_view"/><span><strong>Materialized view</strong><small>Stores rows until refreshed</small></span></label></fieldset>
+          <label><span>Namespace</span><input id="prototype-view-namespace" autocomplete="off" readonly/></label>
           <label><span>Name</span><input id="prototype-view-name" value="new_view" autocomplete="off"/></label>
         </div>
         <div class="prototype-view-sql-wrap"><header><span><span class="eyebrow">Raw PostgreSQL</span><strong>CREATE statement</strong></span><span>Template updates with kind and identity</span></header><textarea id="prototype-view-sql" spellcheck="false" aria-label="Raw CREATE view statement"></textarea></div>
-        <footer><span>Prototype only · this definition is not saved or executed</span><div class="dialog-actions"><button class="button button-ghost" id="cancel-prototype-view-editor" type="button">Cancel</button><button class="button button-primary" type="submit">Keep draft</button></div></footer>
+        <footer><span>Preview validates the active saved schema and live PostgreSQL relation.</span><div class="dialog-actions"><button class="button button-ghost" id="cancel-prototype-view-editor" type="button">Cancel</button><button class="button button-primary" type="submit">Preview changes</button></div></footer>
       </form>
     </dialog>
 
     <dialog id="prototype-view-commit-dialog" class="prototype-view-commit-dialog" aria-labelledby="prototype-view-commit-title">
-      <form method="dialog">
-        <header><div><span class="eyebrow">Browser-local migration review</span><h2 id="prototype-view-commit-title">Commit view changes</h2></div><button class="shared-icon-button" value="cancel" aria-label="Close commit review"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button></header>
-        <section><strong>No PostgreSQL request will be made</strong><p>This visual prototype represents the future migration-preview boundary. A backend phase must validate the live catalog, permissions, dependencies, stale fingerprints, and generated SQL before commit can apply changes.</p></section>
-        <footer><button class="button button-ghost" value="cancel">Return to draft</button><button class="button button-primary" value="confirm">Confirm prototype commit</button></footer>
+      <form id="prototype-view-commit-form">
+        <header><div><span class="eyebrow">Reviewed database change</span><h2 id="prototype-view-commit-title">Commit view changes</h2></div><button class="shared-icon-button" id="close-prototype-view-commit" type="button" aria-label="Close commit review"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button></header>
+        <section id="prototype-view-commit-review"></section>
+        <footer><button class="button button-ghost" id="cancel-prototype-view-commit" type="button">Return to definition</button><button class="button button-primary" id="confirm-prototype-view-commit" type="submit">Apply reviewed plan</button></footer>
       </form>
     </dialog>
 

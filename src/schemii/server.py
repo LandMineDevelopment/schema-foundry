@@ -30,6 +30,8 @@ from .server_runtime import begin_http_shutdown, parse_port, parse_proxy_setting
 
 AI_CONTEXT_SIZE = 64 * 1024
 APPLY_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/plans/([A-Za-z0-9_-]+)/apply$")
+VIEW_PREVIEW_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/views/preview$")
+VIEW_APPLY_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/view-plans/([A-Za-z0-9_-]+)/apply$")
 AI_MANIFEST_ACTION_TYPES = {
     "populate_schema", "add_table", "rename_table", "add_column", "update_column", "delete_element", "add_relationship",
     "create_project", "open_project", "open_connection", "connection_setup", "schema_read_query", "migration_preview", "migration_apply",
@@ -351,8 +353,10 @@ def make_handler(
             if self._handle_postgres_post(path):
                 return
             apply_match = APPLY_PATH.fullmatch(path)
+            view_preview_match = VIEW_PREVIEW_PATH.fullmatch(path)
+            view_apply_match = VIEW_APPLY_PATH.fullmatch(path)
             profile_match = PROFILE_PATH.fullmatch(path)
-            if not apply_match and not (profile_match and profile_match.group(2) == "preview"):
+            if not apply_match and not view_preview_match and not view_apply_match and not (profile_match and profile_match.group(2) == "preview"):
                 return self.send_json(404, {"error": "Unknown API path"})
             if not self._authorize_postgres():
                 return
@@ -361,10 +365,76 @@ def make_handler(
                 return
             if apply_match:
                 return self._service_call(lambda: service.apply(apply_match.group(1), apply_match.group(2), body.get("confirmDestructive", False)))
+            if view_preview_match:
+                common_fields = {
+                    "schemaId", "expectedSchemaRevision", "layoutToken", "database", "namespace",
+                    "relation", "operation", "expectation", "allowDestructive",
+                }
+                if not isinstance(body, dict) or body.get("operation") not in {"upsert", "delete"} or set(body) != common_fields | ({"desired"} if body.get("operation") == "upsert" else set()):
+                    return self.send_json(400, {"error": {"code": "validation_error", "message": "View preview request fields are invalid"}})
+
+                def preview_view():
+                    saved_binding = store.require_view_mutation_binding(
+                        body["schemaId"], body["expectedSchemaRevision"], body["layoutToken"],
+                        view_preview_match.group(1), body["database"], body["namespace"], body["relation"],
+                        body["operation"], body["expectation"],
+                    )
+                    return service.preview_view_mutation(
+                        view_preview_match.group(1), body["database"], body["namespace"], body["relation"],
+                        body["operation"], body["expectation"], body.get("desired"), body["allowDestructive"], {
+                            "schemaId": body["schemaId"], "expectedSchemaRevision": body["expectedSchemaRevision"],
+                            "layoutToken": body["layoutToken"], "savedViewId": saved_binding["savedViewId"],
+                        },
+                    )
+
+                return self._view_mutation_call(preview_view)
+            if view_apply_match:
+                if not isinstance(body, dict) or set(body) != {"confirmDestructive"}:
+                    return self.send_json(400, {"error": {"code": "validation_error", "message": "View apply request fields are invalid"}})
+
+                def apply_view():
+                    profile_id = view_apply_match.group(1)
+                    plan_id = view_apply_match.group(2)
+                    target = service.view_mutation_binding(profile_id, plan_id)
+                    binding = target["schemaBinding"]
+                    with store.reserve_view_mutation_binding(
+                        binding["schemaId"], binding["expectedSchemaRevision"], binding["layoutToken"],
+                        profile_id, target["database"], target["namespace"], target["relation"],
+                        target["operation"], target["expectation"], binding.get("savedViewId"),
+                    ):
+                        result = service.apply_view_mutation(profile_id, plan_id, body["confirmDestructive"])
+                        result.pop("schemaBinding")
+                        expected_absent = result.pop("expectedAbsent")
+                        operation = result["operation"]
+                        descriptor = result.get("descriptor")
+                        identity = descriptor or result["deleted"]
+                        definition = result.pop("desiredDefinition", None)
+                        query_definition = result.pop("queryDefinition", None)
+                        try:
+                            result["schemaSync"] = store.sync_view_after_mutation(
+                                binding["schemaId"], binding["expectedSchemaRevision"], binding["layoutToken"],
+                                profile_id, identity["database"], identity["namespace"], identity["relation"],
+                                identity["kind"], definition, query_definition, descriptor["fingerprint"] if descriptor else None,
+                                operation=operation, expected_absent=expected_absent, saved_view_id=binding.get("savedViewId"),
+                            )
+                        except SchemaStoreError as error:
+                            status = "conflict" if error.status == 409 else "storage_error"
+                            result["schemaSync"] = {"status": status, **error.payload["error"]}
+                        return result
+
+                return self._view_mutation_call(apply_view)
             profile_id, action = profile_match.groups()
             return self._service_call(lambda: service.preview(
                 profile_id, body.get("namespace"), body.get("schema"), body.get("allowDestructive", False)
             ))
+
+        def _view_mutation_call(self, callback):
+            try:
+                self.send_json(200, callback())
+            except SchemaStoreError as error:
+                self.send_json(error.status, error.payload)
+            except PostgresServiceError as error:
+                self.send_json(error.status, error.to_dict())
 
         def _ai_message(self, current_ai_service, session_id: str, body: dict):
             allowed = {"text", "model", "schemaId", "accessLevel", "profileId", "namespace"}

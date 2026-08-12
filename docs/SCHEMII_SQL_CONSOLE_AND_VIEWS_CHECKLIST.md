@@ -8,7 +8,7 @@ This checklist governs the UI-first design and later implementation of two Schem
 - [x] Replace the completed Schemer implementation checklist with this focused roadmap.
 - [ ] Obtain explicit approval before starting each phase below.
 - [x] During look-and-feel phases, use static or browser-local prototype state only; do not add execution or persistence APIs.
-- [x] Use browser render checks only while iterating on visual prototypes; defer test creation and test-suite execution until an explicit verification milestone.
+- [ ] Complete browser-render or visual automation. Current frontend coverage is source/markup/style contract testing, not rendered-browser verification.
 - [ ] Run the complete required verification before completing each backend phase and before merging the branch.
 - [x] Preserve saved canvas layout, profiles, database data, and unrelated user-owned state throughout implementation.
 
@@ -35,7 +35,7 @@ Approval required before application code changes.
 - [x] Add a write-mode toggle that requires deliberate confirmation before enabling.
 - [x] Show a persistent high-visibility warning in the console header while write mode is enabled.
 - [x] Show that write mode resets when the target changes, the console closes, or the page reloads.
-- [x] Validate keyboard flow, focus treatment, scrolling, resizing, and responsive/mobile behavior.
+- [ ] Validate keyboard flow, focus treatment, scrolling, resizing, and responsive/mobile behavior in a rendered browser.
 - [x] Use synthetic local data only; do not call PostgreSQL or save console state in this phase.
 
 Acceptance criteria: the user approves the complete console workflow and all visible states before API or execution work begins.
@@ -56,7 +56,7 @@ Approval required before application code changes.
 - [ ] Validate desktop and mobile behavior with dense and empty catalogs.
 - [x] Use synthetic local data only; do not introspect, migrate, refresh, or persist views in this phase.
 
-Selected direction: concept B's selected-view lineage and raw-definition focus, with the relation catalog/search hidden in a right-side sibling pane until requested. Browser render checks cover desktop and mobile layout, pane open/close, filtering, selection, and ordinary/materialized editor templates.
+Selected direction: concept B's selected-view lineage and raw-definition focus, with the relation catalog/search hidden in a right-side sibling pane until requested. Source/markup/style contract tests cover pane behavior, filtering, selection, and ordinary/materialized editor templates; rendered desktop/mobile browser automation has not been completed.
 
 Acceptance criteria: the user approves layer navigation, card language, dependency presentation, and all editor states before catalog or migration work begins.
 
@@ -107,20 +107,24 @@ Acceptance criteria: read-only mode rejects writes server-side; write mode execu
 
 Approval required before implementation.
 
-- [ ] Extend catalog introspection for ordinary views and materialized views, including definitions, ownership, output columns, dependencies, and stable fingerprints.
-- [ ] Add bounded read-only preview for an exact view identity.
-- [ ] Add versioned persistence for Views-layer positions and viewport without changing table-layer layout.
-- [ ] Preserve established view-card layout across introspection refreshes.
-- [ ] Add ordinary-view create and `CREATE OR REPLACE VIEW` migration planning.
+- [x] Extend catalog introspection for ordinary views and materialized views, including bounded definitions, ownership, output columns, dependencies, materialized metadata, and stable fingerprints.
+- [ ] Add bounded read-only row preview for an exact view identity. The shared relation-preview implementation is not mounted by Schemii, and the current Views workspace has no row-preview control.
+- [x] Add version-2 table/view layout-layer persistence and token/wholesale-change coverage without changing established table layout.
+- [x] Preserve the complete saved layout during the implemented narrow post-apply view-item synchronization.
+- [x] Add dedicated ordinary-view `CREATE VIEW` and `CREATE OR REPLACE VIEW` preview/apply planning.
 - [ ] Detect output-column removal, rename, reorder, and type changes before replacement.
-- [ ] Model materialized-view changes as explicit destructive recreation when PostgreSQL cannot replace them in place.
+- [x] Add new materialized-view creation planning and apply.
+- [x] Recreate existing materialized views transactionally with PostgreSQL 17 target locking, stale metadata checks, supported metadata restoration, population-intent preservation, and stored-row repopulation warnings.
+- [x] Delete ordinary and materialized views through reviewed non-`CASCADE` plans with exact saved-item synchronization and stored-row deletion warnings.
+- [ ] Convert view kinds. Current behavior: reject with `view_kind_conversion_unsupported`.
 - [ ] Add explicit materialized-view refresh controls with permission, lock, and duration warnings.
-- [ ] Show dependencies and affected objects before destructive or cascading operations.
-- [ ] Require stale-fingerprint revalidation before preview and apply.
-- [ ] Keep migration apply transactional wherever PostgreSQL permits and surface non-transactional limitations explicitly.
-- [ ] Add catalog, migration, dependency, stale-state, permission, layout-preservation, and disposable-PostgreSQL tests.
+- [x] Show live direct dependencies/dependents and affected-object counts; no view mutation emits `CASCADE`.
+- [x] Require exact saved-schema revision/layout/target binding and stale profile/relation revalidation before preview and apply.
+- [x] Keep view apply transactional with lock/statement timeouts, a namespace advisory transaction lock, ordinary-view access-share locking, rollback, and post-DDL reinspection.
+- [x] Add focused catalog, route, mutation, stale-state, rollback, narrow-sync/layout-preservation, frontend-contract, and tutorial-v4 tests.
+- [x] Complete disposable PostgreSQL 17 coverage for namespace contention, ordinary-view locking, and materialized-view `AccessExclusiveLock` acquisition/rollback. The suite remains opt-in through `SCHEMII_TEST_PG17_DSN` for environments without PostgreSQL 17.
 
-Acceptance criteria: users can safely create, inspect, edit, preview, and apply ordinary-view changes; materialized-view recreation and refresh are explicit, permission-bound, and never presented as harmless replacement.
+Implemented acceptance boundary: users can inspect, create, edit, and delete ordinary views; create, transactionally recreate, and delete materialized views; and review stored-row consequences before destructive apply. Kind conversion, `CASCADE`, automatic dependent recreation, and materialized refresh remain unsupported.
 
 ## Phase 6: Integration And Delivery
 
@@ -128,14 +132,14 @@ Approval required before final integration.
 
 - [ ] Reconcile SQL-console schema changes with Schemii drift detection and hard-refresh requirements.
 - [ ] Verify Views-layer changes remain compatible with Schemer relation fingerprints and require explicit source reselection after breaking catalog changes.
-- [ ] Add documentation for write-mode risk, role permissions, transaction behavior, view migration semantics, and materialized-view locks.
+- [x] Add documentation for write-mode risk, role permissions, transaction behavior, current view API/migration semantics, materialized-view lock limitations, saved-schema sync, and tutorial v4 objects.
 - [ ] Complete accessibility, keyboard, reduced-motion, desktop, and mobile verification.
-- [ ] Run focused Python and JavaScript tests.
-- [ ] Run the complete Python and JavaScript suites.
-- [ ] Run Python compilation, browser JavaScript syntax checks, and `git diff --check`.
-- [ ] Smoke-test `/`, `/api/session`, and all affected routes on local servers.
-- [ ] Verify read-only and write-enabled behavior against disposable PostgreSQL targets.
-- [ ] Compare table-layer and view-layer layout snapshots before and after synchronization.
-- [ ] Confirm no test objects, test rows, credentials, runtime profiles, or generated data remain.
+- [x] Run focused Python and JavaScript tests.
+- [x] Run the complete Python and JavaScript suites.
+- [x] Run Python compilation, browser JavaScript syntax checks, and `git diff --check`.
+- [x] Smoke-test `/`, `/api/session`, and the affected preview/apply routes on local servers.
+- [x] Verify view lifecycle transactions, metadata restoration, locking, rollback, and deletion against disposable PostgreSQL 17 objects.
+- [x] Compare the complete parsed persistent layout snapshot before and after lifecycle and rendered-browser verification.
+- [x] Confirm no disposable PostgreSQL objects or rows remain and no runtime profiles or credentials were added to the repository.
 
 Acceptance criteria: both approved features are documented, verified end to end, safe under stale state and restricted permissions, and ready for merge without altering unrelated user-owned data.

@@ -1,0 +1,71 @@
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+
+const source = fs.readFileSync("src/schemii/web/app.js", "utf8");
+const styles = fs.readFileSync("src/schemii/web/styles.css", "utf8");
+const html = fs.readFileSync("src/schemii/web/index.html", "utf8");
+
+assert.doesNotMatch(source, /prototypeRelationCatalog|source_table|provenance: \{ availability: "available"/, "Views must not retain synthetic catalog or provenance data");
+assert.match(source, /function activeViewsBinding[\s\S]*record\?\.schema\?\.postgres[\s\S]*sourceProfileId[\s\S]*record\.revision[\s\S]*record\.layoutToken/, "Views must bind to the active saved schema target and concurrency fields");
+assert.match(source, /\/relations\?\$\{query\}[\s\S]*requireExactTarget\(payload, binding\)[\s\S]*filter\(item => item\.kind === "view" \|\| item\.kind === "materialized_view"\)/, "catalog loading must validate its target and retain only views");
+assert.match(source, /new URLSearchParams\(\{ database: binding\.database, namespace: binding\.namespace, relation: identity\.relation, expectedKind: identity\.kind \}\)[\s\S]*query\.set\("expectedFingerprint", knownFingerprint\)[\s\S]*\/relation\?\$\{query\}/, "supported relation inspection must use kind and known-fingerprint guards");
+assert.match(source, /function validateRelationDescriptor[\s\S]*columns[\s\S]*definition[\s\S]*owner[\s\S]*permissions[\s\S]*columnProvenance[\s\S]*materialized[\s\S]*dependencies[\s\S]*dependents/, "relation descriptors must be strictly validated before rendering");
+assert.match(source, /columnProvenance\.status !== "unavailable"[\s\S]*reason !== "not_supported"/, "unsupported column provenance must be explicit");
+assert.match(source, /Mapping unavailable[\s\S]*Column provenance unavailable/, "actual source columns must not receive invented output mappings");
+assert.match(source, /function canInspectViewsRelation[\s\S]*\["table", "view", "materialized_view"\][\s\S]*Inspection unavailable[\s\S]*if \(!source \|\| !canInspectViewsRelation\(source\)\) return;/, "foreign-table lineage must retain its exact identity while disabling expansion and inspection");
+assert.match(source, /identity && canInspectViewsRelation\(identity\)[\s\S]*inspectViewsRelation\(identity\)/, "unsupported lineage kinds must never issue relation inspection requests");
+assert.match(source, /catalogGeneration[\s\S]*relationGenerations: new Map\(\)[\s\S]*relationGenerations\.get\(identityKey\)[\s\S]*generation !== viewsPrototypeState\.relationGenerations\.get\(identityKey\)/, "catalog and per-relation requests need isolated stale-response generations");
+assert.match(source, /function relationIdentityKey\(identity\)[\s\S]*JSON\.stringify\(\[identity\.database, identity\.namespace, identity\.relation, identity\.kind\]\)/, "relation identity keys must be collision-free and safe in parsed HTML attributes");
+const relationKeyFunction = source.match(/function relationIdentityKey\(identity\) \{[\s\S]*?\n\}/)?.[0] ?? "";
+assert.doesNotMatch(relationKeyFunction, /\\u0000/, "relation identity keys must never put NUL characters in HTML attributes");
+
+assert.match(source, /function togglePrototypeSourceColumns[\s\S]*details\.animate\([\s\S]*cubic-bezier\(\.22,1,\.36,1\)/, "source expansion must remain animated in place");
+assert.match(source, /matchMedia\("\(prefers-reduced-motion: reduce\)"\)[\s\S]*details\.hidden = !expanding/, "source expansion must respect reduced motion");
+assert.match(source, /shell\.classList\.contains\("catalog-open"\) && viewsPrototypeState\.inspectedRelation === relationName\)[\s\S]*viewsPrototypeState\.inspectedRelation = null;[\s\S]*setPrototypeViewCatalogOpen\(false\)/, "clicking the relation already shown must close its inspector drawer");
+assert.match(source, /prototype-source-inspect[\s\S]*data-prototype-relation="\$\{escapeHtml\(relationIdentityKey\(source\)\)\}"/, "upstream Inspect relation must use the same toggleable inspector identity as every relation control");
+assert.match(source, /function openPrototypeRelationInspector[\s\S]*viewsPrototypeState\.catalogOpen = false;[\s\S]*updateWorkspaceRail\(\)/, "opening an inspector must remove Browse Views highlighting and expanded semantics");
+assert.match(source, /const catalogMissing = open && \(!catalog\?\.querySelector\("\[data-prototype-view-filter\]"\)[\s\S]*viewsPrototypeState\.inspectedRelation = null[\s\S]*catalog\.innerHTML = prototypeCatalogPanel\(\)/, "Browse Views must authoritatively replace stale inspector content with the searchable catalog");
+assert.match(source, /const lineageContent = `\$\{relationMap\}\$\{renderPrototypeImpactSummary\(selected\)\}`/, "the compact impact strip must remain below the relation map");
+assert.match(source, /class="prototype-focus-fields">\$\{selectedFields/, "the selected view must retain output fields");
+
+assert.match(source, /function viewsMutationBody\(operation, definition, allowDestructive\)[\s\S]*schemaId: binding\.schemaId[\s\S]*expectedSchemaRevision: binding\.revision[\s\S]*layoutToken: binding\.layoutToken[\s\S]*operation, expectation: clone[\s\S]*operation === "upsert" \? \{ desired: \{ kind, definition \} \} : \{\}/, "view preview must send an explicit operation and omit desired for delete");
+assert.match(source, /const bindingKey = viewsBindingKey\(activeViewsBinding\(\)\);[\s\S]*const body = viewsMutationBody\(operation, definition, allowDestructive\);[\s\S]*const plan = await postgresRequest[\s\S]*bindingKey !== viewsBindingKey\(activeViewsBinding\(\)\)/, "view preview must use the current active record binding exactly once");
+const previewFunction = source.match(/async function previewViewDefinition[\s\S]*?(?=async function reloadActiveSchemaRecord)/)?.[0] ?? "";
+assert.doesNotMatch(previewFunction, /schema\.views|persistCurrentSchema\(/, "preview must not persist new-view placeholders or edited SQL drafts");
+assert.match(source, /if \(duplicate\) delete draft\.definitionDraft;[\s\S]*prototypeViewDefinition\(draft\)/, "duplicate definitions must be regenerated with the new identity");
+assert.match(source, /destructive_preview_required[\s\S]*confirm\("This change requires a destructive recreation preview/, "destructive preview must require explicit user choice");
+assert.match(source, /data-confirm-destructive-view[\s\S]*confirmDestructive/, "destructive apply must require a separate explicit confirmation");
+assert.match(html, /id="views-browse-button"[\s\S]*id="views-create-button"[\s\S]*id="views-refresh-button"[\s\S]*id="views-delete-button"/, "the Views workspace actions must live in the left tool rail");
+assert.match(source, /function updateWorkspaceRail[\s\S]*viewsDeleteButton\.disabled = !selectedView\?\.permissions\?\.canAlter[\s\S]*viewsDeleteButton\.dataset\.tooltip/, "the Views delete rail action must track selection, kind, and alter permission");
+assert.match(source, /definitionHistories: new Map\(\)[\s\S]*function recordViewDefinitionEdit[\s\S]*history\.undo\.push\(previous\)[\s\S]*history\.redo = \[\]/, "each view definition draft must maintain bounded undo history and clear redo on a new edit");
+assert.match(source, /function restoreViewDefinitionDraft[\s\S]*direction === "undo"[\s\S]*target\.push[\s\S]*source\.pop\(\)[\s\S]*renderViewsPrototype\(\)/, "view definition undo and redo must restore the editor from dedicated draft history");
+assert.match(source, /function updateHistoryControls[\s\S]*viewsPrototypeState\.layer === "views"[\s\S]*history\?\.undo\.length[\s\S]*history\?\.redo\.length/, "shared Undo and Redo controls must reflect the selected view draft history");
+assert.match(source, /viewsConceptStage\.addEventListener\("keydown"[\s\S]*data-prototype-definition-editor[\s\S]*event\.preventDefault\(\)[\s\S]*if \(event\.shiftKey\) redo\(\); else undo\(\)/, "definition-editor keyboard shortcuts must use the same history as the rail controls");
+const definitionSection = source.match(/<section class="prototype-focus-definition">[\s\S]*?<\/section>/)?.[0] || "";
+assert.doesNotMatch(source.match(/views-lineage-head[\s\S]*?<\/header>/)?.[0] || "", /views-prototype-actions|data-delete-prototype-view|data-create-prototype-view/, "moved Views actions must not remain duplicated in the content header");
+assert.doesNotMatch(definitionSection, /data-delete-prototype-view/, "delete must have one authoritative rail entry point");
+assert.match(source, /function deleteSelectedPrototypeView[\s\S]*previewViewOperation\("delete", null, true\)[\s\S]*viewsDeleteButton\.addEventListener\("click", deleteSelectedPrototypeView\)/, "the rail delete action must use the dedicated destructive preview operation");
+assert.match(source, /all rows stored in it[\s\S]*Source-table rows are not deleted[\s\S]*No CASCADE will be used/, "materialized deletion review must distinguish stored rows from source rows and prohibit CASCADE");
+assert.match(source, /\/view-plans\/\$\{encodeURIComponent\(pending\.plan\.id\)\}\/apply/, "only the Schemii view-plan apply API may commit definitions");
+assert.match(source, /schemaSync\.status === "conflict"[\s\S]*PostgreSQL committed[\s\S]*reloadActiveSchemaRecord\(\)[\s\S]*return loadViewsCatalog/, "schema-sync conflict must report committed state, refresh, and never retry apply");
+assert.match(source, /schemaSync\.revision[\s\S]*schemaSync\.layoutToken[\s\S]*reloadActiveSchemaRecord/, "successful apply must advance and reload the exact active record");
+assert.match(source, /schemaSync\.status === "storage_error"[\s\S]*PostgreSQL committed[\s\S]*plan will not be retried[\s\S]*reloadActiveSchemaRecord/, "post-commit storage failure must refresh and never retry deletion");
+assert.match(source, /result\.operation === "delete"[\s\S]*filter\(item => item\.id !== result\.deleted\.relation\)[\s\S]*loadViewsCatalog\(\{ preserveSelection: true \}\)/, "successful deletion must remove stale local selection and reload the live catalog");
+
+assert.match(source, /data-prototype-view-filter[\s\S]*querySelectorAll\("\.prototype-focus-catalog \[data-prototype-view-id\]"\)[\s\S]*card\.hidden/, "typed search must filter existing catalog cards without rerendering the workspace");
+assert.match(source, /data-view-kind-filter/, "existing catalog kind filtering must remain live");
+assert.match(html, /prototype-view-namespace[^>]*readonly/, "the mutation namespace must not be editable");
+assert.match(html, /value="materialized_view"/, "the editor must use the server materialized-view kind");
+assert.match(styles, /\.prototype-impact-compact[\s\S]*grid-template-columns: repeat\(3,minmax\(70px,\.65fr\)\) minmax\(150px,1\.4fr\)/, "the approved compact impact strip must remain styled");
+assert.match(styles, /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.prototype-source-summary i,[\s\S]*transition: none;/, "source and drawer motion must respect reduced motion");
+assert.match(styles, /@media \(max-width: 540px\)[\s\S]*\.prototype-definition-actions \.button \{ min-height: 40px; flex: 1 1 140px; \}/, "mobile view lifecycle actions must wrap with touch-sized controls");
+assert.match(styles, /\.rail-button\.rail-danger \{[^}]*color: #b76f77/, "the view delete rail action must retain danger styling");
+assert.match(styles, /\.design-layer-switch > \[data-design-layer="views"\]\.active \{[^}]*color: #b9a7ff[^}]*background: #1d1930/, "the Views workspace selector must use the purple workspace accent");
+assert.match(styles, /\.tool-rail\[data-workspace="views"\],\.views-prototype-workspace[^{]*\{[^}]*--accent: #9b82f4/, "Views controls must inherit a scoped purple accent");
+assert.match(styles, /\.views-prototype-workspace \.prototype-view-card\.selected \{[^}]*border-color: var\(--accent\)[^}]*rgba\(155,130,244/, "the selected view must use the same purple accent as the Views selector");
+assert.match(styles, /\.views-prototype-workspace \.prototype-definition-editor \{[^}]*var\(--accent\)/, "the Views definition editor highlight must inherit purple");
+assert.match(styles, /\.design-layer-switch > \[data-design-layer="views"\]:hover[^{]*\{[^}]*color: #b9a7ff[^}]*background: #1d1930/, "the Views selector hover must use purple");
+assert.match(styles, /\.views-prototype-workspace \.prototype-view-card:hover[^{]*\{[^}]*border-color: #7c68bd[^}]*background: #171528/, "view-card hover must use a purple surface and border");
+assert.match(styles, /\.views-prototype-workspace :is\(\.views-concept-switch button,\.prototype-catalog-filters button\):hover[^{]*\{[^}]*var\(--accent-bright\)[^}]*#1d1930/, "Views filter hover states must use purple");
+
+console.log("Schemii live Views frontend contracts passed");
