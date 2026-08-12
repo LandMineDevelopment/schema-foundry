@@ -416,6 +416,7 @@ let postgresState = {
   busy: false,
   plan: null,
   schemaSnapshot: null,
+  previewOnly: false,
   editingProfileId: null,
   editingObject: null,
   objectEditorContext: "objects",
@@ -5111,6 +5112,7 @@ function updatePostgresControls() {
   elements.postgresObjectsButton.disabled = postgresState.busy || !ready;
   elements.postgresImportButton.textContent = designMatchesPostgresTarget() ? "Refresh design" : "Import";
   elements.applyMigrationButton.disabled = postgresState.busy || !postgresState.plan;
+  if (postgresState.previewOnly) elements.applyMigrationButton.disabled = true;
   document.querySelectorAll("[data-postgres-action]").forEach(button => { button.disabled = postgresState.busy; });
   syncStandaloneSqlTarget();
 }
@@ -5348,6 +5350,7 @@ async function previewPostgresMigration() {
       method: "POST",
       body: JSON.stringify({ namespace: postgresState.namespace, schema, allowDestructive: elements.includeDestructive.checked })
     });
+    postgresState.previewOnly = false;
     renderMigrationPreview();
     if (elements.postgresDialog.open) elements.postgresDialog.close();
     if (!elements.migrationDialog.open) elements.migrationDialog.showModal();
@@ -6043,8 +6046,27 @@ async function handleSchemiiAiOperationResult(result, context) {
     elements.postgresProfileSslmode.value = profile.sslmode;
     return "Prepared";
   }
+  if (result?.kind === "client_command" && result.command?.type === "select_postgres_profile") {
+    const command = result.command;
+    const profile = postgresState.profiles.find(item => item.id === command.profileId);
+    const fingerprint = profile ? window.SchemiiShared.aiContextFingerprint([profile.id, profile.host, profile.port, profile.dbname, profile.user, profile.sslmode]) : null;
+    if (!profile || profile.name !== command.name || profile.dbname !== command.database || fingerprint !== command.profileFingerprint) throw new Error("The saved connection changed; reload before continuing");
+    postgresState.selectedProfileId = profile.id;
+    postgresState.namespace = command.namespace;
+    if (!await loadPostgresNamespaces() || postgresState.namespace !== command.namespace) throw new Error("The PostgreSQL namespace changed; request a fresh proposal");
+    renderPostgresProfiles();
+    if (!elements.postgresDialog.open) elements.postgresDialog.showModal();
+    return "Opened";
+  }
   if (result?.kind === "migration_plan") {
+    const target = result.target;
+    const profile = postgresState.profiles.find(item => item.id === target?.profileId);
+    const fingerprint = profile ? window.SchemiiShared.aiContextFingerprint([profile.id, profile.host, profile.port, profile.dbname, profile.user, profile.sslmode]) : null;
+    if (!profile || profile.dbname !== target.database || fingerprint !== target.profileFingerprint) throw new Error("The migration target changed; request a fresh preview");
+    postgresState.selectedProfileId = profile.id;
+    postgresState.namespace = target.namespace;
     postgresState.plan = result.plan;
+    postgresState.previewOnly = true;
     postgresState.schemaSnapshot = JSON.stringify(schema);
     renderMigrationPreview();
     if (!elements.migrationDialog.open) elements.migrationDialog.showModal();

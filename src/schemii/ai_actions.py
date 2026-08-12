@@ -48,6 +48,23 @@ def normalize_schemii_action(action: Any, access: str) -> dict[str, Any]:
         _exact(action, {"type", "projectName", "requiresConfirmation"})
         _confirmation(action)
         return {"type": action_type, "projectName": _text(action.get("projectName"), 256), "requiresConfirmation": True}
+    if action_type == "open_connection":
+        _exact(action, {"type", "profileId", "name", "database", "namespace", "requiresConfirmation"})
+        _confirmation(action)
+        return {
+            "type": action_type, "profileId": _id(action.get("profileId")), "name": _text(action.get("name"), 256),
+            "database": _name(action.get("database")), "namespace": _name(action.get("namespace")), "requiresConfirmation": True,
+        }
+    if action_type == "migration_preview":
+        _exact(action, {"type", "profileId", "namespace", "destructivePolicy", "purpose", "readOnly", "requiresConfirmation"})
+        _confirmation(action)
+        if action.get("readOnly") is not True or action.get("destructivePolicy") not in {"reject", "allow-preview"}:
+            raise ValueError("migration preview policy is invalid")
+        return {
+            "type": action_type, "profileId": _id(action.get("profileId")), "namespace": _name(action.get("namespace")),
+            "destructivePolicy": action["destructivePolicy"], "purpose": _text(action.get("purpose"), 500),
+            "readOnly": True, "requiresConfirmation": True,
+        }
     if action_type == "populate_schema":
         _exact(action, {"type", "purpose", "tables", "relationships", "requiresConfirmation"})
         _confirmation(action)

@@ -49,4 +49,4 @@ Each disabled action requires all of the following before its tool is restored:
 - [ ] Byte-for-byte preservation tests for unrelated layout, viewport, widgets, and configuration.
 - [ ] Updated user-facing capability documentation.
 
-Schemii saved-schema mutation and local project-creation adapters satisfy these criteria. Connection opening, migration preview, and Schemer mutation tools remain disabled.
+Schemii saved-schema mutation, local project creation, exact connection opening, and non-persisted read-only migration preview adapters satisfy these criteria. Migration apply and Schemer mutation tools remain disabled.

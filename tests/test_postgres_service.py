@@ -137,6 +137,13 @@ class PostgresServiceTests(unittest.TestCase):
         self.service.save_profile("local", {**PROFILE, "dbname": "other"})
         self.assertNotIn(plan["id"], self.service._plans)
 
+    def test_preview_only_plan_is_not_apply_capable(self):
+        self.service.introspect = lambda profile_id, namespace: empty_schema()
+        plan = self.service.preview("local", "public", empty_schema(), persist=False)
+        self.assertIsNone(plan["id"])
+        self.assertTrue(plan["previewOnly"])
+        self.assertEqual(self.service._plans, {})
+
     def test_connection_uses_keyword_arguments_without_exposing_password(self):
         captured = {}
         connection = Connection({"current_database()": [{"database": "demo", "version": "PostgreSQL 16"}]})

@@ -38,6 +38,7 @@ VIEW_APPLY_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]
 AI_MANIFEST_ACTION_TYPES = {
     "open_project", "connection_setup", "schema_read_query", "create_project", "populate_schema", "add_table",
     "rename_table", "add_column", "update_column", "delete_element", "add_relationship",
+    "open_connection", "migration_preview",
 }
 
 AI_SYSTEM_INSTRUCTIONS = """You are Schemii's embedded PostgreSQL design assistant.
@@ -49,13 +50,23 @@ If an enabled proposal tool does not execute, end the response with exactly SCHE
 Use only exact logical IDs from availableProjects when opening existing projects. Do not use shell, filesystem, web, or task tools."""
 
 
-def _normalize_schemii_action_for_record(action, access, record):
+def _normalize_schemii_action_for_record(action, access, record, service=None):
     normalized = normalize_schemii_action(action, access)
     if normalized["type"] == "delete_element":
         try:
             normalized["impact"] = destructive_impact(record, normalized)
         except SchemaStoreError as error:
             raise ValueError("destructive target changed") from error
+    if normalized["type"] in {"open_connection", "migration_preview"}:
+        if service is None:
+            raise ValueError("PostgreSQL service is unavailable")
+        profile = next((item for item in service.list_profiles() if item.get("id") == normalized["profileId"]), None)
+        if profile is None:
+            raise ValueError("PostgreSQL profile is unavailable")
+        if normalized["type"] == "open_connection" and (profile.get("name"), profile.get("dbname")) != (normalized["name"], normalized["database"]):
+            raise ValueError("PostgreSQL profile identity changed")
+        normalized["database"] = profile.get("dbname")
+        normalized["profileFingerprint"] = service.profile_context_fingerprint(profile["id"])
     return normalized
 
 
@@ -568,7 +579,7 @@ def make_handler(
                 return issue_ai_proposals(
                     ai_authority, response, application="schemii", session_id=session_id,
                     resource=schema_id, access=access_level, binding=binding,
-                    normalize_action=lambda action, access: _normalize_schemii_action_for_record(action, access, record),
+                    normalize_action=lambda action, access: _normalize_schemii_action_for_record(action, access, record, service),
                 )
 
             return self._ai_call(send_prompt)
@@ -730,12 +741,13 @@ def make_handler(
                 )
                 return {"kind": "sql_result", "display": result, "resultRef": reference["id"], "binding": binding}
             if action_type == "migration_preview":
-                if profile is None or action.get("profileId") != profile["id"] or action.get("namespace") != binding["target"]["namespace"]:
+                selected = next((item for item in service.list_profiles() if item.get("id") == action.get("profileId")), None)
+                if selected is None or selected.get("dbname") != action.get("database") or service.profile_context_fingerprint(selected["id"]) != action.get("profileFingerprint"):
                     raise PostgresServiceError(409, "action_target_changed", "Migration target no longer matches the proposal")
                 plan = service.preview(
-                    profile["id"], binding["target"]["namespace"], record["schema"], action.get("destructivePolicy") == "allow-preview",
+                    selected["id"], action["namespace"], record["schema"], action.get("destructivePolicy") == "allow-preview", persist=False,
                 )
-                return {"kind": "migration_plan", "plan": plan}
+                return {"kind": "migration_plan", "plan": plan, "target": {"profileId": selected["id"], "database": selected["dbname"], "namespace": action["namespace"], "profileFingerprint": action["profileFingerprint"]}, "schemaBinding": binding}
             if action_type == "open_project":
                 target = store.get(action.get("schemaId"))
                 if target["schema"].get("projectName") != action.get("projectName"):
@@ -746,6 +758,13 @@ def make_handler(
                 if not all(value is not None for value in fields.values()):
                     raise OpenCodeServiceError(400, "validation_error", "Connection proposal is incomplete")
                 return {"kind": "client_command", "command": {"type": "prefill_postgres_profile", "profile": fields}}
+            if action_type == "open_connection":
+                selected = next((item for item in service.list_profiles() if item.get("id") == action.get("profileId")), None)
+                if selected is None or (selected.get("name"), selected.get("dbname"), service.profile_context_fingerprint(selected["id"])) != (action.get("name"), action.get("database"), action.get("profileFingerprint")):
+                    raise PostgresServiceError(409, "action_target_changed", "Saved connection no longer matches the proposal")
+                if action["namespace"] not in service.list_namespaces(selected["id"]):
+                    raise PostgresServiceError(409, "action_target_changed", "PostgreSQL namespace no longer exists")
+                return {"kind": "client_command", "command": {"type": "select_postgres_profile", "profileId": selected["id"], "name": selected["name"], "database": selected["dbname"], "namespace": action["namespace"], "profileFingerprint": action["profileFingerprint"]}}
             if action_type == "create_project":
                 return store.create_ai_project(operation_id, action["projectName"])
             if action_type in {"populate_schema", "add_table", "rename_table", "add_column", "update_column", "delete_element", "add_relationship"}:

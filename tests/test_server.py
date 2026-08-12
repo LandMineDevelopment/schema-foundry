@@ -246,7 +246,7 @@ class ServerTests(unittest.TestCase):
 
         self.assertIn(("test_profile", "local"), self.service.calls)
         self.assertIn(("introspect", "local", "public"), self.service.calls)
-        self.assertIn(("preview", "local", "public", schema, True), self.service.calls)
+        self.assertIn(("preview", "local", "public", schema, True, True), self.service.calls)
         self.assertIn(("apply", "local", "plan_one", True), self.service.calls)
 
     def test_exact_view_preview_apply_and_post_commit_schema_sync(self):
@@ -645,6 +645,40 @@ class ServerTests(unittest.TestCase):
         status, body, _ = self.request(path, "POST", {"schemaId": "schema_one", "accessLevel": "schema"}, authorized=True)
         self.assertEqual(status, 403)
         self.assertEqual(json.loads(body)["error"]["code"], "proposal_binding_mismatch")
+
+    def test_ai_connection_open_and_migration_preview_use_exact_profile(self):
+        self.store.save(
+            "schema_one", {"id": "schema_one", "schema": {"projectName": "Demo", "tables": [], "relationships": [], "functions": []}},
+            expected_layout_token=None, layout_protocol=None,
+        )
+        self.service.profiles = [{
+            "id": "local", "name": "Local", "host": "127.0.0.1", "port": 5432, "dbname": "demo", "user": "reader", "sslmode": "prefer",
+        }]
+        self.ai_service.session_title = "SCHEMII_CONTEXT:schema_one:schema Demo chat"
+        message = {"text": "Open local", "model": {}, "schemaId": "schema_one", "accessLevel": "schema"}
+        execute = {"schemaId": "schema_one", "accessLevel": "schema", "confirmation": {"accepted": True, "mode": "explicit"}}
+
+        self.ai_service.prompt_response = {"text": "Review.", "parts": [], "actions": [{
+            "type": "open_connection", "profileId": "local", "name": "Local", "database": "demo", "namespace": "public", "requiresConfirmation": True,
+        }]}
+        _, body, _ = self.request("/api/ai/sessions/ses_1/messages", "POST", message, authorized=True)
+        proposal = json.loads(body)["proposals"][0]
+        self.assertIn("profileFingerprint", proposal["action"])
+        path = f"/api/ai/sessions/ses_1/proposals/{proposal['proposalId']}/execute"
+        operation = json.loads(self.request(path, "POST", execute, authorized=True)[1])["operation"]
+        self.assertEqual(operation["result"]["command"]["type"], "select_postgres_profile")
+        self.assertIn(("list_namespaces", "local"), self.service.calls)
+
+        self.ai_service.prompt_response = {"text": "Review.", "parts": [], "actions": [{
+            "type": "migration_preview", "profileId": "local", "namespace": "public", "destructivePolicy": "reject",
+            "purpose": "Review", "readOnly": True, "requiresConfirmation": True,
+        }]}
+        _, body, _ = self.request("/api/ai/sessions/ses_1/messages", "POST", message, authorized=True)
+        proposal = json.loads(body)["proposals"][0]
+        path = f"/api/ai/sessions/ses_1/proposals/{proposal['proposalId']}/execute"
+        operation = json.loads(self.request(path, "POST", execute, authorized=True)[1])["operation"]
+        self.assertEqual(operation["result"]["kind"], "migration_plan")
+        self.assertIn(("preview", "local", "public", unittest.mock.ANY, False, False), self.service.calls)
 
     def test_ai_message_metadata_omits_schema_and_rejects_unknown_schema(self):
         record = {"id": "schema_one", "schema": {"projectName": "Demo", "tables": [{"id": "t", "name": "secret_table", "columns": []}], "relationships": [], "functions": []}}

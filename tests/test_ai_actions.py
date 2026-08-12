@@ -56,6 +56,20 @@ class AiActionTests(unittest.TestCase):
         }, "schema")
         self.assertTrue(deletion["destructive"])
 
+    def test_schemii_connection_and_preview_actions_are_exact(self):
+        connection = normalize_schemii_action({
+            "type": "open_connection", "profileId": "local", "name": "Local", "database": "demo",
+            "namespace": "public", "requiresConfirmation": True,
+        }, "schema")
+        self.assertEqual(connection["namespace"], "public")
+        preview = normalize_schemii_action({
+            "type": "migration_preview", "profileId": "local", "namespace": "public", "destructivePolicy": "reject",
+            "purpose": "Review changes", "readOnly": True, "requiresConfirmation": True,
+        }, "schema")
+        self.assertTrue(preview["readOnly"])
+        with self.assertRaises(ValueError):
+            normalize_schemii_action({**preview, "readOnly": False}, "schema")
+
     def test_schemer_actions_are_exact_and_revision_bound(self):
         action = {
             "type": "dashboard_open", "dashboardId": "dashboard_one", "expectedRevision": 3,

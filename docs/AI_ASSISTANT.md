@@ -134,8 +134,12 @@ The currently enabled Schemii tools can propose:
 - Add or update columns
 - Delete a table or column with dependent-object review
 - Add a foreign-key relationship between exact saved columns
+- Open an exact listed PostgreSQL connection and namespace
+- Generate a read-only migration preview against an exact listed target
 
 Confirmed schema mutations execute in the Schemii backend, not in the browser. Each proposal is bound to the exact saved schema revision and layout token, uses operation-derived stable IDs, writes the semantic change and operation receipt atomically with one revision increment, and preserves established positions, colors, layer viewport, views, functions, PostgreSQL metadata, and unrelated objects. A duplicate execute or restart returns the stored receipt instead of applying the change again. Stale revisions or layouts require a refresh. Column renames fail closed when stored SQL definitions cannot be rewritten safely; destructive results include the server-derived dependency impact.
+
+Connection-opening proposals are bound to the server's current saved profile fingerprint, database, and namespace. AI migration previews revalidate that exact target, introspect PostgreSQL read-only, and return a non-persisted preview-only plan. They cannot be applied from the migration dialog; applying changes requires a separate ordinary UI preview until a destructive server adapter is explicitly approved and installed.
 
 Schemer's separate agent can load only Schemer help, dashboard safety, layout safety, and query safety. Its currently enabled tools can open an exact listed dashboard and, in data mode only, emit an inert read-query proposal bound to the supplied dashboard revision, profile, database, and namespace. Dashboard and widget mutation tools are temporarily disabled until their server-owned domain adapters provide idempotent persistence, lost-response reconciliation, and exact layout preservation. Confirmed analytic SQL may join relations, but widget configuration remains single-relation. Schemii tools remain unavailable in the Schemer workspace and prompt policy.
 

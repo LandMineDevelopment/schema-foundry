@@ -1573,12 +1573,15 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             raise ValidationError(f"Constraint on table {table['name']} references an unknown column ID") from exc
 
     def preview(
-        self, profile_id: str, namespace: str, desired_schema: dict[str, Any], allow_destructive: bool = False
+        self, profile_id: str, namespace: str, desired_schema: dict[str, Any], allow_destructive: bool = False,
+        *, persist: bool = True,
     ) -> dict[str, Any]:
         namespace = self._validate_namespace(namespace)
         desired = self._require_schema(copy.deepcopy(desired_schema))
         if not isinstance(allow_destructive, bool):
             raise ValidationError("allow_destructive must be boolean")
+        if not isinstance(persist, bool):
+            raise ValidationError("persist must be boolean")
         profile_fingerprint = self._profile_fingerprint(self._profile(profile_id))
         live = self.introspect(profile_id, namespace)
         if self._profile_fingerprint(self._profile(profile_id)) != profile_fingerprint:
@@ -1601,10 +1604,14 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             "warnings": list(warnings), "createdAt": now, "expiresAt": now + self._plan_ttl,
             "desiredSchema": copy.deepcopy(desired),
         }
-        with self._lock:
-            self._purge_plans(now)
-            self._plans[plan_id] = stored
-        return self._public_plan(stored)
+        if persist:
+            with self._lock:
+                self._purge_plans(now)
+                self._plans[plan_id] = stored
+        public = self._public_plan(stored)
+        if not persist:
+            public.update({"id": None, "previewOnly": True})
+        return public
 
     def preview_view_mutation(
         self, profile_id: str, database: str, namespace: str, relation: str,

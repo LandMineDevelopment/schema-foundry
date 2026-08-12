@@ -35,6 +35,8 @@ CUSTOM_TOOLS = {
     "schema_update_column",
     "schema_delete_element",
     "schema_add_relationship",
+    "schema_connection_open",
+    "schema_migration_preview",
 }
 TOOL_ACTION_TYPES = {
     "schema_read_query": "schema_read_query",
@@ -48,6 +50,8 @@ TOOL_ACTION_TYPES = {
     "schema_update_column": "update_column",
     "schema_delete_element": "delete_element",
     "schema_add_relationship": "add_relationship",
+    "schema_connection_open": "open_connection",
+    "schema_migration_preview": "migration_preview",
 }
 SAFE_SKILLS = {
     "schemii-help",
