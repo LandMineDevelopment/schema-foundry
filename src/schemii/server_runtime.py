@@ -34,6 +34,7 @@ def run_server(
     application_name: str,
     *,
     server_factory: Callable[..., Any] = ThreadingHTTPServer,
+    shutdown_callback: Callable[[], Any] | None = None,
 ) -> None:
     server = server_factory((host, port), handler)
     print(f"{application_name} running at http://{host}:{port}/")
@@ -42,6 +43,8 @@ def run_server(
     except KeyboardInterrupt:
         pass
     finally:
+        if shutdown_callback is not None:
+            shutdown_callback()
         server.server_close()
 
 

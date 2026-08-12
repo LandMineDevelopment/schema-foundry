@@ -79,6 +79,18 @@ class FakePostgresService:
         self.calls.append(("execute_read_only_sql", profile_id, namespace, statement, policy))
         return {"columns": [{"name": "answer"}], "rows": [[1]], "rowCount": 1, "truncated": False}
 
+    def execute_console(self, profile_id, body, binding, server_id):
+        self.calls.append(("execute_console", profile_id, body, binding, server_id))
+        return {
+            "executionId": body["executionId"],
+            "target": {"profileId": profile_id, "database": body["database"], "namespace": body["namespace"]},
+            "mode": "read", "committed": False, "statements": [], "limits": {},
+        }
+
+    def cancel_console(self, profile_id, execution_id, binding, server_id):
+        self.calls.append(("cancel_console", profile_id, execution_id, binding, server_id))
+        return {"requested": True}
+
     def list_namespaces(self, profile_id):
         self.calls.append(("list_namespaces", profile_id))
         return self.namespaces

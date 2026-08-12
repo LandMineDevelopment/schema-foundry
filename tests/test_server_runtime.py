@@ -48,6 +48,25 @@ class ServerRuntimeTests(unittest.TestCase):
         self.assertIn("Demo running at http://127.0.0.1:8080/", output.getvalue())
         self.assertEqual(events[-1], "closed")
 
+    def test_server_runs_shutdown_callback_before_close(self):
+        events = []
+
+        class Server:
+            def __init__(self, address, handler):
+                pass
+
+            def serve_forever(self):
+                raise KeyboardInterrupt
+
+            def server_close(self):
+                events.append("closed")
+
+        run_server(
+            "127.0.0.1", 8080, object, "Demo", server_factory=Server,
+            shutdown_callback=lambda: events.append("shutdown"),
+        )
+        self.assertEqual(events, ["shutdown", "closed"])
+
     def test_shutdown_response_is_flushed_before_thread_start(self):
         events = []
 

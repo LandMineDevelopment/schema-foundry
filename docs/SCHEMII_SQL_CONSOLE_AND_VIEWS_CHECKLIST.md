@@ -86,14 +86,15 @@ Acceptance criteria: request contracts, transaction boundaries, permission behav
 
 Approval required before implementation.
 
-- [ ] Add capability-scoped SQL console routes using the shared PostgreSQL profile and session infrastructure.
-- [ ] Verify the connected database before every execution.
+- [x] Add capability-scoped SQL console routes using the shared PostgreSQL profile and session infrastructure.
+- [x] Verify the connected database before every execution.
 - [ ] Execute with read-only transaction enforcement unless the request carries current write authorization.
 - [ ] Allow PostgreSQL statements permitted by the selected role while write mode is explicitly enabled, including insert, update, delete, DDL, and function calls.
-- [ ] Implement cancellation, timeouts, bounded tabular results, command summaries, notices, and PostgreSQL error details.
-- [ ] Ensure failed multi-statement or transactional submissions follow the approved rollback semantics.
+- [x] Implement cancellation, timeouts, bounded tabular results, command summaries, notices, and PostgreSQL error details.
+- [x] Ensure failed multi-statement or transactional submissions follow the approved rollback semantics.
 - [ ] Invalidate or recheck linked catalog fingerprints after schema-changing statements.
-- [ ] Add focused service, route, authorization, transaction, timeout, cancellation, and browser tests.
+- [x] Add focused service, route, authorization, transaction, timeout, cancellation, and browser tests for the read-only execution slice.
+- [x] Run selected SQL or the caret statement by default, provide explicit Run all, and present ordered results as pinnable browser-local tabs.
 - [ ] Verify writes and rollback behavior against disposable PostgreSQL data and remove all test objects afterward.
 
 Acceptance criteria: read-only mode rejects writes server-side; write mode executes only with explicit current authorization and selected-role permission; failures cannot leave an ambiguous transaction state.

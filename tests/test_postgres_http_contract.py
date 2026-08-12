@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from uuid import uuid4
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -56,6 +57,33 @@ class PostgresHttpContractTests(unittest.TestCase):
                         self.assertEqual(running.request(
                             "/api/postgres/profiles/shared/test", "POST", {}, authorized=True,
                         )[0], 200)
+                        execution_id = str(uuid4())
+                        console_id = str(uuid4())
+                        request = {
+                            "executionId": execution_id, "consoleId": console_id, "database": "demo",
+                            "namespace": "public", "sql": "SELECT 1", "mode": "read", "writeGrantId": None,
+                        }
+                        status, body, _ = running.request(
+                            "/api/postgres/profiles/shared/console/executions", "POST", request, authorized=True,
+                        )
+                        self.assertEqual(status, 200)
+                        self.assertFalse(json.loads(body)["committed"])
+                        call = service.calls[-1]
+                        self.assertEqual(call[:3], ("execute_console", "shared", request))
+                        self.assertNotEqual(call[3], "session-token")
+                        self.assertEqual(call[4], f"{name}-contract")
+                        self.assertEqual(running.request(
+                            f"/api/postgres/profiles/shared/console/executions/{execution_id}",
+                            "DELETE", authorized=True,
+                        )[0], 200)
+                        invalid = dict(request)
+                        invalid["extra"] = True
+                        self.assertEqual(running.request(
+                            "/api/postgres/profiles/shared/console/executions", "POST", invalid, authorized=True,
+                        )[0], 400)
+                        self.assertEqual(running.request(
+                            "/api/postgres/profiles/shared/console/executions", "POST", [], authorized=True,
+                        )[0], 400)
                     finally:
                         running.close()
 

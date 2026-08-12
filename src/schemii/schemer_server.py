@@ -15,6 +15,7 @@ from .http_common import make_local_app_handler
 from .opencode_service import OpenCodeService, OpenCodeServiceError
 from .postgres_http import (
     POSTGRES_CATALOG_CAPABILITY,
+    POSTGRES_CONSOLE_CAPABILITY,
     POSTGRES_PROFILE_CAPABILITY,
     POSTGRES_READ_SQL_CAPABILITY,
     POSTGRES_RELATION_QUERY_CAPABILITY,
@@ -103,7 +104,7 @@ def make_handler(
     class SchemerHandler(PostgresHttpMixin, base_handler):
         postgres_capabilities = frozenset({
             POSTGRES_PROFILE_CAPABILITY, POSTGRES_CATALOG_CAPABILITY, POSTGRES_RELATION_QUERY_CAPABILITY,
-            POSTGRES_READ_SQL_CAPABILITY,
+            POSTGRES_READ_SQL_CAPABILITY, POSTGRES_CONSOLE_CAPABILITY,
         })
         postgres_read_sql_policy = {
             "require_database": True,
@@ -382,7 +383,7 @@ def main() -> None:
         ai_service=ai_service,
         behind_loopback_proxy=behind_loopback_proxy,
     )
-    run_server(host, port, handler, "Schemer", server_factory=ThreadingHTTPServer)
+    run_server(host, port, handler, "Schemer", server_factory=ThreadingHTTPServer, shutdown_callback=service.close)
 
 
 if __name__ == "__main__":

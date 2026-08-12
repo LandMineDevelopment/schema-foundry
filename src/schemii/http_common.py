@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import mimetypes
 from http.server import SimpleHTTPRequestHandler
@@ -37,6 +38,8 @@ def make_local_app_handler(
 ):
     class LocalAppHandler(SimpleHTTPRequestHandler):
         service = postgres_service
+        postgres_server_id = server_id
+        postgres_session_binding = hashlib.sha256(f"{server_id}\0{session_token}".encode("utf-8")).hexdigest()
 
         def __init__(self, *args, **kwargs):
             super().__init__(*args, directory=str(web_dir), **kwargs)

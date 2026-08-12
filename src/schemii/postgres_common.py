@@ -14,14 +14,18 @@ TRANSIENT_KEYS = {
 class PostgresServiceError(Exception):
     """Safe error suitable for direct serialization by an HTTP adapter."""
 
-    def __init__(self, status: int, code: str, message: str):
+    def __init__(self, status: int, code: str, message: str, details: dict[str, Any] | None = None):
         super().__init__(message)
         self.status = status
         self.code = code
         self.message = message
+        self.details = details
 
     def to_dict(self) -> dict[str, Any]:
-        return {"error": {"code": self.code, "message": self.message}}
+        error = {"code": self.code, "message": self.message}
+        if self.details:
+            error["details"] = self.details
+        return {"error": error}
 
 
 class ValidationError(PostgresServiceError):

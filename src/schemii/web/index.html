@@ -166,7 +166,7 @@
                 <div class="sql-console-editor">
                   <textarea id="sql-console-input" spellcheck="false" aria-label="Read-only SQL query"></textarea>
                   <div class="sql-console-actions">
-                    <span>Run with <kbd>Ctrl</kbd> + <kbd>Enter</kbd></span>
+                    <span>Run selection or cursor statement with <kbd>Ctrl</kbd> + <kbd>Enter</kbd></span>
                     <button id="clear-sql-console" type="button">Clear</button>
                     <button class="button button-primary" id="run-sql-console" type="button">Run query</button>
                   </div>
@@ -186,21 +186,21 @@
           <div class="standalone-sql-panes" id="standalone-sql-panes" data-active-pane="editor">
             <section class="standalone-sql-editor-panel">
               <header class="standalone-sql-head">
-                <button class="standalone-sql-heading-toggle" id="show-standalone-sql-editor" type="button" aria-expanded="true"><span class="eyebrow">Browser-local draft · no execution</span><span><strong>SQL Console</strong><span class="prototype-badge">Script</span></span></button>
-                <label class="standalone-sql-view-select" for="standalone-sql-view"><span>View</span><select id="standalone-sql-view" aria-label="SQL Console view"><option value="orders">Order review</option><option value="customers">Customer lookup</option><option value="scratchpad">Operations scratchpad</option></select></label>
+                <button class="standalone-sql-heading-toggle" id="show-standalone-sql-editor" type="button" aria-expanded="true"><span class="eyebrow">Live PostgreSQL · read-only transaction</span><span><strong>SQL Console</strong><span class="prototype-badge">Script</span></span></button>
+                <div class="standalone-sql-view-control"><span>View</span><details id="standalone-sql-view-menu"><summary id="standalone-sql-view" aria-label="Choose SQL Console query"><span>Query 1</span><i aria-hidden="true"></i></summary><div class="standalone-sql-view-menu" id="standalone-sql-view-list" role="menu"></div></details></div>
                 <dl class="standalone-sql-target" aria-label="SQL target identity">
                   <div><dt>Connection</dt><dd id="standalone-sql-profile">No linked profile</dd></div>
                   <div><dt>Database</dt><dd id="standalone-sql-database">Not selected</dd></div>
                   <div><dt>Namespace</dt><dd id="standalone-sql-namespace">Not selected</dd></div>
                 </dl>
                 <div class="standalone-sql-head-actions">
-                  <button class="shared-icon-button standalone-sql-write-button" id="standalone-sql-write-toggle" type="button" aria-label="Allow writes" aria-pressed="false" aria-describedby="standalone-sql-write-help" data-tooltip="Allow writes"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="5" y="9" width="10" height="7" rx="2"/><path d="M7 9V7a3 3 0 0 1 5.8-1"/></svg></button>
+                  <button class="shared-icon-button standalone-sql-write-button" id="standalone-sql-write-toggle" type="button" aria-label="Write mode unavailable" aria-pressed="false" aria-describedby="standalone-sql-write-help" data-tooltip="Write mode unavailable" disabled><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="5" y="9" width="10" height="7" rx="2"/><path d="M7 9V7a3 3 0 0 1 5.8-1"/></svg></button>
                   <button class="shared-icon-button standalone-sql-queries-toggle" id="toggle-standalone-sql-history" type="button" aria-label="Open saved queries" aria-expanded="false" data-tooltip="Queries"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 4.5h10v11H5zM8 8h4M8 11h4"/></svg><span>Queries</span></button>
                   <button class="shared-icon-button" id="close-standalone-sql" type="button" aria-label="Close SQL Console" data-tooltip="Close SQL Console"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button>
                 </div>
               </header>
               <div class="standalone-sql-write-warning" id="standalone-sql-write-warning" hidden><strong>WRITE MODE ENABLED</strong><span>Future executions may change data or schema objects using the selected PostgreSQL role. Target: <b id="standalone-sql-write-target">No PostgreSQL target selected</b></span><small>This Phase 1 prototype never sends SQL to PostgreSQL.</small></div>
-              <p class="sr-only" id="standalone-sql-write-help">Write mode is off by default and resets when the target changes, this workspace closes, or the page reloads.</p>
+              <p class="sr-only" id="standalone-sql-write-help">Write mode is not available yet. Console scripts execute in a read-only transaction that is rolled back after results are collected.</p>
               <div class="standalone-sql-body">
                 <aside class="standalone-sql-history" id="standalone-sql-history" aria-label="SQL Console history">
                   <header><div><span class="eyebrow">SQL workspace</span><strong>Queries</strong></div><span>Local only</span><button id="close-standalone-sql-history" type="button" aria-label="Close queries"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button></header>
@@ -216,28 +216,21 @@
                   <p>History remains in memory and clears when this page reloads.</p>
                 </aside>
                 <div class="standalone-sql-editor-content" id="standalone-sql-editor-content">
-                  <textarea id="standalone-sql-input" aria-label="SQL script" spellcheck="false">SELECT
-    order_id,
-    customer_name,
-    status,
-    order_total
-FROM bookstore.order_summary
-ORDER BY ordered_at DESC
-LIMIT 25;</textarea>
+                  <textarea id="standalone-sql-input" aria-label="SQL script" spellcheck="false"></textarea>
                   <footer>
                     <span>Run with <kbd>Ctrl</kbd> + <kbd>Enter</kbd></span>
                     <button type="button" id="copy-standalone-sql">Copy</button>
                     <button type="button" id="save-standalone-sql">Save query</button>
                     <button type="button" id="clear-standalone-sql">Clear</button>
-                    <button type="button" id="cancel-standalone-sql" disabled>Cancel</button>
-                    <button class="button button-primary" type="button" id="run-standalone-sql">Run preview</button>
+                    <button type="button" id="run-all-standalone-sql">Run all</button>
+                    <button class="button button-primary" type="button" id="run-standalone-sql">Run</button>
                   </footer>
                 </div>
               </div>
             </section>
-            <section class="standalone-sql-result-panel" aria-label="SQL result preview">
-              <button class="standalone-sql-pane-heading" id="show-standalone-sql-result" type="button" aria-expanded="false"><span><span class="eyebrow">Synthetic response</span><strong>Result preview</strong></span><span class="standalone-sql-result-status" id="standalone-sql-result-status">Not run</span></button>
-              <div class="standalone-sql-result" id="standalone-sql-result" aria-live="polite" hidden><div class="standalone-sql-empty"><span>SQL</span><strong>Ready for a local preview</strong><p>Run the draft to review table, command, error, loading, and empty states. No database request will be made.</p></div></div>
+            <section class="standalone-sql-result-panel" aria-label="SQL results">
+              <header class="standalone-sql-result-head"><button class="standalone-sql-pane-heading" id="show-standalone-sql-result" type="button" aria-expanded="false"><span><span class="eyebrow">Read-only PostgreSQL response</span><strong>Results</strong></span></button><div><span class="standalone-sql-result-status" id="standalone-sql-result-status">Not run</span><button type="button" id="cancel-standalone-sql" disabled hidden>Cancel</button></div></header>
+              <div class="standalone-sql-result" id="standalone-sql-result" aria-live="polite" hidden><nav class="standalone-sql-result-tabs" id="standalone-sql-result-tabs" aria-label="SQL result tabs" role="tablist"></nav><div class="standalone-sql-result-body" id="standalone-sql-result-body"><div class="standalone-sql-empty"><span>SQL</span><strong>Ready to run</strong><p>Select an exact PostgreSQL target, then run one or more statements in a read-only transaction.</p></div></div></div>
             </section>
           </div>
         </section>

@@ -14,6 +14,7 @@ from .http_common import CONTENT_SECURITY_POLICY, MAX_BODY_SIZE, is_local_reques
 from .opencode_service import OpenCodeService, OpenCodeServiceError
 from .postgres_http import (
     POSTGRES_CATALOG_CAPABILITY,
+    POSTGRES_CONSOLE_CAPABILITY,
     POSTGRES_PROFILE_CAPABILITY,
     POSTGRES_READ_SQL_CAPABILITY,
     POSTGRES_SCHEMA_CAPABILITY,
@@ -278,7 +279,7 @@ def make_handler(
     class SchemiiHandler(PostgresHttpMixin, base_handler):
         postgres_capabilities = frozenset({
             POSTGRES_PROFILE_CAPABILITY, POSTGRES_CATALOG_CAPABILITY, POSTGRES_SCHEMA_CAPABILITY,
-            POSTGRES_READ_SQL_CAPABILITY,
+            POSTGRES_READ_SQL_CAPABILITY, POSTGRES_CONSOLE_CAPABILITY,
         })
 
         def _schema_call(self, callback):
@@ -479,7 +480,7 @@ def main() -> None:
         example_installer=example_installer,
         behind_loopback_proxy=behind_loopback_proxy,
     )
-    run_server(host, port, handler, "Schemii", server_factory=ThreadingHTTPServer)
+    run_server(host, port, handler, "Schemii", server_factory=ThreadingHTTPServer, shutdown_callback=service.close)
 
 
 if __name__ == "__main__":

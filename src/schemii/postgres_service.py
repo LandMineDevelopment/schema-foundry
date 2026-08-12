@@ -33,6 +33,7 @@ from .postgres_common import (
 )
 from .postgres_catalog import PostgresCatalogMixin
 from .postgres_connections import PostgresConnectionMixin
+from .postgres_console import ConsolePolicy, PostgresConsole, single_sql_statement, top_level_semicolons
 from .relation_source import RelationSourceValidationError, normalize_relation_source
 from .widget_query import (
     QueryValidationError,
@@ -131,81 +132,8 @@ def _series_key(secret: bytes, profile_id: str, profile: dict[str, Any], source:
     return hmac.new(secret, encoded.encode(), hashlib.sha256).hexdigest()
 
 
-def _top_level_semicolons(value: str) -> list[int]:
-    semicolons = []
-    quote = None
-    escape_string = False
-    dollar_quote = None
-    block_depth = 0
-    index = 0
-    while index < len(value):
-        character = value[index]
-        following = value[index + 1] if index + 1 < len(value) else ""
-        if dollar_quote:
-            if value.startswith(dollar_quote, index):
-                index += len(dollar_quote)
-                dollar_quote = None
-            else:
-                index += 1
-            continue
-        if quote:
-            if character == quote:
-                if following == quote:
-                    index += 2
-                    continue
-                quote = None
-                escape_string = False
-            elif character == "\\" and quote == "'" and escape_string and following:
-                index += 2
-                continue
-            index += 1
-            continue
-        if block_depth:
-            if character == "/" and following == "*":
-                block_depth += 1
-                index += 2
-            elif character == "*" and following == "/":
-                block_depth -= 1
-                index += 2
-            else:
-                index += 1
-            continue
-        if character == "-" and following == "-":
-            newline = value.find("\n", index + 2)
-            index = len(value) if newline == -1 else newline + 1
-            continue
-        if character == "/" and following == "*":
-            block_depth = 1
-            index += 2
-            continue
-        if character in {"'", '"'}:
-            quote = character
-            escape_string = (
-                character == "'" and index > 0 and value[index - 1] in {"e", "E"}
-                and (index < 2 or not (value[index - 2].isalnum() or value[index - 2] in {"_", "$"}))
-            )
-            index += 1
-            continue
-        if character == "$":
-            match = re.match(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$", value[index:])
-            if match:
-                dollar_quote = match.group(0)
-                index += len(dollar_quote)
-                continue
-        if character == ";":
-            semicolons.append(index)
-        index += 1
-    if quote or dollar_quote or block_depth:
-        raise ValidationError("SQL contains an unterminated quote or comment")
-    return semicolons
-
-
-def _single_sql_statement(value: str, label: str) -> str:
-    statement = value.strip()
-    semicolons = _top_level_semicolons(statement)
-    if len(semicolons) > 1 or (semicolons and statement[semicolons[0] + 1:].strip()):
-        raise ValidationError(f"{label} must contain exactly one SQL statement")
-    return statement
+_top_level_semicolons = top_level_semicolons
+_single_sql_statement = single_sql_statement
 
 
 def _normalized_sql_whitespace(value: str) -> str:
@@ -369,7 +297,17 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         self._temporal_series_secret = secrets.token_bytes(32)
         self._lock = threading.RLock()
         self._plans: dict[str, dict[str, Any]] = {}
+        self._console = PostgresConsole(self)
         self._ensure_config_dir()
+
+    def execute_console(self, profile_id: str, payload: Any, binding: str, server_id: str, policy: ConsolePolicy | None = None) -> dict[str, Any]:
+        return self._console.execute(profile_id, payload, binding, server_id, policy or ConsolePolicy(statement_timeout_ms=self._statement_timeout_ms))
+
+    def cancel_console(self, profile_id: str, execution_id: Any, binding: str, server_id: str) -> dict[str, bool]:
+        return self._console.cancel(profile_id, execution_id, binding, server_id)
+
+    def close(self) -> None:
+        self._console.close()
 
     # ---- profiles -------------------------------------------------------
 
