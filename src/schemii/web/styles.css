@@ -27,8 +27,7 @@
 .rail-button.active { color: var(--accent); border-color: #55451f; background: #231d11; }
 .tool-rail[data-workspace="views"] .rail-button.active { border-color: #51477d; background: #1d1930; }
 .tool-rail[data-workspace="sql"] .rail-button.active { border-color: #315a78; background: #132533; }
-.tool-rail[data-workspace="views"] .rail-button:hover:not(:disabled),.tool-rail[data-workspace="views"] .rail-button:focus-visible { color: var(--accent); border-color: #51477d; outline: 0; background: #1d1930; }
-.tool-rail[data-workspace="sql"] .rail-button:hover:not(:disabled),.tool-rail[data-workspace="sql"] .rail-button:focus-visible { color: var(--accent); border-color: #315a78; outline: 0; background: #132533; }
+.tool-rail .rail-button:not(.rail-danger):not(.rail-stop):hover:not(:disabled),.tool-rail .rail-button:not(.rail-danger):not(.rail-stop):focus-visible { color: var(--text); border-color: var(--line-strong); outline: 0; background: var(--panel-2); }
 .rail-button:disabled { opacity: .3; cursor: not-allowed; }
 .rail-button:disabled:hover { color: #778393; background: transparent; }
 .rail-button.rail-danger { color: #b76f77; }

@@ -92,7 +92,6 @@ const elements = {
   relationshipAddPair: document.querySelector("#relationship-add-pair"),
   deleteRelationshipEditor: document.querySelector("#delete-relationship-editor"),
   relationTool: document.querySelector("#relationship-tool"),
-  selectTool: document.querySelector("#select-tool"),
   relationBanner: document.querySelector("#relationship-banner"),
   relationInstruction: document.querySelector("#relationship-instruction"),
   undoButton: document.querySelector("#undo-button"),
@@ -3154,7 +3153,6 @@ function resetSchemaSession() {
   elements.workspace.classList.remove("relation-mode", "selecting", "panning", "table-dragging", "zooming");
   elements.selectionMarquee.hidden = true;
   elements.relationTool.classList.remove("active");
-  elements.selectTool.classList.add("active");
   elements.relationBanner.hidden = true;
   elements.mainLayout.classList.remove("inspector-dismissed", "inspector-content-collapsed", "inspector-content-expanding");
   elements.inspector.classList.remove("mobile-open");
@@ -4388,7 +4386,6 @@ function setRelationMode(enabled) {
   relationSource = null;
   elements.workspace.classList.toggle("relation-mode", enabled);
   elements.relationTool.classList.toggle("active", enabled);
-  elements.selectTool.classList.toggle("active", !enabled);
   elements.relationBanner.hidden = !enabled;
   elements.relationInstruction.textContent = "Select the foreign key column";
   elements.relationBanner.querySelector(".banner-step").textContent = "1";
@@ -6882,7 +6879,6 @@ elements.relationshipEditorDialog.addEventListener("close", () => {
   relationshipPairDragIndex = null;
 });
 elements.relationTool.addEventListener("click", () => setRelationMode(!relationMode));
-elements.selectTool.addEventListener("click", () => setRelationMode(false));
 document.querySelector("#cancel-relationship").addEventListener("click", () => setRelationMode(false));
 elements.undoButton.addEventListener("click", undo);
 elements.redoButton.addEventListener("click", redo);

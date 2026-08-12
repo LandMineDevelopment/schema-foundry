@@ -26,6 +26,8 @@ assert.match(html, /id="design-layer-switch"[\s\S]*data-design-layer="tables"[\s
 assert.match(html, /data-design-layer="tables"[^>]*aria-label="Tables"[\s\S]*data-design-layer="views"[^>]*aria-label="Views"[\s\S]*id="sql-workspace-button"[^>]*aria-label="Open SQL Console"/, "workspace selectors must be accessible icon controls");
 assert.doesNotMatch(html.match(/<aside class="tool-rail"[\s\S]*?<\/aside>/)?.[0] || "", /id="sql-workspace-button"/, "SQL Console must not remain in the left tool rail");
 assert.match(html.match(/<aside class="tool-rail"[\s\S]*?<\/aside>/)?.[0] || "", /id="undo-button"[\s\S]*id="redo-button"[\s\S]*id="postgres-button"/, "Undo, Redo, and PostgreSQL sync must remain shared across workspaces");
+assert.doesNotMatch(html, /id="select-tool"|Select and move/, "the redundant Select and Move tool must not remain");
+assert.doesNotMatch(source, /elements\.selectTool|selectTool:/, "relationship mode must not retain references to the removed Select tool");
 assert.doesNotMatch(html, /id="close-standalone-sql"/, "workspace navigation makes a separate SQL Console close control redundant");
 assert.match(source, /elements\.standaloneSqlButton\.addEventListener\("click", \(\) => \{\s*if \(!standaloneSqlState\.open\) openStandaloneSqlWorkspace\(\);\s*\}\);/, "selecting the active SQL workspace must be idempotent");
 assert.match(source, /document\.addEventListener\("pointerdown"[\s\S]*standaloneSqlViewMenu\.open[\s\S]*!event\.target\.closest\("#standalone-sql-view-menu"\)[\s\S]*removeAttribute\("open"\)/, "clicking outside the SQL query selector must close its dropdown");
@@ -37,6 +39,7 @@ assert.match(styles, /\.standalone-sql-workspace \.standalone-sql-editor-panel #
 assert.match(styles, /\.design-layer-switch > #sql-workspace-button:hover[^{]*\{[^}]*color: #9fd8ff[^}]*background: #132533/, "the SQL selector hover must use blue");
 assert.match(styles, /\.standalone-sql-workspace \.standalone-sql-history > button:hover[^{]*\{[^}]*border-color: #3f78a3[^}]*background: #132533/, "SQL history hover states must use blue");
 assert.match(styles, /\.standalone-sql-workspace \.standalone-sql-result-tab > button:hover[^{]*\{[^}]*var\(--accent-bright\)[^}]*#132533/, "SQL result-tab hover states must use blue");
+assert.match(styles, /\.tool-rail \.rail-button:not\(\.rail-danger\):not\(\.rail-stop\):hover:not\(:disabled\)[^{]*\{[^}]*color: var\(--text\)[^}]*border-color: var\(--line-strong\)[^}]*background: var\(--panel-2\)/, "toolbar hover highlights must remain neutral across workspaces");
 assert.match(styles, /@media \(max-width: 540px\)[\s\S]*\.main-layout\.sql-workspace-open \.standalone-sql-head \{ padding-top: 52px; padding-left: 9px; \}/, "mobile SQL headers must reserve a row for the shared workspace selector");
 assert.match(source, /elements\.designLayerSwitch\.addEventListener\("click", async event => \{[\s\S]*await closeStandaloneSqlWorkspace\(\{ restoreLayer: false \}\);[\s\S]*if \(standaloneSqlState\.open\) return;[\s\S]*setDesignLayer\(button\.dataset\.designLayer\)/, "Tables and Views navigation must wait for SQL write-grant revocation and remain in SQL on failure");
 assert.doesNotMatch(html.match(/standalone-sql-editor-content[\s\S]*?<\/footer>/)?.[0] || "", /sql-(?:run|stop)|save-standalone-sql/, "moved SQL actions must not remain in the editor footer");
