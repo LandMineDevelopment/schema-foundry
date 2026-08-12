@@ -442,7 +442,8 @@ function standaloneSqlTargetLabel() {
 
 function setStandaloneSqlWriteMode(enabled) {
   standaloneSqlState.writeMode = enabled;
-  elements.standaloneSqlWriteMode.checked = enabled;
+  elements.standaloneSqlWriteMode.setAttribute("aria-pressed", String(enabled));
+  elements.standaloneSqlWriteMode.classList.toggle("active", enabled);
   elements.standaloneSqlWriteWarning.hidden = !enabled;
   elements.standaloneSqlWriteTarget.textContent = standaloneSqlTargetLabel();
 }
@@ -5828,9 +5829,12 @@ elements.standaloneSqlClear.addEventListener("click", () => {
 elements.standaloneSqlRun.addEventListener("click", runStandaloneSql);
 elements.standaloneSqlCancel.addEventListener("click", cancelStandaloneSqlRun);
 elements.standaloneSqlView.addEventListener("change", event => switchStandaloneSqlView(event.target.value));
-elements.standaloneSqlWriteMode.addEventListener("change", () => {
-  if (!elements.standaloneSqlWriteMode.checked) return setStandaloneSqlWriteMode(false);
-  elements.standaloneSqlWriteMode.checked = false;
+elements.standaloneSqlWorkspace.querySelector(".standalone-sql-head").addEventListener("click", event => {
+  if (event.target.closest("button, label, select, input")) return;
+  toggleStandaloneSqlActivePane("editor");
+});
+elements.standaloneSqlWriteMode.addEventListener("click", () => {
+  if (standaloneSqlState.writeMode) return setStandaloneSqlWriteMode(false);
   elements.standaloneSqlWriteAck.checked = false;
   elements.standaloneSqlWriteConfirm.disabled = true;
   elements.standaloneSqlWriteDialog.showModal();

@@ -175,42 +175,38 @@
         </section>
 
         <section class="standalone-sql-workspace history-collapsed" id="standalone-sql-workspace" aria-label="SQL Console workspace" aria-hidden="true" hidden inert>
-          <header class="standalone-sql-head">
-            <div class="standalone-sql-heading">
-              <span class="eyebrow">Independent database workspace</span>
-              <div><h2>SQL Console</h2><span class="prototype-badge">UI prototype · no execution</span></div>
-            </div>
-            <label class="standalone-sql-view-select" for="standalone-sql-view"><span>View</span><select id="standalone-sql-view" aria-label="SQL Console view"><option value="orders">Order review</option><option value="customers">Customer lookup</option><option value="scratchpad">Operations scratchpad</option></select></label>
-            <dl class="standalone-sql-target" aria-label="SQL target identity">
-              <div><dt>Connection</dt><dd id="standalone-sql-profile">No linked profile</dd></div>
-              <div><dt>Database</dt><dd id="standalone-sql-database">Not selected</dd></div>
-              <div><dt>Namespace</dt><dd id="standalone-sql-namespace">Not selected</dd></div>
-            </dl>
-            <div class="standalone-sql-head-actions">
-              <label class="standalone-sql-write-toggle" for="standalone-sql-write-toggle"><input id="standalone-sql-write-toggle" type="checkbox" role="switch" aria-describedby="standalone-sql-write-help"/><span>Allow writes</span></label>
-              <button class="shared-icon-button" id="close-standalone-sql" type="button" aria-label="Close SQL Console" data-tooltip="Close SQL Console"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button>
-            </div>
-          </header>
-          <div class="standalone-sql-write-warning" id="standalone-sql-write-warning" hidden><strong>WRITE MODE ENABLED</strong><span>Future executions may change data or schema objects using the selected PostgreSQL role. Target: <b id="standalone-sql-write-target">No PostgreSQL target selected</b></span><small>This Phase 1 prototype never sends SQL to PostgreSQL.</small></div>
-          <p class="sr-only" id="standalone-sql-write-help">Write mode is off by default and resets when the target changes, this workspace closes, or the page reloads.</p>
-          <div class="standalone-sql-body">
-            <aside class="standalone-sql-history" id="standalone-sql-history" aria-label="SQL Console history">
-              <header><div><span class="eyebrow">SQL workspace</span><strong>Queries</strong></div><span>Local only</span><button id="close-standalone-sql-history" type="button" aria-label="Close queries"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button></header>
-              <section class="standalone-sql-saved">
-                <header><span>Saved queries</span><button id="save-standalone-sql-sidebar" type="button" aria-label="Save current query">+</button></header>
-                <div id="standalone-sql-saved-list"></div>
-                <small>Browser memory · resets on reload</small>
-              </section>
-              <div class="standalone-sql-history-label"><span>Recent history</span><small>3 entries</small></div>
-              <button type="button" data-sql-prototype-query="read"><span>READ</span><strong>Recent orders</strong><small>bookstore.order_summary</small></button>
-              <button type="button" data-sql-prototype-query="write"><span>WRITE</span><strong>Mark order shipped</strong><small>Requires write mode</small></button>
-              <button type="button" data-sql-prototype-query="error"><span>ERROR</span><strong>Missing relation</strong><small>42P01</small></button>
-              <p>History remains in memory and clears when this page reloads.</p>
-            </aside>
-            <div class="standalone-sql-panes" id="standalone-sql-panes" data-active-pane="editor">
-              <section class="standalone-sql-editor-panel">
-                <button class="standalone-sql-pane-heading" id="show-standalone-sql-editor" type="button" aria-expanded="true"><span><span class="eyebrow">Browser-local draft</span><strong>Script</strong></span><span id="standalone-sql-editor-state">Ready</span></button>
-                <button class="standalone-sql-queries-toggle" id="toggle-standalone-sql-history" type="button" aria-label="Open saved queries" aria-expanded="false"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 4.5h10v11H5zM8 8h4M8 11h4"/></svg><span>Queries</span></button>
+          <div class="standalone-sql-panes" id="standalone-sql-panes" data-active-pane="editor">
+            <section class="standalone-sql-editor-panel">
+              <header class="standalone-sql-head">
+                <button class="standalone-sql-heading-toggle" id="show-standalone-sql-editor" type="button" aria-expanded="true"><span class="eyebrow">Browser-local draft · no execution</span><span><strong>SQL Console</strong><span class="prototype-badge">Script</span></span></button>
+                <label class="standalone-sql-view-select" for="standalone-sql-view"><span>View</span><select id="standalone-sql-view" aria-label="SQL Console view"><option value="orders">Order review</option><option value="customers">Customer lookup</option><option value="scratchpad">Operations scratchpad</option></select></label>
+                <dl class="standalone-sql-target" aria-label="SQL target identity">
+                  <div><dt>Connection</dt><dd id="standalone-sql-profile">No linked profile</dd></div>
+                  <div><dt>Database</dt><dd id="standalone-sql-database">Not selected</dd></div>
+                  <div><dt>Namespace</dt><dd id="standalone-sql-namespace">Not selected</dd></div>
+                </dl>
+                <div class="standalone-sql-head-actions">
+                  <button class="shared-icon-button standalone-sql-write-button" id="standalone-sql-write-toggle" type="button" aria-label="Allow writes" aria-pressed="false" aria-describedby="standalone-sql-write-help" data-tooltip="Allow writes"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="5" y="9" width="10" height="7" rx="2"/><path d="M7 9V7a3 3 0 0 1 5.8-1"/></svg></button>
+                  <button class="shared-icon-button standalone-sql-queries-toggle" id="toggle-standalone-sql-history" type="button" aria-label="Open saved queries" aria-expanded="false" data-tooltip="Queries"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 4.5h10v11H5zM8 8h4M8 11h4"/></svg><span>Queries</span></button>
+                  <button class="shared-icon-button" id="close-standalone-sql" type="button" aria-label="Close SQL Console" data-tooltip="Close SQL Console"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button>
+                </div>
+              </header>
+              <div class="standalone-sql-write-warning" id="standalone-sql-write-warning" hidden><strong>WRITE MODE ENABLED</strong><span>Future executions may change data or schema objects using the selected PostgreSQL role. Target: <b id="standalone-sql-write-target">No PostgreSQL target selected</b></span><small>This Phase 1 prototype never sends SQL to PostgreSQL.</small></div>
+              <p class="sr-only" id="standalone-sql-write-help">Write mode is off by default and resets when the target changes, this workspace closes, or the page reloads.</p>
+              <div class="standalone-sql-body">
+                <aside class="standalone-sql-history" id="standalone-sql-history" aria-label="SQL Console history">
+                  <header><div><span class="eyebrow">SQL workspace</span><strong>Queries</strong></div><span>Local only</span><button id="close-standalone-sql-history" type="button" aria-label="Close queries"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button></header>
+                  <section class="standalone-sql-saved">
+                    <header><span>Saved queries</span><button id="save-standalone-sql-sidebar" type="button" aria-label="Save current query">+</button></header>
+                    <div id="standalone-sql-saved-list"></div>
+                    <small>Browser memory · resets on reload</small>
+                  </section>
+                  <div class="standalone-sql-history-label"><span>Recent history</span><small>3 entries</small></div>
+                  <button type="button" data-sql-prototype-query="read"><span>READ</span><strong>Recent orders</strong><small>bookstore.order_summary</small></button>
+                  <button type="button" data-sql-prototype-query="write"><span>WRITE</span><strong>Mark order shipped</strong><small>Requires write mode</small></button>
+                  <button type="button" data-sql-prototype-query="error"><span>ERROR</span><strong>Missing relation</strong><small>42P01</small></button>
+                  <p>History remains in memory and clears when this page reloads.</p>
+                </aside>
                 <div class="standalone-sql-editor-content" id="standalone-sql-editor-content">
                   <textarea id="standalone-sql-input" aria-label="SQL script" spellcheck="false">SELECT
     order_id,
@@ -229,12 +225,12 @@ LIMIT 25;</textarea>
                     <button class="button button-primary" type="button" id="run-standalone-sql">Run preview</button>
                   </footer>
                 </div>
-              </section>
-              <section class="standalone-sql-result-panel" aria-label="SQL result preview">
-                <button class="standalone-sql-pane-heading" id="show-standalone-sql-result" type="button" aria-expanded="false"><span><span class="eyebrow">Synthetic response</span><strong>Result preview</strong></span><span class="standalone-sql-result-status" id="standalone-sql-result-status">Not run</span></button>
-                <div class="standalone-sql-result" id="standalone-sql-result" aria-live="polite" hidden><div class="standalone-sql-empty"><span>SQL</span><strong>Ready for a local preview</strong><p>Run the draft to review table, command, error, loading, and empty states. No database request will be made.</p></div></div>
-              </section>
-            </div>
+              </div>
+            </section>
+            <section class="standalone-sql-result-panel" aria-label="SQL result preview">
+              <button class="standalone-sql-pane-heading" id="show-standalone-sql-result" type="button" aria-expanded="false"><span><span class="eyebrow">Synthetic response</span><strong>Result preview</strong></span><span class="standalone-sql-result-status" id="standalone-sql-result-status">Not run</span></button>
+              <div class="standalone-sql-result" id="standalone-sql-result" aria-live="polite" hidden><div class="standalone-sql-empty"><span>SQL</span><strong>Ready for a local preview</strong><p>Run the draft to review table, command, error, loading, and empty states. No database request will be made.</p></div></div>
+            </section>
           </div>
         </section>
 
