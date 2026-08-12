@@ -61,7 +61,6 @@
     "schema_project_create": "allow",
     "schema_project_open": "allow",
     "schema_connection_open": "allow",
-    "schema_migration_preview": "allow",
-    "schema_migration_apply": "allow"
+    "schema_migration_preview": "allow"
   }
 }

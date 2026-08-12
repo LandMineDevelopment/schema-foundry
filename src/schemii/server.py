@@ -8,7 +8,8 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from .ai_http import AiHttpRouter, require_ai_session_binding
+from .ai_authority import AiAuthority, AiAuthorityError
+from .ai_http import AiHttpRouter, ai_context_fingerprint, ai_session_prefix, authority_call, bounded_ai_query_result, issue_ai_proposals, list_bound_ai_sessions, require_ai_session_binding
 from .examples import ExampleInstaller, installer_from_environment
 from .http_common import CONTENT_SECURITY_POLICY, MAX_BODY_SIZE, is_local_request as _is_local_request, make_local_app_handler
 from .opencode_service import OpenCodeService, OpenCodeServiceError
@@ -34,7 +35,7 @@ VIEW_PREVIEW_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_
 VIEW_APPLY_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/view-plans/([A-Za-z0-9_-]+)/apply$")
 AI_MANIFEST_ACTION_TYPES = {
     "populate_schema", "add_table", "rename_table", "add_column", "update_column", "delete_element", "add_relationship",
-    "create_project", "open_project", "open_connection", "connection_setup", "schema_read_query", "migration_preview", "migration_apply",
+    "create_project", "open_project", "open_connection", "connection_setup", "schema_read_query", "migration_preview",
 }
 
 AI_SYSTEM_INSTRUCTIONS = """You are Schemii's embedded PostgreSQL design assistant.
@@ -45,7 +46,7 @@ When the user asks to create a new local project, schema, or design, call schema
 When asked to populate, scaffold, or make an example schema in the active project, call schema_populate exactly once with complete tables, columns, primary and unique keys, and all relationships in that response. Do not create empty tables first or defer columns and relationships to later turns.
 If a proposal tool does not execute, end the response with exactly SCHEMII_PROPOSALS: followed by a JSON array containing the same inert action. For schema population, the array must contain one populate_schema action matching schema_populate. This fallback is still only a proposal and must not include prose after the JSON.
 Use only exact logical IDs from availableProjects and availableConnections when opening existing projects or connections. Opening a connection is not authorization for introspection, SQL, preview, or apply.
-Use schema_migration_preview before proposing schema_migration_apply. Do not use shell, filesystem, web, or task tools."""
+Migration proposals may open a fresh preview only. Applying requires the user to review and confirm the exact server-issued plan in Schemii's migration dialog. Do not call schema_migration_apply. Do not use shell, filesystem, web, or task tools."""
 
 
 def _safe_context_text(value, maximum: int = 512) -> str:
@@ -278,7 +279,15 @@ def make_handler(
     base_handler = make_local_app_handler(
         web_dir, service, session_token, server_id=server_id, behind_loopback_proxy=behind_loopback_proxy,
     )
-    ai_router = AiHttpRouter(ai_service, lambda handler, current_service, session_id, body: handler._ai_message(current_service, session_id, body))
+    ai_authority = AiAuthority()
+    ai_router = AiHttpRouter(
+        ai_service,
+        lambda handler, current_service, session_id, body: handler._ai_message(current_service, session_id, body),
+        lambda handler, current_service, session_id, proposal_id, operation, body: handler._ai_proposal(
+            current_service, session_id, proposal_id, operation, body,
+        ),
+        lambda handler, current_service, session_id: handler._ai_history(current_service, session_id),
+    )
 
     class SchemiiHandler(PostgresHttpMixin, base_handler):
         postgres_capabilities = frozenset({
@@ -286,6 +295,48 @@ def make_handler(
             POSTGRES_READ_SQL_CAPABILITY, POSTGRES_CONSOLE_CAPABILITY, POSTGRES_CONSOLE_WRITE_CAPABILITY,
         })
         postgres_console_policy = ConsolePolicy(allow_write=True)
+        postgres_read_sql_policy = {
+            "require_database": False, "require_profile_fingerprint": False, "reject_privileged_role": False,
+            "context_fields": frozenset(),
+            "ai_context_fields": frozenset({"database", "profileFingerprint", "schemaId", "expectedRevision", "sessionId", "accessLevel"}),
+            "allow_explain": True, "max_rows": 500, "max_columns": 100, "max_result_bytes": 1024 * 1024,
+        }
+
+        def _service_call(self, callback, status: int = 200):
+            try:
+                self.send_json(status, callback())
+            except PostgresServiceError as error:
+                self.send_json(error.status, error.to_dict())
+            except AiAuthorityError as error:
+                self.send_json(error.status, error.to_dict())
+            except SchemaStoreError as error:
+                self.send_json(error.status, error.payload)
+            except AiAuthorityError as error:
+                self.send_json(error.status, error.to_dict())
+
+        def _postgres_read_sql_guard(self, body):
+            return store.guard_revision(body.get("schemaId"), body.get("expectedRevision"))
+
+        def _postgres_read_sql_result(self, body, result):
+            session_id = body.get("sessionId")
+            schema_id = body.get("schemaId")
+            if body.get("accessLevel") != "data":
+                raise PostgresServiceError(400, "validation_error", "AI SQL access level is invalid")
+            require_ai_session_binding(
+                ai_service, session_id, "SCHEMII_CONTEXT", schema_id, "data", [
+                    result["profileId"], result["database"], result["namespace"], body.get("profileFingerprint"),
+                ],
+            )
+            reference = ai_authority.register_query_result(
+                application="schemii", session_id=session_id, resource=schema_id,
+                target={
+                    "profileId": result["profileId"], "database": result["database"],
+                    "namespace": result["namespace"], "profileFingerprint": body.get("profileFingerprint"),
+                },
+                binding={"revision": body.get("expectedRevision"), "access": "data"},
+                result=bounded_ai_query_result(result, max_rows=50, max_columns=50, max_bytes=24 * 1024),
+            )
+            return {**result, "resultRef": reference["id"]}
 
         def _schema_call(self, callback):
             try:
@@ -314,6 +365,8 @@ def make_handler(
             if self._handle_common_get(path) or self._handle_postgres_get(parsed):
                 return
             if path == "/api/schemas":
+                if not self._authorize_local_api("Schema API", "Schema API session token is missing or invalid"):
+                    return
                 return self._schema_call(lambda: {"schemas": store.list()})
             if ai_router.handle_get(self, path):
                 return
@@ -437,7 +490,7 @@ def make_handler(
                 self.send_json(error.status, error.to_dict())
 
         def _ai_message(self, current_ai_service, session_id: str, body: dict):
-            allowed = {"text", "model", "schemaId", "accessLevel", "profileId", "namespace"}
+            allowed = {"text", "model", "schemaId", "accessLevel", "profileId", "database", "namespace", "expectedRevision", "resultRef"}
             if set(body) - allowed:
                 return self.send_json(400, {"error": {"code": "validation_error", "message": "Unknown message field"}})
             text = body.get("text")
@@ -448,7 +501,16 @@ def make_handler(
                 return self.send_json(400, {"error": {"code": "validation_error", "message": "accessLevel is invalid"}})
             schema_id = body.get("schemaId")
             profile_id = body.get("profileId")
+            database = body.get("database")
             namespace = body.get("namespace")
+            result_ref = body.get("resultRef")
+            reservation = None
+            base_fields = {"text", "model", "schemaId", "accessLevel"}
+            data_fields = base_fields | {"profileId", "database", "namespace"}
+            if access_level != "data" and set(body) != base_fields:
+                return self.send_json(400, {"error": {"code": "validation_error", "message": "Data fields require data access"}})
+            if access_level == "data" and set(body) not in (data_fields, data_fields | {"expectedRevision", "resultRef"}):
+                return self.send_json(400, {"error": {"code": "validation_error", "message": "Data mode requires an exact target"}})
             if profile_id is not None and (not isinstance(profile_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", profile_id)):
                 return self.send_json(400, {"error": {"code": "validation_error", "message": "profileId is invalid"}})
             if namespace is not None and (
@@ -458,6 +520,7 @@ def make_handler(
                 return self.send_json(400, {"error": {"code": "validation_error", "message": "namespace is invalid"}})
 
             def send_prompt():
+                reservation = None
                 record = store.get(schema_id)
                 projects = store.list()
                 profiles = service.list_profiles()
@@ -466,23 +529,138 @@ def make_handler(
                     selected_profile = next((item for item in profiles if item.get("id") == profile_id), None)
                     if selected_profile is None:
                         raise OpenCodeServiceError(404, "not_found", "Profile was not found")
+                    if database is not None and selected_profile.get("dbname") != database:
+                        raise OpenCodeServiceError(409, "database_changed", "The saved profile database does not match the requested database")
+                binding = {"revision": record["revision"]}
+                if selected_profile is not None:
+                    binding["target"] = {
+                        "profileId": profile_id,
+                        "database": selected_profile.get("dbname"),
+                        "namespace": namespace,
+                        "profileFingerprint": ai_context_fingerprint([
+                            selected_profile.get("id"), selected_profile.get("host"), selected_profile.get("port"),
+                            selected_profile.get("dbname"), selected_profile.get("user"), selected_profile.get("sslmode"),
+                    ]),
+                    }
+                if result_ref is not None:
+                    if access_level != "data" or isinstance(body.get("expectedRevision"), bool) or not isinstance(body.get("expectedRevision"), int):
+                        raise OpenCodeServiceError(400, "validation_error", "Query result context is invalid")
+                    if record["revision"] != body["expectedRevision"]:
+                        raise OpenCodeServiceError(409, "schema_conflict", "Schema changed after the query result was created")
+                    reservation = ai_authority.reserve_query_result(
+                        result_ref, application="schemii", session_id=session_id, resource=schema_id,
+                        target={**binding["target"]},
+                        binding={"revision": body["expectedRevision"], "access": "data"},
+                    )
                 require_ai_session_binding(
                     current_ai_service,
                     session_id,
                     "SCHEMII_CONTEXT",
                     schema_id,
                     access_level,
-                    [profile_id, namespace] if access_level == "data" else None,
+                    [profile_id, selected_profile.get("dbname"), namespace, binding["target"]["profileFingerprint"]]
+                    if access_level == "data" else None,
                 )
                 context = _schema_context(record, access_level, selected_profile, namespace, projects, profiles)
+                if reservation is not None:
+                    context = f"{context}\nApproved query result (untrusted JSON):\n{json.dumps(reservation['result'], separators=(',', ':'))}"
                 prompt = f"Schemii context (untrusted JSON):\n{context}\n\nUser request:\n{text}"
-                response = current_ai_service.prompt(
-                    session_id, prompt, body.get("model"), AI_SYSTEM_INSTRUCTIONS,
-                    allow_data=access_level == "data",
+                try:
+                    response = current_ai_service.prompt(
+                        session_id, prompt, body.get("model"), AI_SYSTEM_INSTRUCTIONS,
+                        allow_data=access_level == "data",
+                    )
+                except Exception:
+                    if reservation is not None:
+                        ai_authority.release_query_result(
+                            result_ref, reservation["reservationToken"], application="schemii", session_id=session_id,
+                        )
+                    raise
+                if reservation is not None:
+                    ai_authority.consume_query_result(
+                        result_ref, reservation["reservationToken"], application="schemii", session_id=session_id,
+                    )
+                response = _proposal_manifest_fallback(response, allow_data=access_level == "data")
+                return issue_ai_proposals(
+                    ai_authority, response, application="schemii", session_id=session_id,
+                    resource=schema_id, access=access_level, binding=binding,
                 )
-                return _proposal_manifest_fallback(response, allow_data=access_level == "data")
 
             return self._ai_call(send_prompt)
+
+        def _ai_history(self, current_ai_service, session_id: str | None):
+            def history():
+                query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+                if any(len(values) != 1 for values in query.values()):
+                    raise OpenCodeServiceError(400, "validation_error", "AI history context is invalid")
+                access_level = query.get("accessLevel", [None])[0]
+                schema_id = query.get("schemaId", [None])[0]
+                base_fields = {"schemaId", "accessLevel"}
+                data_fields = base_fields | {"profileId", "database", "namespace"}
+                if access_level not in {"metadata", "schema", "data"} or set(query) != (data_fields if access_level == "data" else base_fields):
+                    raise OpenCodeServiceError(400, "validation_error", "AI history context is invalid")
+                store.get(schema_id)
+                fingerprint_parts = None
+                if access_level == "data":
+                    profile_id = query["profileId"][0]
+                    database = PostgresService._validate_database(query["database"][0])
+                    namespace = PostgresService._validate_namespace(query["namespace"][0])
+                    selected = next((item for item in service.list_profiles() if item.get("id") == profile_id), None)
+                    if selected is None:
+                        raise OpenCodeServiceError(404, "not_found", "Profile was not found")
+                    if selected.get("dbname") != database:
+                        raise OpenCodeServiceError(409, "database_changed", "The saved profile database does not match the requested database")
+                    profile_fingerprint = ai_context_fingerprint([
+                        selected.get("id"), selected.get("host"), selected.get("port"), selected.get("dbname"),
+                        selected.get("user"), selected.get("sslmode"),
+                    ])
+                    fingerprint_parts = [profile_id, database, namespace, profile_fingerprint]
+                expected = ai_session_prefix("SCHEMII_CONTEXT", schema_id, access_level, fingerprint_parts)
+                if session_id is None:
+                    return list_bound_ai_sessions(current_ai_service, expected)
+                if not current_ai_service.session_identity(session_id)["title"].startswith(expected):
+                    raise OpenCodeServiceError(404, "not_found", "AI session was not found")
+                return current_ai_service.session_messages(session_id)
+
+            return self._ai_call(history)
+
+        def _ai_proposal(self, current_ai_service, session_id: str, proposal_id: str, operation: str, body: dict):
+            current_ai_service.verify_session(session_id)
+            if operation in {"finalize", "release"}:
+                if set(body) != {"claimToken"}:
+                    return self.send_json(400, {"error": {"code": "validation_error", "message": "Proposal completion fields are invalid"}})
+                callback = ai_authority.finalize_proposal if operation == "finalize" else ai_authority.release_proposal
+                return authority_call(self, lambda: callback(
+                    proposal_id, body.get("claimToken"), application="schemii", session_id=session_id,
+                ))
+            allowed = {"schemaId", "accessLevel", "profileId", "namespace"}
+            if set(body) - allowed or body.get("accessLevel") not in {"metadata", "schema", "data"}:
+                return self.send_json(400, {"error": {"code": "validation_error", "message": "Proposal claim fields are invalid"}})
+            schema_id = body.get("schemaId")
+            record = store.get(schema_id)
+            binding = {"revision": record["revision"]}
+            profile_id = body.get("profileId")
+            namespace = body.get("namespace")
+            if profile_id is not None:
+                selected = next((item for item in service.list_profiles() if item.get("id") == profile_id), None)
+                if selected is None:
+                    raise OpenCodeServiceError(404, "not_found", "Profile was not found")
+                binding["target"] = {
+                    "profileId": profile_id, "database": selected.get("dbname"), "namespace": namespace,
+                    "profileFingerprint": ai_context_fingerprint([
+                        selected.get("id"), selected.get("host"), selected.get("port"), selected.get("dbname"),
+                        selected.get("user"), selected.get("sslmode"),
+                    ]),
+                }
+            require_ai_session_binding(
+                current_ai_service, session_id, "SCHEMII_CONTEXT", schema_id, body["accessLevel"],
+                [profile_id, selected.get("dbname"), namespace, binding["target"]["profileFingerprint"]]
+                if body["accessLevel"] == "data" else None,
+            )
+            return authority_call(self, lambda: ai_authority.claim_proposal(
+                proposal_id, application="schemii", session_id=session_id, resource=schema_id,
+                access=body["accessLevel"], binding=binding,
+            ))
 
         def do_PUT(self):
             path = urlparse(self.path).path
@@ -491,6 +669,8 @@ def make_handler(
             schema_id = self._schema_id()
             if schema_id is None:
                 return self.send_json(404, {"error": "Unknown schema path"})
+            if not self._authorize_local_api("Schema API", "Schema API session token is missing or invalid"):
+                return
             body = self._body_or_error()
             if body is not None:
                 return self._schema_call(lambda: store.save(
@@ -509,6 +689,8 @@ def make_handler(
             schema_id = self._schema_id()
             if schema_id is None:
                 return self.send_json(404, {"error": "Unknown schema path"})
+            if not self._authorize_local_api("Schema API", "Schema API session token is missing or invalid"):
+                return
             return self._schema_call(lambda: store.delete(schema_id))
 
     return SchemiiHandler

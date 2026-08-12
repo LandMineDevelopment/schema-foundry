@@ -134,6 +134,19 @@ class SchemaStore:
                 raise SchemaStoreError(404, "not_found", "Schema was not found")
             return json.loads(json.dumps(found[1]))
 
+    @contextmanager
+    def guard_revision(self, schema_id: str, expected_revision: Any):
+        schema_id = self.validate_id(schema_id)
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 1:
+            raise SchemaStoreError(400, "invalid_schema_binding", "expectedRevision is invalid")
+        with self._schema_lock(schema_id):
+            found = self._find(schema_id)
+            if found is None:
+                raise SchemaStoreError(404, "not_found", "Schema was not found")
+            if found[1].get("revision", 0) != expected_revision:
+                raise SchemaStoreError(409, "schema_conflict", "Schema changed in another session; reload before continuing", currentRevision=found[1].get("revision", 0))
+            yield json.loads(json.dumps(found[1]))
+
     def _find(self, schema_id: str) -> tuple[Path, dict[str, Any]] | None:
         for path, record in self._records():
             if record["id"] == schema_id:

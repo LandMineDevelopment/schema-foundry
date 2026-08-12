@@ -270,7 +270,7 @@ class SchemerServerTests(unittest.TestCase):
             "profileId": "shared", "database": "schemii", "namespace": "bookstore", "columns": [{"name": "count"}], "rows": [[1]],
             "rowCount": 1, "truncated": False, "maxRows": 100, "maxColumns": 50, "maxResultBytes": 256 * 1024,
         }
-        self.assertEqual(self.request(path, "POST", {**base, **target, "queryResult": query_result}, True)[0], 200)
+        self.assertEqual(self.request(path, "POST", {**base, **target, "queryResult": query_result}, True)[0], 400)
         self.assertEqual(self.request(path, "POST", {**base, **target, "queryResult": {**query_result, "database": "other"}}, True)[0], 400)
         dashboard_message = {**base, "accessLevel": "dashboard", "queryResult": query_result}
         for key in target:

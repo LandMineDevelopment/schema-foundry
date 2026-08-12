@@ -65,7 +65,7 @@
     const {
       sessionClient, root, trigger, settingsDialog, historyDialog, storageKey, getContext,
       buildMessagePayload, createSessionTitle, contextKey = () => null, parseSession = session => ({ title: session.title || "Untitled chat", key: null }),
-      renderAction, validateAction, applyAction, toolLabels = {}, skillLabels = {}, labels = {},
+      buildProposalClaimPayload, buildHistoryQuery, renderAction, validateAction, applyAction, toolLabels = {}, skillLabels = {}, labels = {},
       onOpenChange = () => {}, onAccessChange = () => {}, onNewChat = () => {}, state: suppliedState,
       canViewSession = () => true, extraBusyControls = [],
     } = options;
@@ -445,7 +445,24 @@
       card.append(marker, name, statusNode); elements.messages.append(card);
     }
 
-    function renderGenericAction(action, capture) {
+    async function proposalRequest(proposal, operation, body) {
+      if (!proposal?.proposalId || !proposal?.sessionId) throw new Error("The proposal authority is unavailable");
+      return request(`/api/ai/sessions/${encodeURIComponent(proposal.sessionId)}/proposals/${encodeURIComponent(proposal.proposalId)}/${operation}`, {
+        method: "POST", body: JSON.stringify(body),
+      });
+    }
+
+    async function claimProposal(proposal, capture) {
+      const body = buildProposalClaimPayload ? buildProposalClaimPayload(capture, elements.access.value) : {};
+      return proposalRequest(proposal, "claim", body);
+    }
+
+    async function completeProposal(proposal, operation, claimToken) {
+      return proposalRequest(proposal, operation, { claimToken });
+    }
+
+    function renderGenericAction(proposal, capture) {
+      const action = proposal.action;
       let normalized;
       try { normalized = validateAction?.(action, capture); } catch { return; }
       if (!normalized) return;
@@ -457,13 +474,21 @@
       const button = document.createElement("button"); button.type = "button"; button.className = "button button-primary"; button.textContent = normalized.buttonLabel || (normalized.destructive ? "Review deletion" : "Review & confirm");
       button.addEventListener("click", async () => {
         card.querySelectorAll(".ai-action-error").forEach(error => error.remove()); button.disabled = true;
-        try { const appliedLabel = await applyAction(normalized, capture); button.textContent = appliedLabel || normalized.appliedLabel || "Applied"; card.classList.add("applied"); }
-        catch (error) { button.disabled = false; const detail = document.createElement("p"); detail.className = "ai-action-error"; detail.textContent = error.message; card.append(detail); }
+        let claim;
+        try {
+          claim = await claimProposal(proposal, capture);
+          const appliedLabel = await applyAction({ ...normalized, action: claim.action }, capture);
+          await completeProposal(proposal, "finalize", claim.claimToken);
+          button.textContent = appliedLabel || normalized.appliedLabel || "Applied"; card.classList.add("applied");
+        } catch (error) {
+          if (claim && error.proposalOutcome !== "ambiguous") await completeProposal(proposal, "release", claim.claimToken).catch(() => {});
+          button.disabled = false; const detail = document.createElement("p"); detail.className = "ai-action-error"; detail.textContent = error.message; card.append(detail);
+        }
       });
       card.append(button); elements.messages.append(card);
     }
 
-    function renderResponse(response, capture) {
+    function renderResponse(response, capture, sessionId = state.sessionId) {
       let renderedText = false;
       for (const part of response.parts ?? []) {
         if (part?.type === "text" && part.text) { appendMessage("assistant", part.text); renderedText = true; }
@@ -471,9 +496,10 @@
         else if (part?.type === "tool" || part?.type === "skill") renderToolPart(part);
       }
       if (!renderedText && response.text) appendMessage("assistant", response.text);
-      for (const action of response.actions ?? []) {
-        if (renderAction) renderAction(action, capture, api);
-        else renderGenericAction(action, capture);
+      for (const item of response.proposals ?? []) {
+        const proposal = { ...item, sessionId };
+        if (renderAction) renderAction(proposal, capture, api);
+        else renderGenericAction(proposal, capture);
       }
       scrollToEnd();
     }
@@ -509,7 +535,7 @@
         const response = await request(`/api/ai/sessions/${encodeURIComponent(sessionId)}/messages`, { method: "POST", body: JSON.stringify(payload) });
         if (requestGeneration !== state.requestGeneration) return;
         await Promise.race([stream.done, new Promise(resolve => setTimeout(resolve, 750))]);
-        renderResponse(response, capture); activity.finish("completed");
+        renderResponse(response, capture, sessionId); activity.finish("completed");
       } catch (error) {
         if (requestGeneration === state.requestGeneration) {
           activity.finish("error"); appendMessage("assistant", `AI unavailable: ${error.message}`);
@@ -532,15 +558,15 @@
       const date = new Date(value); return Number.isNaN(date.getTime()) ? "Saved conversation" : date.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
     }
 
-    async function restoreSession(session, binding) {
+    async function restoreSession(session, binding, historyQuery, historyKey) {
       try {
         const currentKey = contextKey(getContext(elements.access.value), elements.access.value);
-        if (!canViewSession(binding, currentKey, elements.access.value)) throw new Error("Select the original data disclosure and PostgreSQL target before opening this conversation");
-        const history = await request(`/api/ai/sessions/${encodeURIComponent(session.id)}/messages`, { method: "GET" });
+        if (currentKey !== historyKey || !canViewSession(binding, currentKey, elements.access.value)) throw new Error("The application context changed; reopen history before continuing");
+        const history = await request(`/api/ai/sessions/${encodeURIComponent(session.id)}/messages?${historyQuery}`, { method: "GET" });
         state.requestGeneration += 1; elements.messages.replaceChildren();
         for (const message of history.messages ?? []) {
           if (message.role === "user") appendMessage("user", message.text);
-          if (message.role === "assistant") renderResponse({ parts: message.parts ?? [], text: message.text ?? "", actions: [] }, null);
+          if (message.role === "assistant") renderResponse({ parts: message.parts ?? [], text: message.text ?? "", actions: [], proposals: [] }, null, session.id);
         }
         if (!elements.messages.children.length) appendMessage("assistant", "This saved conversation has no displayable messages.");
         const resumable = binding.key == null || binding.key === currentKey;
@@ -556,7 +582,13 @@
       elements.historyList.replaceChildren();
       const loading = document.createElement("p"); loading.className = "ai-history-empty"; loading.textContent = "Loading conversations..."; elements.historyList.append(loading);
       try {
-        const history = await request("/api/ai/sessions", { method: "GET" }); elements.historyList.replaceChildren();
+        const accessLevel = elements.access.value;
+        const capture = getContext(accessLevel);
+        if (!capture) throw new Error("Select an application context before opening history");
+        const historyKey = contextKey(capture, accessLevel);
+        const historyQuery = new URLSearchParams(buildHistoryQuery ? buildHistoryQuery(capture, accessLevel) : {}).toString();
+        if (!historyQuery) throw new Error("AI history context is unavailable");
+        const history = await request(`/api/ai/sessions?${historyQuery}`, { method: "GET" }); elements.historyList.replaceChildren();
         if (!(history.sessions ?? []).length) { loading.textContent = "No saved conversations yet."; elements.historyList.append(loading); return; }
         for (const session of history.sessions) {
           const binding = parseSession(session);
@@ -564,7 +596,7 @@
           const copy = document.createElement("div"); copy.className = "ai-history-copy";
           const title = document.createElement("strong"); title.textContent = binding.title;
           const date = document.createElement("span"); date.textContent = `${formatHistoryDate(session.updatedAt ?? session.createdAt)}${session.id === state.sessionId ? " / Current" : ""}`;
-          const open = document.createElement("button"); open.type = "button"; open.className = "button button-ghost"; open.textContent = session.id === state.sessionId ? "Reopen" : "Open"; open.addEventListener("click", () => restoreSession(session, binding));
+          const open = document.createElement("button"); open.type = "button"; open.className = "button button-ghost"; open.textContent = session.id === state.sessionId ? "Reopen" : "Open"; open.addEventListener("click", () => restoreSession(session, binding, historyQuery, historyKey));
           const remove = document.createElement("button"); remove.type = "button"; remove.className = "button button-ghost ai-history-delete"; remove.textContent = "Delete";
           remove.addEventListener("click", async () => {
             if (!confirm(`Permanently delete chat “${binding.title}”?`)) return;
@@ -576,7 +608,11 @@
       } catch (error) { loading.textContent = `Could not load chat history: ${error.message}`; }
     }
 
-    const api = Object.freeze({ appendMessage, appendQueryResult, renderResponse, sendMessage, scrollToEnd, get accessLevel() { return elements.access.value; }, get state() { return state; } });
+    const api = Object.freeze({
+      appendMessage, appendQueryResult, renderResponse, sendMessage, scrollToEnd,
+      claimProposal, completeProposal,
+      get accessLevel() { return elements.access.value; }, get state() { return state; },
+    });
     trigger.addEventListener("click", () => setOpen(!root.classList.contains("open")));
     elements.close.addEventListener("click", () => setOpen(false));
     elements.newChat.addEventListener("click", () => resetConversation());

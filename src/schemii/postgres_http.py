@@ -227,32 +227,35 @@ class PostgresHttpMixin:
             if policy.get("require_profile_fingerprint"):
                 allowed_fields.add("profileFingerprint")
             allowed_fields |= set(policy.get("context_fields", ()))
+            ai_fields = set(policy.get("ai_context_fields", ()))
             compatible_fields = {"database", "namespace", "sql"}
             valid_fields = (
                 isinstance(body, dict)
-                and (set(body) == allowed_fields or (not policy["require_database"] and set(body) == compatible_fields))
+                and (
+                    set(body) == allowed_fields or set(body) == allowed_fields | ai_fields
+                    or (not policy["require_database"] and set(body) == compatible_fields)
+                )
             )
             if not valid_fields:
                 self.send_json(400, {"error": {"code": "validation_error", "message": "SQL request fields are invalid"}})
             else:
                 def execute_sql():
-                    guard = getattr(self, "_postgres_read_sql_guard", None)
+                    def execute():
+                        ai_request = bool(ai_fields) and ai_fields <= set(body)
+                        result = self.service.execute_read_only_sql(
+                            sql_match.group(1), body.get("namespace"), body.get("sql"), database=body.get("database"),
+                            expected_profile_fingerprint=body.get("profileFingerprint"),
+                            reject_privileged_role=policy.get("reject_privileged_role", False) or ai_request,
+                            allow_explain=policy["allow_explain"] and not ai_request, max_rows=policy["max_rows"],
+                            max_columns=policy["max_columns"], max_result_bytes=policy["max_result_bytes"],
+                        )
+                        result_handler = getattr(self, "_postgres_read_sql_result", None)
+                        return result_handler(body, result) if result_handler is not None and ai_request else result
+                    guard = getattr(self, "_postgres_read_sql_guard", None) if ai_fields <= set(body) else None
                     if guard is None:
-                        return self.service.execute_read_only_sql(
-                            sql_match.group(1), body.get("namespace"), body.get("sql"), database=body.get("database"),
-                            expected_profile_fingerprint=body.get("profileFingerprint"),
-                            reject_privileged_role=policy.get("reject_privileged_role", False),
-                            allow_explain=policy["allow_explain"], max_rows=policy["max_rows"],
-                            max_columns=policy["max_columns"], max_result_bytes=policy["max_result_bytes"],
-                        )
+                        return execute()
                     with guard(body):
-                        return self.service.execute_read_only_sql(
-                            sql_match.group(1), body.get("namespace"), body.get("sql"), database=body.get("database"),
-                            expected_profile_fingerprint=body.get("profileFingerprint"),
-                            reject_privileged_role=policy.get("reject_privileged_role", False),
-                            allow_explain=policy["allow_explain"], max_rows=policy["max_rows"],
-                            max_columns=policy["max_columns"], max_result_bytes=policy["max_result_bytes"],
-                        )
+                        return execute()
                 self._service_call(execute_sql)
         elif profile_match.group(2) == "test":
             self._service_call(lambda: self.service.test_profile(profile_match.group(1)))

@@ -4,6 +4,7 @@ import json
 import re
 from typing import Any, Callable
 
+from .ai_authority import AiAuthorityError
 from .opencode_service import OpenCodeService, OpenCodeServiceError
 
 
@@ -11,6 +12,10 @@ AI_MAX_BODY_SIZE = 128 * 1024
 AI_AUTH_PATH = re.compile(r"^/api/ai/auth/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})$")
 AI_SESSION_PATH = re.compile(r"^/api/ai/sessions/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})(?:/(messages))?$")
 AI_ACTIVITY_PATH = re.compile(r"^/api/ai/sessions/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})/activity$")
+AI_PROPOSAL_PATH = re.compile(
+    r"^/api/ai/sessions/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})/proposals/"
+    r"(proposal_[A-Za-z0-9_-]{16,128})/(claim|finalize|release)$"
+)
 
 
 def ai_context_fingerprint(parts: list[Any]) -> str:
@@ -30,14 +35,27 @@ def require_ai_session_binding(
     access_level: str,
     fingerprint_parts: list[Any] | None = None,
 ) -> None:
-    suffix = f":{ai_context_fingerprint(fingerprint_parts)}" if fingerprint_parts is not None else ""
-    expected = f"{prefix}:{resource_id}:{access_level}{suffix} "
+    expected = ai_session_prefix(prefix, resource_id, access_level, fingerprint_parts)
     if not service.session_identity(session_id)["title"].startswith(expected):
         raise OpenCodeServiceError(
             409,
             "session_context_changed",
             "The AI conversation belongs to a different resource, disclosure level, or data target",
         )
+
+
+def ai_session_prefix(prefix: str, resource_id: str, access_level: str, fingerprint_parts: list[Any] | None = None) -> str:
+    suffix = f":{ai_context_fingerprint(fingerprint_parts)}" if fingerprint_parts is not None else ""
+    return f"{prefix}:{resource_id}:{access_level}{suffix} "
+
+
+def list_bound_ai_sessions(service: OpenCodeService, expected_prefix: str) -> dict[str, Any]:
+    sessions = []
+    for session in service.list_sessions().get("sessions", []):
+        title = session.get("title", "")
+        if isinstance(title, str) and title.startswith(expected_prefix):
+            sessions.append({**session, "title": title[len(expected_prefix):] or "Untitled chat"})
+    return {"sessions": sessions}
 
 
 class AiHttpRouter:
@@ -47,9 +65,13 @@ class AiHttpRouter:
         self,
         service: OpenCodeService | None,
         message_handler: Callable[[Any, OpenCodeService, str, dict[str, Any]], Any],
+        proposal_handler: Callable[[Any, OpenCodeService, str, str, str, dict[str, Any]], Any] | None = None,
+        history_handler: Callable[[Any, OpenCodeService, str | None], Any] | None = None,
     ):
         self.service = service
         self.message_handler = message_handler
+        self.proposal_handler = proposal_handler
+        self.history_handler = history_handler
 
     @staticmethod
     def _authorize(handler) -> bool:
@@ -77,11 +99,17 @@ class AiHttpRouter:
         if path == "/api/ai/status":
             handler._ai_call(service.status)
         elif path == "/api/ai/sessions":
-            handler._ai_call(service.list_sessions)
+            if self.history_handler is None:
+                handler._ai_call(service.list_sessions)
+            else:
+                self.history_handler(handler, service, None)
         elif activity_match:
             self._activity_stream(handler, service, activity_match.group(1))
         elif session_match and session_match.group(2) == "messages":
-            handler._ai_call(lambda: service.session_messages(session_match.group(1)))
+            if self.history_handler is None:
+                handler._ai_call(lambda: service.session_messages(session_match.group(1)))
+            else:
+                self.history_handler(handler, service, session_match.group(1))
         else:
             handler.send_json(404, {"error": "Unknown API path"})
         return True
@@ -109,6 +137,12 @@ class AiHttpRouter:
         elif path == "/api/ai/sessions":
             handler._ai_call(lambda: service.create_session(body.get("title"), body.get("model")), 201)
         else:
+            proposal_match = AI_PROPOSAL_PATH.fullmatch(path)
+            if proposal_match and self.proposal_handler is not None:
+                self.proposal_handler(
+                    handler, service, proposal_match.group(1), proposal_match.group(2), proposal_match.group(3), body,
+                )
+                return True
             session_match = AI_SESSION_PATH.fullmatch(path)
             if not session_match or session_match.group(2) != "messages":
                 handler.send_json(404, {"error": "Unknown API path"})
@@ -156,3 +190,49 @@ class AiHttpRouter:
                 pass
         except (BrokenPipeError, ConnectionResetError):
             pass
+
+
+def issue_ai_proposals(authority, response, *, application, session_id, resource, access, binding):
+    """Replace model-authored actions with server-issued, context-bound envelopes."""
+    if not isinstance(response, dict):
+        return response
+    issued = []
+    for action in response.get("actions", []):
+        if not isinstance(action, dict):
+            continue
+        proposal = authority.register_proposal(
+            application=application,
+            session_id=session_id,
+            resource=resource,
+            access=access,
+            action=action,
+            binding=binding,
+        )
+        issued.append({"proposalId": proposal["id"], "action": proposal["action"]})
+    result = dict(response)
+    result.pop("actions", None)
+    result["proposals"] = issued
+    return result
+
+
+def authority_call(handler, callback, status: int = 200):
+    try:
+        handler.send_json(status, callback())
+    except AiAuthorityError as error:
+        handler.send_json(error.status, error.to_dict())
+
+
+def bounded_ai_query_result(result: dict[str, Any], *, max_rows: int, max_columns: int, max_bytes: int) -> dict[str, Any]:
+    columns = result.get("columns", [])[:max_columns]
+    rows = [row[:len(columns)] for row in result.get("rows", [])[:max_rows] if isinstance(row, list)]
+    bounded = {
+        "columns": columns, "rows": rows, "rowCount": len(rows),
+        "truncated": bool(result.get("truncated") or len(result.get("rows", [])) > len(rows) or len(result.get("columns", [])) > len(columns)),
+    }
+    while rows and len(json.dumps(bounded, allow_nan=False, separators=(",", ":")).encode("utf-8")) > max_bytes:
+        rows.pop()
+        bounded["rowCount"] = len(rows)
+        bounded["truncated"] = True
+    if len(json.dumps(bounded, allow_nan=False, separators=(",", ":")).encode("utf-8")) > max_bytes:
+        raise AiAuthorityError(413, "authority_payload_too_large", "Query result metadata exceeds the AI disclosure limit")
+    return bounded

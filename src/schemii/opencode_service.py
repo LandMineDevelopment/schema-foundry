@@ -37,7 +37,6 @@ CUSTOM_TOOLS = {
     "schema_project_open",
     "schema_connection_open",
     "schema_migration_preview",
-    "schema_migration_apply",
 }
 TOOL_ACTION_TYPES = {
     "schema_read_query": "schema_read_query",
@@ -53,7 +52,6 @@ TOOL_ACTION_TYPES = {
     "schema_project_open": "open_project",
     "schema_connection_open": "open_connection",
     "schema_migration_preview": "migration_preview",
-    "schema_migration_apply": "migration_apply",
 }
 SAFE_SKILLS = {
     "schemii-help",

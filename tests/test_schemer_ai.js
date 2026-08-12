@@ -41,7 +41,8 @@ assert.match(html, /value="data"[\s\S]*data-ai-query-warning/, "Schemer must exp
 assert.doesNotMatch(html, /allow-session/, "Schemer must require confirmation for every analytic query");
 assert.match(source, /action\.type === "read_query"[\s\S]*action\.readOnly !== true[\s\S]*expectedRevision[\s\S]*buttonLabel: "Review & run query"/, "query proposals must be strict, read-only, revision-bound, and inert");
 assert.match(source, /async function executeSchemerAiReadQuery[\s\S]*profileRepository\.list\(\)[\s\S]*if \(!confirm\([\s\S]*database: capture\.database, namespace: capture\.namespace, sql: action\.sql/, "every query must revalidate its target and require confirmation before execution");
-assert.match(source, /persistedBefore[\s\S]*postgres\.request[\s\S]*currentAccess === "data"[\s\S]*persistedAfter[\s\S]*aiAssistant\.appendQueryResult\(result\)[\s\S]*aiAssistant\.sendMessage[\s\S]*queryResult: boundedSchemerAiQueryResult\(result\)/, "approved bounded results must stay pinned to their persisted dashboard, disclosure, and PostgreSQL target");
+assert.match(source, /persistedBefore[\s\S]*postgres\.request[\s\S]*currentAccess === "data"[\s\S]*persistedAfter[\s\S]*aiAssistant\.appendQueryResult\(result\)[\s\S]*aiAssistant\.sendMessage[\s\S]*resultRef: result\.resultRef/, "approved result references must stay pinned to their persisted dashboard, disclosure, and PostgreSQL target");
+assert.doesNotMatch(source, /queryResult: boundedSchemerAiQueryResult\(result\)/, "browser-owned rows must not be submitted as AI query provenance");
 assert.match(source, /canViewSession: \(binding, currentKey\) => binding\.accessLevel !== "data" \|\| binding\.key === currentKey/, "data history must remain hidden outside its exact target context");
 const boundStart = shared.indexOf("function boundedAiQueryResult");
 const boundEnd = shared.indexOf("function createAiAssistant", boundStart);
