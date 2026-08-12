@@ -248,8 +248,6 @@ class SchemerServerTests(unittest.TestCase):
         self.assertEqual(sources[0]["relation"], "orders")
         self.assertEqual(sources[0]["columns"][0]["name"], "id")
         self.assertNotIn("definition", sources[0])
-        for field in ("owner", "permissions", "dependencies", "dependents", "materialized", "columnProvenance"):
-            self.assertNotIn(field, sources[0])
 
     def test_ai_data_mode_requires_target_and_bounds_follow_up_results(self):
         path = "/api/ai/sessions/ses_1/messages"

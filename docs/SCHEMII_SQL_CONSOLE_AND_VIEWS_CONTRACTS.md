@@ -189,8 +189,6 @@ The live PostgreSQL catalog is authoritative for relation kind, definition, owne
 
 Permission-denied metadata is represented as unavailable with a reason, not fabricated or silently omitted. Catalog and preview operations are read-only and bounded.
 
-Phase 5A implements inspection only through the existing shared `/relations` and `/relation` routes. Inspection uses one repeatable-read, read-only snapshot bound to the resolved relation OID. It adds owner and current-role permissions, including PostgreSQL 17 `MAINTAIN` refresh permission, non-recursive direct dependencies and dependents (each deterministically limited to 500), materialized population and concurrent-refresh eligibility, and an explicit unsupported column-provenance envelope. These operational fields and transient live OIDs are not part of the semantic relation fingerprint. This phase does not refresh relations or write layout or schema records.
-
 The approved frontend surfaces these contracts as follows:
 
 - Browse Views lists exact live objects.

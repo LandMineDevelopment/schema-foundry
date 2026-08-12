@@ -951,7 +951,7 @@ dialog textarea { font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consola
   .standalone-sql-write-button { width: 38px; padding: 0; }
 }
 
-/* Live read-only PostgreSQL Views layer. */
+/* Browser-local Views layer concept review. */
 .design-layer-switch { position: absolute; z-index: 24; top: 12px; left: 82px; display: flex; padding: 3px; border: 1px solid #34404d; border-radius: 7px; background: rgba(14,19,25,.96); box-shadow: 0 8px 24px rgba(0,0,0,.35); }
 .design-layer-switch button { min-width: 58px; height: 27px; padding: 0 10px; border: 0; border-radius: 4px; color: #737f8e; background: transparent; font-size: 8px; cursor: pointer; }
 .design-layer-switch button:hover,.design-layer-switch button:focus-visible { outline: 0; color: #d4dbe3; background: #1a212a; }
@@ -1092,15 +1092,6 @@ dialog textarea { font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consola
 .prototype-view-catalog input::placeholder { color: #596675; }
 .prototype-view-catalog input:hover { border-color: #4b5867; background: #101820; }
 .prototype-view-catalog input:focus { border-color: #80682e; box-shadow: var(--focus-ring); }
-.views-live-empty,.views-definition-unavailable { display: grid; height: 100%; place-content: center; gap: 12px; padding: 24px; color: #788695; text-align: center; }
-.views-live-empty strong,.views-definition-unavailable strong,.views-unavailable strong { color: #d5dde6; font-size: 12px; }
-.views-live-empty > div { display: flex; justify-content: center; gap: 8px; }
-.views-definition-unavailable p,.views-unavailable p { margin: 6px 0 0; color: #647181; font-size: 8px; }
-.views-catalog-empty { padding: 18px 8px; color: #647181; font-size: 8px; text-align: center; }
-.views-truncated { display: block; margin-top: 8px; color: #c89c50; font-size: 7px; }
-.prototype-definition-editor code { font: inherit; white-space: pre; }
-.prototype-impact-summary article { display: grid; gap: 3px; padding: 12px; border: 1px solid #34414e; border-radius: 6px; background: #111820; }
-.prototype-column-mappings > article { display: grid; min-height: 50px; grid-template-columns: minmax(0,1fr) 22px minmax(0,1fr); align-items: center; gap: 8px; padding: 8px 12px; border: 1px solid #34414e; border-radius: 6px; background: #111820; }
 .prototype-lineage-body { display: flex; min-height: 0; flex: 1; flex-direction: column; opacity: 1; transform: translate3d(0,0,0); transition: opacity .2s ease,transform .24s cubic-bezier(.22,1,.36,1); }
 .prototype-focus-lineage .prototype-lineage-body .prototype-focus-flow { flex: 1; height: auto; min-height: 0; }
 .views-focus-concept[data-active-pane="definition"] .prototype-lineage-body { opacity: 0; transform: translate3d(0,-6px,0); }
@@ -1138,16 +1129,11 @@ dialog textarea { font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consola
   .views-prototype-actions > .shared-icon-button { width: 34px; height: 34px; }
   .views-focus-shell { min-height: 760px; }
   .main-layout.ai-open.views-layer-open .views-prototype-workspace { left: calc(100vw - 40px); }
-  .views-focus-shell.catalog-open { grid-template-columns: minmax(0,1fr); }
-  .prototype-focus-catalog { position: absolute; right: 0; width: min(340px,calc(100vw - 62px)); min-width: 260px; background: #10161d; }
-  .prototype-focus-catalog .prototype-view-card,.prototype-focus-catalog input { min-height: 44px; }
+  .views-focus-shell.catalog-open { grid-template-columns: minmax(0,1fr) min(180px,42vw); }
+  .prototype-focus-catalog { width: min(180px,42vw); }
   .prototype-focus-definition > footer .prototype-column-chips { display: none; }
   .prototype-focus-lineage > .views-lineage-head { min-height: 98px; align-items: end; padding: 47px 8px 7px; }
   .views-focus-concept { min-height: 760px; }
   .views-focus-concept[data-active-pane="definition"] .prototype-focus-lineage { flex-basis: 98px; }
   .prototype-focus-definition-content > footer .prototype-column-chips { display: none; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .views-prototype-workspace,.views-focus-shell,.prototype-focus-catalog,.views-focus-concept .prototype-focus-lineage,.views-focus-concept .prototype-focus-definition,.prototype-focus-lineage .prototype-focus-flow,.prototype-focus-definition-content,.prototype-lineage-body { transition: none !important; }
 }
