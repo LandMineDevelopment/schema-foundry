@@ -58,13 +58,6 @@ const elements = {
   designLayerSwitch: document.querySelector("#design-layer-switch"),
   viewsPrototypeWorkspace: document.querySelector("#views-prototype-workspace"),
   viewsConceptStage: document.querySelector("#views-concept-stage"),
-  prototypeViewEditorDialog: document.querySelector("#prototype-view-editor-dialog"),
-  prototypeViewCommitDialog: document.querySelector("#prototype-view-commit-dialog"),
-  prototypeViewEditorForm: document.querySelector("#prototype-view-editor-form"),
-  prototypeViewEditorTitle: document.querySelector("#prototype-view-editor-title"),
-  prototypeViewNamespace: document.querySelector("#prototype-view-namespace"),
-  prototypeViewName: document.querySelector("#prototype-view-name"),
-  prototypeViewSql: document.querySelector("#prototype-view-sql"),
   toolRail: document.querySelector("#tool-rail"),
   stage: document.querySelector("#stage"),
   selectionMarquee: document.querySelector("#selection-marquee"),
@@ -350,7 +343,7 @@ let sqlConsoleState = {
   error: null,
   requestId: 0
 };
-let viewsPrototypeState = {
+let viewsState = {
   layer: "tables",
   catalogOpen: false,
   inspectedRelation: null,
@@ -359,22 +352,16 @@ let viewsPrototypeState = {
   paneTimer: null,
   sideTimer: null,
   layerTimer: null,
-  selectedId: "order_summary",
-  editingId: null,
-  views: [
-    { id: "order_summary", name: "order_summary", namespace: "bookstore", kind: "view", sources: ["orders", "customers"], dependents: ["daily_revenue"], columns: ["order_id", "customer_name", "status", "order_total"], query: 'SELECT o.id AS order_id, c.display_name AS customer_name, o.status, o.total AS order_total\nFROM "bookstore"."orders" AS o\nJOIN "bookstore"."customers" AS c ON c.id = o.customer_id' },
-    { id: "customer_lifetime", name: "customer_lifetime", namespace: "bookstore", kind: "view", sources: ["customers", "orders", "payments"], dependents: [], columns: ["customer_id", "display_name", "order_count", "lifetime_value"], query: 'SELECT c.id AS customer_id, c.display_name, count(DISTINCT o.id) AS order_count, sum(p.amount) AS lifetime_value\nFROM "bookstore"."customers" AS c\nLEFT JOIN "bookstore"."orders" AS o ON o.customer_id = c.id\nLEFT JOIN "bookstore"."payments" AS p ON p.order_id = o.id\nGROUP BY c.id, c.display_name' },
-    { id: "daily_revenue", name: "daily_revenue", namespace: "bookstore", kind: "materialized", sources: ["order_summary", "payments"], dependents: ["finance_dashboard"], columns: ["revenue_day", "paid_orders", "gross_revenue"], query: 'SELECT date_trunc(\'day\', p.paid_at) AS revenue_day, count(*) AS paid_orders, sum(p.amount) AS gross_revenue\nFROM "bookstore"."payments" AS p\nGROUP BY 1' }
-  ],
-  editorBody: "",
-};
-const prototypeRelationCatalog = {
-  orders: { kind: "Table", columns: [["id", "uuid", "Primary key"], ["customer_id", "uuid", "Foreign key"], ["status", "order_status", "Not null"], ["total", "numeric(12,2)", "Not null"], ["created_at", "timestamptz", "Not null"]], constraints: ["orders_pkey", "orders_customer_id_fkey"] },
-  customers: { kind: "Table", columns: [["id", "uuid", "Primary key"], ["display_name", "text", "Not null"], ["email", "citext", "Unique"], ["created_at", "timestamptz", "Not null"]], constraints: ["customers_pkey", "customers_email_key"] },
-  payments: { kind: "Table", columns: [["id", "uuid", "Primary key"], ["order_id", "uuid", "Foreign key"], ["amount", "numeric(12,2)", "Not null"], ["paid_at", "timestamptz", "Nullable"]], constraints: ["payments_pkey", "payments_order_id_fkey"] },
-  order_summary: { kind: "View", columns: [["order_id", "uuid", "From orders.id"], ["customer_name", "text", "From customers.display_name"], ["status", "order_status", "From orders.status"], ["order_total", "numeric(12,2)", "From orders.total"]], constraints: [] },
-  daily_revenue: { kind: "Materialized view", columns: [["revenue_day", "timestamptz", "date_trunc expression"], ["paid_orders", "bigint", "count aggregate"], ["gross_revenue", "numeric", "sum aggregate"]], constraints: [] },
-  finance_dashboard: { kind: "Dashboard source", columns: [["revenue_day", "timestamptz", "Temporal dimension"], ["paid_orders", "bigint", "Volume metric"], ["gross_revenue", "numeric", "Revenue metric"], ["target_revenue", "numeric", "Calculated target"]], constraints: [] },
+  selectedId: null,
+  views: [],
+  descriptor: null,
+  target: null,
+  status: "idle",
+  message: "Open Views to load the live PostgreSQL catalog.",
+  search: "",
+  kindFilter: "all",
+  catalogGeneration: 0,
+  inspectionGeneration: 0,
 };
 let standaloneSqlState = {
   open: false,
@@ -465,146 +452,124 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-function prototypeViewDefinition(viewItem) {
-  if (viewItem.definitionDraft !== undefined) return viewItem.definitionDraft;
-  const identity = `"${viewItem.namespace.replaceAll('"', '""')}"."${viewItem.name.replaceAll('"', '""')}"`;
-  const create = viewItem.kind === "materialized" ? "CREATE MATERIALIZED VIEW" : "CREATE OR REPLACE VIEW";
-  return `${create} ${identity} AS\n${viewItem.query.trim().replace(/;$/, "")}${viewItem.kind === "materialized" ? "\nWITH DATA" : ""};`;
-}
-
-function selectedPrototypeView() {
-  return viewsPrototypeState.views.find(viewItem => viewItem.id === viewsPrototypeState.selectedId) ?? viewsPrototypeState.views[0];
-}
-
-function prototypeKindLabel(viewItem) {
-  return viewItem.kind === "materialized" ? "Materialized view" : "View";
-}
-
-function prototypeKindIcon(viewItem) {
-  return viewItem.kind === "materialized"
+function viewsKindIcon(kind) {
+  return kind === "materialized_view"
     ? '<svg viewBox="0 0 20 20" aria-hidden="true"><rect x="4" y="4" width="12" height="4" rx="1"/><rect x="4" y="9" width="12" height="3" rx="1"/><rect x="4" y="13" width="12" height="3" rx="1"/></svg>'
     : '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 3.5h7l3 3v10H5zM12 3.5v3h3M8 10h4M8 13h4"/></svg>';
 }
 
-function prototypeViewCard(viewItem, extraClass = "") {
-  const selected = viewItem.id === viewsPrototypeState.selectedId;
-  return `<button class="prototype-view-card ${viewItem.kind} ${selected ? "selected" : ""} ${extraClass}" type="button" data-prototype-view-id="${escapeHtml(viewItem.id)}" aria-pressed="${selected}">
-    <span class="prototype-view-kind-mark">${prototypeKindIcon(viewItem)}</span>
-    <span><small>${escapeHtml(prototypeKindLabel(viewItem))}</small><strong>${escapeHtml(viewItem.name)}</strong><em>${viewItem.columns.length} output columns</em></span>
-  </button>`;
+function selectViewsTarget(profiles, selectedProfileId, linked, currentNamespace, namespaces) {
+  const selected = profiles.find(profile => profile.id === selectedProfileId);
+  const linkedProfile = profiles.find(profile => profile.id === linked?.sourceProfileId && profile.dbname === linked?.database);
+  const profile = selected ?? linkedProfile ?? profiles[0] ?? null;
+  if (!profile) return { profile: null, namespace: "" };
+  const linkedNamespace = linked?.sourceProfileId === profile.id && linked?.database === profile.dbname ? linked.namespace : "";
+  const namespace = namespaces.includes(currentNamespace) ? currentNamespace : namespaces.includes(linkedNamespace) ? linkedNamespace : namespaces.includes("public") ? "public" : namespaces[0] ?? "";
+  return { profile, namespace };
 }
 
-function renderPrototypeViewInspector(viewItem) {
-  return `<aside class="prototype-view-inspector">
-    <header><div><span class="eyebrow">Selected definition</span><h3>${escapeHtml(viewItem.name)}</h3></div><span class="prototype-kind-badge ${viewItem.kind}">${escapeHtml(prototypeKindLabel(viewItem))}</span></header>
-    <section><span class="prototype-section-label">Lineage</span><div class="prototype-lineage-summary"><span>${viewItem.sources.length} sources</span><b>&rarr;</b><strong>${escapeHtml(viewItem.name)}</strong><b>&rarr;</b><span>${viewItem.dependents.length} dependents</span></div></section>
-    <section><span class="prototype-section-label">Output columns</span><div class="prototype-column-chips">${viewItem.columns.map(column => `<span>${escapeHtml(column)}</span>`).join("")}</div></section>
-    <section class="prototype-definition-summary"><span class="prototype-section-label">Raw definition</span><pre>${escapeHtml(prototypeViewDefinition(viewItem))}</pre></section>
-    <footer><button class="button button-ghost" type="button" data-prototype-duplicate="${escapeHtml(viewItem.id)}">Duplicate</button><button class="button button-primary" type="button" data-prototype-edit="${escapeHtml(viewItem.id)}">Edit definition</button></footer>
-  </aside>`;
+function verifyViewsCatalog(catalog, target) {
+  return Boolean(catalog && catalog.profileId === target.profileId && catalog.database === target.database && catalog.namespace === target.namespace && Array.isArray(catalog.relations) && catalog.relations.every(relation => relation && typeof relation.name === "string" && relation.name && ["table", "view", "materialized_view"].includes(relation.kind)));
 }
 
-function prototypeEdgeClass(from, to) {
-  const selected = selectedPrototypeView();
-  return from === selected.id || to === selected.id || (to === selected.id && selected.sources.includes(from)) || (from === selected.id && selected.dependents.includes(to)) ? "active" : "muted";
+function verifyViewsDescriptor(descriptor, target, relation) {
+  if (!descriptor || descriptor.profileId !== target.profileId || descriptor.database !== target.database || descriptor.namespace !== target.namespace || descriptor.relation !== relation.name || descriptor.kind !== relation.kind || !/^[0-9a-f]{64}$/.test(descriptor.fingerprint) || (relation.fingerprint && relation.fingerprint !== descriptor.fingerprint)) return false;
+  if (!Array.isArray(descriptor.columns) || !descriptor.columns.every(column => column && typeof column.name === "string" && typeof column.type === "string" && typeof column.nullable === "boolean" && Number.isInteger(column.ordinal))) return false;
+  if (!descriptor.owner || !["available", "unavailable"].includes(descriptor.owner.status) || (descriptor.owner.status === "available" ? typeof descriptor.owner.name !== "string" || !descriptor.owner.name : typeof descriptor.owner.reason !== "string")) return false;
+  if (!descriptor.permissions || ["canSelect", "canAlter", "canRefresh"].some(name => typeof descriptor.permissions[name] !== "boolean")) return false;
+  if (!validViewsDefinition(descriptor.definition) || !validViewsMaterialized(descriptor.materialized, descriptor.kind) || descriptor.columnProvenance?.status !== "unavailable" || descriptor.columnProvenance.reason !== "not_supported") return false;
+  return validViewsLineage(descriptor.dependencies, target.database) && validViewsLineage(descriptor.dependents, target.database);
 }
 
-function renderTwinCanvasConcept() {
-  const selected = selectedPrototypeView();
-  const [orderSummary, customerLifetime, dailyRevenue] = viewsPrototypeState.views;
-  return `<div class="views-canvas-concept">
-    <section class="prototype-lineage-canvas" aria-label="Synthetic view dependency canvas">
-      <div class="prototype-canvas-grid"></div>
-      <svg class="prototype-dependency-lines" viewBox="0 0 920 590" preserveAspectRatio="none" aria-hidden="true">
-        <path class="${prototypeEdgeClass("orders", "order_summary")}" d="M175 116 C245 116 265 126 350 126"/><path class="${prototypeEdgeClass("customers", "order_summary")}" d="M175 272 C255 272 270 145 350 145"/>
-        <path class="${prototypeEdgeClass("orders", "customer_lifetime")}" d="M175 116 C250 116 270 330 350 330"/><path class="${prototypeEdgeClass("customers", "customer_lifetime")}" d="M175 272 C250 272 275 350 350 350"/><path class="${prototypeEdgeClass("payments", "customer_lifetime")}" d="M175 430 C255 430 275 370 350 370"/>
-        <path class="${prototypeEdgeClass("order_summary", "daily_revenue")}" d="M540 136 C610 136 615 235 685 235"/><path class="${prototypeEdgeClass("payments", "daily_revenue")}" d="M175 430 C455 430 520 255 685 255"/><path class="${prototypeEdgeClass("daily_revenue", "finance_dashboard")}" d="M865 245 C885 245 895 245 915 245"/>
-      </svg>
-      <div class="prototype-source-card active-${selected.sources.includes("orders")}" style="--px:28px;--py:78px"><small>Table</small><strong>orders</strong><span>7 columns</span></div>
-      <div class="prototype-source-card active-${selected.sources.includes("customers")}" style="--px:28px;--py:234px"><small>Table</small><strong>customers</strong><span>6 columns</span></div>
-      <div class="prototype-source-card active-${selected.sources.includes("payments")}" style="--px:28px;--py:392px"><small>Table</small><strong>payments</strong><span>5 columns</span></div>
-      <div class="prototype-card-position" style="--px:350px;--py:88px">${prototypeViewCard(orderSummary)}</div>
-      <div class="prototype-card-position" style="--px:350px;--py:302px">${prototypeViewCard(customerLifetime)}</div>
-      <div class="prototype-card-position" style="--px:685px;--py:197px">${prototypeViewCard(dailyRevenue)}</div>
-      <div class="prototype-dependent-card active-${selected.dependents.includes("finance_dashboard")}" style="--px:885px;--py:214px"><small>Dashboard source</small><strong>finance_dashboard</strong></div>
-      <div class="prototype-canvas-controls"><span>Selected lineage stays bright</span><button type="button">-</button><b>92%</b><button type="button">+</button></div>
-    </section>
-    ${renderPrototypeViewInspector(selected)}
-  </div>`;
+function validViewsDefinition(value) {
+  return Boolean(value && (value.status === "available" ? value.format === "query" && typeof value.sql === "string" : value.status === "unavailable" && ["not_permitted", "too_large", "not_supported"].includes(value.reason)));
 }
 
-function renderLineageFocusConcept() {
-  const selected = selectedPrototypeView();
-  const sourceCards = selected.sources.map(source => {
-    const sourceView = viewsPrototypeState.views.find(viewItem => viewItem.id === source);
-    return `<button class="${viewsPrototypeState.inspectedRelation === source ? "selected" : ""}" type="button" data-prototype-relation="${escapeHtml(source)}"><span>${sourceView ? prototypeKindIcon(sourceView) : '<svg viewBox="0 0 20 20" aria-hidden="true"><ellipse cx="10" cy="5" rx="6" ry="2.5"/><path d="M4 5v7c0 1.4 2.7 2.5 6 2.5s6-1.1 6-2.5V5"/></svg>'}</span><small>${sourceView ? prototypeKindLabel(sourceView) : "Table"}</small><strong>${escapeHtml(source)}</strong></button>`;
-  }).join("");
-  const dependents = selected.dependents.length
-    ? selected.dependents.map(dependent => `<button class="dependent ${viewsPrototypeState.inspectedRelation === dependent ? "selected" : ""}" type="button" data-prototype-relation="${escapeHtml(dependent)}"><span>&rarr;</span><small>Downstream ${prototypeRelationCatalog[dependent]?.kind ?? "relation"}</small><strong>${escapeHtml(dependent)}</strong></button>`).join("")
-    : '<article class="dependent empty"><span>&rarr;</span><small>Downstream</small><strong>No downstream objects</strong></article>';
-  const lineageContent = viewsPrototypeState.lineageMode === "columns"
-    ? renderPrototypeColumnLineage(selected)
-    : viewsPrototypeState.lineageMode === "impact"
-      ? renderPrototypeImpactLineage(selected)
-      : `<div class="prototype-focus-sources"><header><span>Upstream</span><small>${selected.sources.length} relations</small></header>${sourceCards}</div><div class="prototype-focus-arrows" aria-hidden="true"><i></i><i></i><i></i></div><button class="prototype-focus-hero ${viewsPrototypeState.inspectedRelation === selected.id ? "selected" : ""}" type="button" data-prototype-relation="${escapeHtml(selected.id)}">${prototypeKindIcon(selected)}<span>${escapeHtml(prototypeKindLabel(selected))}</span><h3>${escapeHtml(selected.name)}</h3><p>${selected.columns.length} projected columns · inspect output contract</p></button><div class="prototype-focus-arrows outbound" aria-hidden="true"><i></i></div><div class="prototype-focus-dependents"><header><span>Downstream</span><small>${selected.dependents.length} consumers</small></header>${dependents}</div>`;
-  const sideOpen = viewsPrototypeState.catalogOpen || viewsPrototypeState.inspectedRelation;
-  const sidePanel = viewsPrototypeState.inspectedRelation ? renderPrototypeRelationInspector(viewsPrototypeState.inspectedRelation) : prototypeCatalogPanel();
-  return `<div class="views-focus-shell ${sideOpen ? "catalog-open" : ""}">
-    <aside class="prototype-view-catalog prototype-focus-catalog ${viewsPrototypeState.inspectedRelation ? "relation-inspector" : ""}" aria-label="${viewsPrototypeState.inspectedRelation ? "Read-only relation inspector" : "View catalog"}" aria-hidden="${!sideOpen}" ${sideOpen ? "" : "inert"}>${sidePanel}</aside>
-    <div class="views-focus-concept" data-active-pane="${viewsPrototypeState.activePane}">
-      <section class="prototype-focus-lineage">
-        <header class="views-lineage-head"><button class="views-pane-heading" type="button" data-views-pane="lineage" aria-expanded="${viewsPrototypeState.activePane === "lineage"}"><span class="eyebrow">Browser-local prototype · no persistence</span><span><strong>View lineage</strong><span class="prototype-kind-badge ${selected.kind}">${escapeHtml(prototypeKindLabel(selected))}</span></span><small>${escapeHtml(selected.namespace)}.${escapeHtml(selected.name)}</small></button><div class="views-prototype-actions"><button class="shared-icon-button views-catalog-toggle ${viewsPrototypeState.catalogOpen ? "active" : ""}" type="button" data-toggle-prototype-catalog aria-label="${viewsPrototypeState.catalogOpen ? "Hide views" : "Browse views"}" aria-expanded="${viewsPrototypeState.catalogOpen}" data-tooltip="${viewsPrototypeState.catalogOpen ? "Hide views" : "Browse views"}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4.5 4.5h11v3h-11zM4.5 9h11v3h-11zM4.5 13.5h11v2h-11z"/></svg></button><button class="shared-icon-button views-create-button" type="button" data-create-prototype-view aria-label="Create view" data-tooltip="Create view"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v12M4 10h12"/></svg></button></div></header>
-        <div class="prototype-lineage-body" ${viewsPrototypeState.activePane === "lineage" ? "" : "hidden"}><nav class="prototype-lineage-modes" aria-label="Lineage presentation"><button class="${viewsPrototypeState.lineageMode === "relations" ? "active" : ""}" type="button" data-lineage-mode="relations">Relations</button><button class="${viewsPrototypeState.lineageMode === "columns" ? "active" : ""}" type="button" data-lineage-mode="columns">Column flow</button><button class="${viewsPrototypeState.lineageMode === "impact" ? "active" : ""}" type="button" data-lineage-mode="impact">Impact</button></nav><div class="prototype-focus-flow ${viewsPrototypeState.lineageMode !== "relations" ? `mode-${viewsPrototypeState.lineageMode}` : ""}">${lineageContent}</div></div>
-      </section>
-      <section class="prototype-focus-definition"><button class="views-pane-heading" type="button" data-views-pane="definition" aria-expanded="${viewsPrototypeState.activePane === "definition"}"><span><span class="eyebrow">Browser-local editable draft</span><strong>PostgreSQL definition</strong></span><span class="prototype-kind-badge ${selected.kind}">${escapeHtml(prototypeKindLabel(selected))}</span></button><div class="prototype-focus-definition-content" ${viewsPrototypeState.activePane === "definition" ? "" : "hidden"}><textarea class="prototype-definition-editor" data-prototype-definition-editor aria-label="Editable PostgreSQL view definition" spellcheck="false">${escapeHtml(prototypeViewDefinition(selected))}</textarea><footer><span data-prototype-draft-status>${selected.savedDraft === selected.definitionDraft && selected.savedDraft !== undefined ? "Draft saved in browser memory" : "Unsaved browser-local changes"}</span><div class="prototype-definition-actions"><button class="button button-ghost" type="button" data-save-prototype-definition>Save draft</button><button class="button button-primary" type="button" data-commit-prototype-definition>Commit changes</button></div></footer></div></section>
-    </div>
-  </div>`;
+function validViewsMaterialized(value, kind) {
+  if (!value) return false;
+  if (kind !== "materialized_view") return value.status === "unavailable" && value.reason === "not_applicable";
+  return value.status === "available" && typeof value.populated === "boolean" && typeof value.concurrentRefreshEligible === "boolean";
 }
 
-function renderPrototypeRelationInspector(relationName) {
-  const viewItem = viewsPrototypeState.views.find(item => item.id === relationName);
-  const relation = prototypeRelationCatalog[relationName] ?? (viewItem ? { kind: prototypeKindLabel(viewItem), columns: viewItem.columns.map(column => [column, "Derived", "Output"]), constraints: [] } : { kind: "Relation", columns: [], constraints: [] });
-  const relationship = relationName === selectedPrototypeView().id ? `${selectedPrototypeView().sources.length} upstream · ${selectedPrototypeView().dependents.length} downstream` : selectedPrototypeView().sources.includes(relationName) ? `Source of ${selectedPrototypeView().name}` : selectedPrototypeView().dependents.includes(relationName) ? `Consumes ${selectedPrototypeView().name}` : "Related object";
-  return `<header><span><span class="eyebrow">Read-only inspector</span><strong>${escapeHtml(relationName)}</strong></span><button class="shared-icon-button" type="button" data-close-prototype-side aria-label="Close relation inspector"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button></header><section><span class="prototype-section-label">Identity</span><dl class="prototype-relation-identity"><div><dt>Namespace</dt><dd>bookstore</dd></div><div><dt>Kind</dt><dd>${escapeHtml(relation.kind)}</dd></div><div><dt>Lineage role</dt><dd>${escapeHtml(relationship)}</dd></div></dl></section><section class="prototype-relation-columns"><span class="prototype-section-label">Columns · ${relation.columns.length}</span>${relation.columns.map(([name, type, note]) => `<article><strong>${escapeHtml(name)}</strong><span>${escapeHtml(type)}</span><small>${escapeHtml(note)}</small></article>`).join("")}</section><section><span class="prototype-section-label">Constraints</span><div class="prototype-column-chips">${relation.constraints.length ? relation.constraints.map(item => `<span>${escapeHtml(item)}</span>`).join("") : "<small>Derived relations have no table constraints.</small>"}</div></section><footer>Catalog snapshot · editing unavailable</footer>`;
+function validViewsLineage(value, database) {
+  return Boolean(value && value.status === "available" && typeof value.truncated === "boolean" && Array.isArray(value.items) && value.items.length <= 500 && value.items.every(item => item && item.database === database && typeof item.namespace === "string" && item.namespace && typeof item.relation === "string" && item.relation && ["table", "view", "materialized_view", "foreign_table"].includes(item.kind) && Number.isInteger(item.liveOid) && item.liveOid > 0));
 }
 
-function renderPrototypeColumnLineage(viewItem) {
-  const mappings = viewItem.name === "order_summary"
-    ? [["orders.id", "Direct", "order_id"], ["customers.display_name", "JOIN lookup", "customer_name"], ["orders.status", "Direct", "status"], ["orders.total", "Alias", "order_total"]]
-    : viewItem.columns.map((column, index) => [`${viewItem.sources[index % viewItem.sources.length]}.${column}`, index > 1 ? "Aggregate" : "Direct", column]);
-  return `<section class="prototype-column-lineage"><header><span><span class="eyebrow">Projection provenance</span><strong>Column flow</strong></span><small>Trace every output to its expression and source</small></header><div class="prototype-column-lineage-context"><button type="button" data-prototype-relation="${escapeHtml(viewItem.id)}"><small>Output relation</small><strong>${escapeHtml(viewItem.name)}</strong><span>${viewItem.columns.length} columns</span></button><article><small>Query shape</small><strong>${viewItem.sources.length > 1 ? "Multi-relation join" : "Single source"}</strong><span>${viewItem.sources.length} upstream relations</span></article></div><div class="prototype-column-mappings">${mappings.map(([source, transform, output]) => `<button type="button" data-prototype-relation="${escapeHtml(source.split(".")[0])}"><span><small>Source column</small><strong>${escapeHtml(source)}</strong></span><em>${escapeHtml(transform)}</em><b>&rarr;</b><span><small>Output column</small><strong>${escapeHtml(output)}</strong></span></button>`).join("")}</div></section>`;
+function viewsUnavailableReason(value, fallback = "Unavailable") {
+  const reasons = { not_applicable: "Not applicable", not_permitted: "Not permitted", not_supported: "Not supported", too_large: "Too large" };
+  return reasons[value?.reason] ?? fallback;
 }
 
-function renderPrototypeImpactLineage(viewItem) {
-  const downstream = viewItem.dependents[0];
-  return `<section class="prototype-impact-lineage"><header><span><span class="eyebrow">Migration readiness</span><strong>Change impact</strong></span><small>Review risk boundaries before committing the definition</small></header><div class="prototype-impact-summary"><button type="button" data-prototype-relation="${escapeHtml(viewItem.sources[0])}"><strong>${viewItem.sources.length}</strong><span>upstream relations</span><small>Inspect source contract</small></button><button type="button" data-prototype-relation="${escapeHtml(viewItem.id)}"><strong>${viewItem.columns.length}</strong><span>output columns</span><small>Inspect selected view</small></button><button type="button" ${downstream ? `data-prototype-relation="${escapeHtml(downstream)}"` : "disabled"}><strong>${viewItem.dependents.length}</strong><span>downstream consumers</span><small>${downstream ? "Inspect consumer" : "No consumers"}</small></button></div><div class="prototype-impact-list"><button type="button" data-prototype-relation="${escapeHtml(viewItem.sources[0])}"><span>High</span><strong>Referenced source columns</strong><small>Type changes or removals can invalidate the definition at migration time.</small></button><button type="button" data-prototype-relation="${escapeHtml(viewItem.id)}"><span>Medium</span><strong>Published output contract</strong><small>${viewItem.columns.join(", ")}</small></button>${downstream ? `<button type="button" data-prototype-relation="${escapeHtml(downstream)}"><span>Review</span><strong>Downstream consumer</strong><small>${escapeHtml(downstream)} reads this view's projected shape.</small></button>` : '<article><span>Clear</span><strong>No downstream consumers</strong><small>This catalog snapshot has no registered dependents.</small></article>'}</div><footer><span>Prototype assessment</span><strong>${viewItem.kind === "materialized" ? "Recreation and refresh review required" : "Replacement preview required"}</strong><small>Live catalog validation remains required before commit.</small></footer></section>`;
+function renderLiveLineageItems(value, direction) {
+  if (!value.items.length) return `<article class="dependent empty"><small>${direction}</small><strong>No direct PostgreSQL relations reported</strong></article>`;
+  return value.items.map(item => `<article><span>${direction === "Upstream" ? "&larr;" : "&rarr;"}</span><small>${escapeHtml(item.kind)}</small><strong>${escapeHtml(`${item.namespace}.${item.relation}`)}</strong></article>`).join("") + (value.truncated ? '<small class="views-truncated">Server result truncated</small>' : "");
 }
 
-function renderCatalogWorkbenchConcept() {
-  const selected = selectedPrototypeView();
-  return `<div class="views-catalog-concept">
-    <aside class="prototype-view-catalog"><header><span class="eyebrow">Relation browser</span><strong>Views</strong><input aria-label="Filter prototype views" placeholder="Filter views..."/></header><div class="prototype-catalog-filters"><button class="active" type="button">All</button><button type="button">Views</button><button type="button">Materialized</button></div><div>${viewsPrototypeState.views.map(viewItem => prototypeViewCard(viewItem, "catalog-row")).join("")}</div></aside>
-    <section class="prototype-workbench-main"><div class="prototype-workbench-lineage"><header><span><span class="eyebrow">Dependency workbench</span><strong>${escapeHtml(selected.name)}</strong></span><span>${selected.sources.length} incoming · ${selected.dependents.length} outgoing</span></header><div class="prototype-workbench-flow"><div>${selected.sources.map(source => `<button type="button"><small>Source</small><strong>${escapeHtml(source)}</strong></button>`).join("")}</div><span class="prototype-flow-arrow">&rarr;</span><div class="prototype-workbench-selected">${prototypeKindIcon(selected)}<small>${escapeHtml(prototypeKindLabel(selected))}</small><strong>${escapeHtml(selected.name)}</strong></div><span class="prototype-flow-arrow">&rarr;</span><div>${(selected.dependents.length ? selected.dependents : ["No dependents"]).map(item => `<button type="button"><small>Dependent</small><strong>${escapeHtml(item)}</strong></button>`).join("")}</div></div></div>
-      <div class="prototype-workbench-editor"><header><span><span class="eyebrow">Definition dock</span><strong>Raw CREATE statement</strong></span><button class="button button-ghost" type="button" data-prototype-edit="${escapeHtml(selected.id)}">Edit</button></header><pre>${escapeHtml(prototypeViewDefinition(selected))}</pre><footer><span>${selected.columns.length} output columns</span><div class="prototype-column-chips">${selected.columns.map(column => `<span>${escapeHtml(column)}</span>`).join("")}</div></footer></div>
-    </section>
-  </div>`;
+function renderLiveViewsState() {
+  const open = ["no_profiles", "no_namespaces"].includes(viewsState.status) ? '<button class="button button-primary" type="button" data-open-postgres-dialog>Open PostgreSQL</button>' : "";
+  const retry = ["error", "empty", "inspection_error"].includes(viewsState.status) ? '<button class="button button-ghost" type="button" data-refresh-views>Retry</button>' : "";
+  return `<div class="views-live-empty" role="status"><strong>${escapeHtml(viewsState.message)}</strong><div>${open}${retry}</div></div>`;
 }
 
-function renderViewsPrototype() {
-  elements.viewsConceptStage.innerHTML = renderLineageFocusConcept();
+function renderLiveDefinition(descriptor) {
+  const definition = descriptor?.definition;
+  if (definition?.status === "available" && typeof definition.sql === "string") return `<pre class="prototype-definition-editor" aria-label="Read-only PostgreSQL view definition"><code>${escapeHtml(definition.sql)}</code></pre><footer><span>Verbatim PostgreSQL query definition · read-only</span></footer>`;
+  const reasons = { not_permitted: "The selected role cannot read this definition.", too_large: "The definition exceeds the server response limit.", not_supported: "Definitions are unavailable for this relation kind." };
+  return `<div class="views-definition-unavailable" role="status"><strong>Definition unavailable</strong><p>${escapeHtml(reasons[definition?.reason] ?? "PostgreSQL did not provide a definition.")}</p></div>`;
 }
 
-function prototypeCatalogPanel() {
-  return `<header><span><span class="eyebrow">Relation browser</span><strong>Views</strong></span><button class="shared-icon-button" type="button" data-close-prototype-side aria-label="Close view catalog"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button><input data-prototype-view-filter aria-label="Filter prototype views" placeholder="Search views..."/></header><div class="prototype-catalog-filters"><button class="active" type="button">All</button><button type="button">Views</button><button type="button">Materialized</button></div><div>${viewsPrototypeState.views.map(viewItem => prototypeViewCard(viewItem, "catalog-row")).join("")}</div>`;
+function renderLiveColumnFlow(descriptor) {
+  return `<section class="prototype-column-lineage views-unavailable"><span class="eyebrow">Column provenance</span><strong>Column Flow unavailable</strong><p>${escapeHtml(viewsUnavailableReason(descriptor.columnProvenance, "The server did not provide verified column provenance."))}</p></section>`;
 }
 
-function swapPrototypeSidePanel(content, relationName = null, focusSearch = false) {
+function renderLiveImpact(descriptor) {
+  const renderGroup = (value, label) => `<section><h4>${label}</h4>${value.items.length ? value.items.map(item => `<article><span>${label}</span><strong>${escapeHtml(`${item.namespace}.${item.relation}`)}</strong><small>${escapeHtml(item.kind)} · direct PostgreSQL relation</small></article>`).join("") : `<article><strong>No direct ${label.toLowerCase()} reported</strong></article>`}${value.truncated ? '<small class="views-truncated">Server result truncated</small>' : ""}</section>`;
+  return `<section class="prototype-impact-lineage"><header><span><span class="eyebrow">Verified direct PostgreSQL lineage</span><strong>Impact</strong></span><small>External consumers are not included</small></header><div class="prototype-impact-summary"><article><strong>${descriptor.dependencies.items.length}</strong><span>direct dependencies</span><small>available</small></article><article><strong>${descriptor.dependents.items.length}</strong><span>direct dependents</span><small>available</small></article></div><div class="prototype-impact-list">${renderGroup(descriptor.dependencies, "Upstream")}${renderGroup(descriptor.dependents, "Downstream")}</div></section>`;
+}
+
+function renderLiveInspector(descriptor) {
+  const owner = descriptor.owner.status === "available" ? descriptor.owner.name : viewsUnavailableReason(descriptor.owner);
+  const permission = (label, allowed) => `<span>${escapeHtml(label)}: ${allowed ? "Allowed" : "Not allowed"}</span>`;
+  const materialized = descriptor.materialized.status === "available"
+    ? `<div class="prototype-column-chips"><span>${descriptor.materialized.populated ? "Populated" : "Unpopulated"}</span><span>Concurrent refresh: ${descriptor.materialized.concurrentRefreshEligible ? "Eligible" : "Not eligible"}</span></div>`
+    : `<small>${escapeHtml(viewsUnavailableReason(descriptor.materialized))}</small>`;
+  return `<header><span><span class="eyebrow">Live read-only inspector</span><strong>${escapeHtml(descriptor.relation)}</strong></span><button class="shared-icon-button" type="button" data-close-views-side aria-label="Close relation inspector"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button></header><section><span class="prototype-section-label">Identity</span><dl class="prototype-relation-identity"><div><dt>Database</dt><dd>${escapeHtml(descriptor.database)}</dd></div><div><dt>Namespace</dt><dd>${escapeHtml(descriptor.namespace)}</dd></div><div><dt>Kind</dt><dd>${escapeHtml(descriptor.kind)}</dd></div><div><dt>Owner</dt><dd>${escapeHtml(owner)}</dd></div><div><dt>Fingerprint</dt><dd title="${escapeHtml(descriptor.fingerprint)}">${escapeHtml(descriptor.fingerprint)}</dd></div></dl></section><section><span class="prototype-section-label">Current role permissions</span><div class="prototype-column-chips">${permission("Select", descriptor.permissions.canSelect)}${permission("Alter", descriptor.permissions.canAlter)}${permission("Refresh", descriptor.permissions.canRefresh)}</div></section><section class="prototype-relation-columns"><span class="prototype-section-label">Columns · ${descriptor.columns.length}</span>${descriptor.columns.map(column => `<article><strong>${escapeHtml(column.name)}</strong><span>${escapeHtml(column.type)}</span><small>${column.nullable ? "Nullable" : "Not null"}</small></article>`).join("")}</section><section><span class="prototype-section-label">Materialized state</span>${materialized}</section><footer>Definition ${escapeHtml(descriptor.definition.status)} · repeatable-read catalog snapshot</footer>`;
+}
+
+function liveViewCard(item) {
+  const selected = item.name === viewsState.selectedId;
+  return `<button class="prototype-view-card ${item.kind === "materialized_view" ? "materialized" : "view"} ${selected ? "selected" : ""} catalog-row" type="button" data-views-view-id="${escapeHtml(item.name)}" aria-pressed="${selected}"><span class="prototype-view-kind-mark">${viewsKindIcon(item.kind)}</span><span><small>${item.kind === "materialized_view" ? "Materialized view" : "View"}</small><strong>${escapeHtml(item.name)}</strong><em>Live PostgreSQL relation</em></span></button>`;
+}
+
+function liveCatalogPanel() {
+  const query = viewsState.search.trim().toLowerCase();
+  const filtered = viewsState.views.filter(item => (!query || item.name.toLowerCase().includes(query)) && (viewsState.kindFilter === "all" || item.kind === viewsState.kindFilter));
+  return `<div id="views-live-catalog"><header><span><span class="eyebrow">Live relation browser</span><strong>Views</strong></span><button class="shared-icon-button" type="button" data-close-views-side aria-label="Close view catalog"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button><input data-views-filter aria-label="Filter live views" value="${escapeHtml(viewsState.search)}" placeholder="Search views..."/></header><div class="prototype-catalog-filters">${[["all", "All"], ["view", "Views"], ["materialized_view", "Materialized"]].map(([kind, label]) => `<button class="${viewsState.kindFilter === kind ? "active" : ""}" type="button" data-view-kind-filter="${kind}" aria-pressed="${viewsState.kindFilter === kind}">${label}</button>`).join("")}</div><div>${filtered.length ? filtered.map(liveViewCard).join("") : '<p class="views-catalog-empty">No matching live views.</p>'}</div></div>`;
+}
+
+function renderLiveViews() {
+  const selected = viewsState.views.find(item => item.name === viewsState.selectedId) ?? null;
+  const descriptor = viewsState.descriptor;
+  const ready = viewsState.status === "ready" && selected && descriptor;
+  const lineage = !ready ? renderLiveViewsState() : viewsState.lineageMode === "columns" ? renderLiveColumnFlow(descriptor) : viewsState.lineageMode === "impact" ? renderLiveImpact(descriptor) : `<div class="prototype-focus-sources"><header><span>Upstream</span></header>${renderLiveLineageItems(descriptor.dependencies, "Upstream")}</div><div class="prototype-focus-arrows" aria-hidden="true"><i></i></div><button class="prototype-focus-hero" type="button" data-inspect-selected-view>${viewsKindIcon(selected.kind)}<span>${selected.kind === "materialized_view" ? "Materialized view" : "View"}</span><h3>${escapeHtml(selected.name)}</h3><p>${descriptor.columns.length} output columns · live read-only descriptor</p></button><div class="prototype-focus-arrows outbound" aria-hidden="true"><i></i></div><div class="prototype-focus-dependents"><header><span>Downstream</span></header>${renderLiveLineageItems(descriptor.dependents, "Downstream")}</div>`;
+  const sideOpen = viewsState.catalogOpen || viewsState.inspectedRelation;
+  const sidePanel = viewsState.inspectedRelation ? renderLiveInspector(viewsState.inspectedRelation) : liveCatalogPanel();
+  const identity = viewsState.target ? `${viewsState.target.database}.${viewsState.target.namespace}${selected ? `.${selected.name}` : ""}` : "No exact PostgreSQL target";
+  return `<div class="views-focus-shell ${sideOpen ? "catalog-open" : ""}"><aside class="prototype-view-catalog prototype-focus-catalog ${viewsState.inspectedRelation ? "relation-inspector" : ""}" aria-label="${viewsState.inspectedRelation ? "Read-only relation inspector" : "View catalog"}" aria-hidden="${!sideOpen}" ${sideOpen ? "" : "inert"}>${sidePanel}</aside><div class="views-focus-concept" data-active-pane="${viewsState.activePane}"><section class="prototype-focus-lineage"><header class="views-lineage-head"><button class="views-pane-heading" type="button" data-views-pane="lineage" aria-expanded="${viewsState.activePane === "lineage"}" aria-controls="views-lineage-content"><span class="eyebrow">Live PostgreSQL catalog · read-only</span><span><strong>View lineage</strong></span><small>${escapeHtml(identity)}</small></button><div class="views-prototype-actions"><button class="shared-icon-button views-catalog-toggle ${viewsState.catalogOpen ? "active" : ""}" type="button" data-toggle-prototype-catalog aria-label="${viewsState.catalogOpen ? "Hide views" : "Browse views"}" aria-controls="views-live-catalog" aria-expanded="${viewsState.catalogOpen}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4.5 4.5h11v3h-11zM4.5 9h11v3h-11zM4.5 13.5h11v2h-11z"/></svg></button><button class="shared-icon-button" type="button" data-refresh-views aria-label="Refresh live views"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M15.5 7A6 6 0 1 0 16 12M15.5 3.5V7H12"/></svg></button></div></header><div class="prototype-lineage-body" id="views-lineage-content" ${viewsState.activePane === "lineage" ? "" : "hidden"}><nav class="prototype-lineage-modes" aria-label="Lineage presentation">${[["relations", "Relations"], ["columns", "Column Flow"], ["impact", "Impact"]].map(([mode, label]) => `<button class="${viewsState.lineageMode === mode ? "active" : ""}" type="button" data-lineage-mode="${mode}" aria-pressed="${viewsState.lineageMode === mode}">${label}</button>`).join("")}</nav><div class="prototype-focus-flow ${viewsState.lineageMode !== "relations" ? `mode-${viewsState.lineageMode}` : ""}">${lineage}</div></div></section><section class="prototype-focus-definition"><button class="views-pane-heading" type="button" data-views-pane="definition" aria-expanded="${viewsState.activePane === "definition"}" aria-controls="views-definition-content"><span><span class="eyebrow">Exact server response · read-only</span><strong>PostgreSQL definition</strong></span></button><div class="prototype-focus-definition-content" id="views-definition-content" ${viewsState.activePane === "definition" ? "" : "hidden"}>${ready ? renderLiveDefinition(descriptor) : renderLiveViewsState()}</div></section></div><p class="sr-only" role="status" aria-live="polite">${escapeHtml(viewsState.message)}</p></div>`;
+}
+
+function renderViews() {
+  elements.viewsPrototypeWorkspace.setAttribute("aria-busy", String(["loading", "inspecting"].includes(viewsState.status)));
+  elements.viewsConceptStage.innerHTML = renderLiveViews();
+}
+
+function swapViewsSidePanel(content, relationName = null, focusSearch = false) {
   const panel = elements.viewsConceptStage.querySelector(".prototype-focus-catalog");
-  if (!panel) return renderViewsPrototype();
-  clearTimeout(viewsPrototypeState.sideTimer);
+  if (!panel) return renderViews();
+  clearTimeout(viewsState.sideTimer);
   panel.classList.remove("side-enter");
   panel.classList.add("side-exit");
-  viewsPrototypeState.sideTimer = setTimeout(() => {
+  viewsState.sideTimer = setTimeout(() => {
     panel.innerHTML = content;
     panel.classList.toggle("relation-inspector", Boolean(relationName));
     panel.setAttribute("aria-label", relationName ? "Read-only relation inspector" : "View catalog");
@@ -612,16 +577,16 @@ function swapPrototypeSidePanel(content, relationName = null, focusSearch = fals
     panel.classList.remove("side-exit");
     void panel.offsetWidth;
     panel.classList.remove("side-positioning", "side-enter");
-    if (focusSearch) panel.querySelector("[data-prototype-view-filter]")?.focus();
+    if (focusSearch) panel.querySelector("[data-views-filter]")?.focus();
   }, 130);
 }
 
-function setPrototypeViewCatalogOpen(open) {
-  const replacingInspector = open && Boolean(viewsPrototypeState.inspectedRelation);
-  viewsPrototypeState.catalogOpen = open;
-  if (open) viewsPrototypeState.inspectedRelation = null;
+function setViewsCatalogOpen(open) {
+  const replacingInspector = open && Boolean(viewsState.inspectedRelation);
+  viewsState.catalogOpen = open;
+  if (open) viewsState.inspectedRelation = null;
   if (replacingInspector) {
-    swapPrototypeSidePanel(prototypeCatalogPanel(), null, true);
+    swapViewsSidePanel(liveCatalogPanel(), null, true);
     return;
   }
   const shell = elements.viewsConceptStage.querySelector(".views-focus-shell");
@@ -644,8 +609,8 @@ function setViewsActivePane(pane) {
   if (!panes) return;
   const previousPane = panes.dataset.activePane;
   const transitioning = Boolean(previousPane && previousPane !== activePane);
-  clearTimeout(viewsPrototypeState.paneTimer);
-  viewsPrototypeState.activePane = activePane;
+  clearTimeout(viewsState.paneTimer);
+  viewsState.activePane = activePane;
   const lineage = panes.querySelector(".prototype-lineage-body");
   const definition = panes.querySelector(".prototype-focus-definition-content");
   if (transitioning) {
@@ -661,11 +626,11 @@ function setViewsActivePane(pane) {
     lineage.hidden = activePane !== "lineage";
     definition.hidden = activePane !== "definition";
   };
-  if (transitioning) viewsPrototypeState.paneTimer = setTimeout(finish, 380); else finish();
+  if (transitioning) viewsState.paneTimer = setTimeout(finish, 380); else finish();
 }
 
 function toggleViewsActivePane(pane) {
-  const nextPane = viewsPrototypeState.activePane === pane
+  const nextPane = viewsState.activePane === pane
     ? (pane === "lineage" ? "definition" : "lineage")
     : pane;
   setViewsActivePane(nextPane);
@@ -674,55 +639,95 @@ function toggleViewsActivePane(pane) {
 function setDesignLayer(layer) {
   const nextLayer = layer === "views" ? "views" : "tables";
   const viewsOpen = nextLayer === "views";
-  if (viewsPrototypeState.layer === nextLayer && (viewsOpen ? elements.viewsPrototypeWorkspace.classList.contains("open") : elements.viewsPrototypeWorkspace.hidden)) return;
-  viewsPrototypeState.layer = nextLayer;
-  clearTimeout(viewsPrototypeState.layerTimer);
+  if (viewsState.layer === nextLayer && (viewsOpen ? elements.viewsPrototypeWorkspace.classList.contains("open") : elements.viewsPrototypeWorkspace.hidden)) return;
+  viewsState.layer = nextLayer;
+  clearTimeout(viewsState.layerTimer);
   elements.viewsPrototypeWorkspace.inert = !viewsOpen;
   elements.viewsPrototypeWorkspace.setAttribute("aria-hidden", String(!viewsOpen));
   elements.workspace.inert = viewsOpen;
   elements.workspace.setAttribute("aria-hidden", String(viewsOpen));
   elements.designLayerSwitch.querySelectorAll("[data-design-layer]").forEach(button => {
-    const active = button.dataset.designLayer === viewsPrototypeState.layer;
+    const active = button.dataset.designLayer === viewsState.layer;
     button.classList.toggle("active", active);
     button.setAttribute("aria-pressed", String(active));
   });
   if (viewsOpen) {
     elements.viewsPrototypeWorkspace.hidden = false;
-    renderViewsPrototype();
+    renderViews();
+    loadViewsCatalog();
     elements.mainLayout.classList.add("views-layer-open", "views-layer-entering");
     requestAnimationFrame(() => elements.viewsPrototypeWorkspace.classList.add("open"));
-    viewsPrototypeState.layerTimer = setTimeout(() => elements.mainLayout.classList.remove("views-layer-entering"), 300);
+    viewsState.layerTimer = setTimeout(() => elements.mainLayout.classList.remove("views-layer-entering"), 300);
     return;
   }
   elements.mainLayout.classList.remove("views-layer-open", "views-layer-entering");
+  viewsState.catalogGeneration += 1;
+  viewsState.inspectionGeneration += 1;
   elements.viewsPrototypeWorkspace.classList.remove("open");
-  viewsPrototypeState.layerTimer = setTimeout(() => {
-    if (viewsPrototypeState.layer === "tables") elements.viewsPrototypeWorkspace.hidden = true;
+  viewsState.layerTimer = setTimeout(() => {
+    if (viewsState.layer === "tables") elements.viewsPrototypeWorkspace.hidden = true;
   }, 300);
 }
 
-function openPrototypeViewEditor(viewId = null, duplicate = false) {
-  const existing = viewId ? viewsPrototypeState.views.find(viewItem => viewItem.id === viewId) : null;
-  viewsPrototypeState.editingId = duplicate ? null : existing?.id ?? null;
-  const draft = existing ? { ...existing, name: duplicate ? `${existing.name}_copy` : existing.name } : { name: "new_view", namespace: "bookstore", kind: "view", query: 'SELECT\n    source.id\nFROM "bookstore"."source_table" AS source' };
-  viewsPrototypeState.editorBody = draft.query;
-  elements.prototypeViewEditorTitle.textContent = existing && !duplicate ? `Edit ${existing.name}` : "Create view";
-  elements.prototypeViewNamespace.value = draft.namespace;
-  elements.prototypeViewName.value = draft.name;
-  elements.prototypeViewEditorForm.elements["prototype-view-kind"].value = draft.kind;
-  elements.prototypeViewSql.value = prototypeViewDefinition(draft);
-  elements.prototypeViewEditorDialog.showModal();
-  elements.prototypeViewSql.focus();
+async function inspectViewsRelation(relation) {
+  const target = viewsState.target;
+  if (!target || !relation) return;
+  const generation = ++viewsState.inspectionGeneration;
+  Object.assign(viewsState, { status: "inspecting", descriptor: null, message: `Inspecting ${target.database}.${target.namespace}.${relation.name}...` });
+  renderViews();
+  try {
+    const descriptor = await postgresRequest(`/api/postgres/profiles/${encodeURIComponent(target.profileId)}/relation?database=${encodeURIComponent(target.database)}&namespace=${encodeURIComponent(target.namespace)}&relation=${encodeURIComponent(relation.name)}&expectedKind=${encodeURIComponent(relation.kind)}`, { method: "GET" });
+    if (generation !== viewsState.inspectionGeneration || viewsState.layer !== "views") return;
+    if (!verifyViewsDescriptor(descriptor, target, relation)) throw new Error("PostgreSQL returned a relation outside the exact selected target or identity");
+    Object.assign(viewsState, { descriptor, status: "ready", message: `Loaded live view ${target.database}.${target.namespace}.${relation.name}.` });
+  } catch (error) {
+    if (generation !== viewsState.inspectionGeneration || viewsState.layer !== "views") return;
+    Object.assign(viewsState, { status: "inspection_error", message: error.message || "The live view could not be inspected." });
+  }
+  renderViews();
 }
 
-function rewritePrototypeViewTemplate() {
-  const kind = elements.prototypeViewEditorForm.elements["prototype-view-kind"].value;
-  const namespace = elements.prototypeViewNamespace.value.trim() || "bookstore";
-  const name = elements.prototypeViewName.value.trim() || "new_view";
-  const current = elements.prototypeViewSql.value;
-  const bodyMatch = current.match(/\bAS\s*\n([\s\S]*?)(?:\nWITH\s+(?:NO\s+)?DATA)?;?\s*$/i);
-  if (bodyMatch?.[1]?.trim()) viewsPrototypeState.editorBody = bodyMatch[1].trim();
-  elements.prototypeViewSql.value = prototypeViewDefinition({ kind, namespace, name, query: viewsPrototypeState.editorBody });
+async function loadViewsCatalog() {
+  const generation = ++viewsState.catalogGeneration;
+  viewsState.inspectionGeneration += 1;
+  const priorSelection = viewsState.selectedId;
+  Object.assign(viewsState, { status: "loading", message: "Loading PostgreSQL profiles and namespaces...", views: [], descriptor: null, target: null, inspectedRelation: null });
+  renderViews();
+  try {
+    const profiles = await postgresProfileRepository.list();
+    if (generation !== viewsState.catalogGeneration || viewsState.layer !== "views") return;
+    postgresState.profiles = profiles;
+    if (!profiles.length) {
+      Object.assign(viewsState, { status: "no_profiles", message: "No PostgreSQL profiles are available. Add a connection to browse live views." });
+      return renderViews();
+    }
+    const initial = selectViewsTarget(profiles, postgresState.selectedProfileId, schema.postgres, postgresState.namespace, []);
+    const namespaces = await postgresProfileRepository.namespaces(initial.profile.id);
+    if (generation !== viewsState.catalogGeneration || viewsState.layer !== "views") return;
+    const resolved = selectViewsTarget(profiles, initial.profile.id, schema.postgres, postgresState.namespace, namespaces);
+    Object.assign(postgresState, { selectedProfileId: resolved.profile.id, namespaces, namespace: resolved.namespace });
+    if (!resolved.namespace) {
+      Object.assign(viewsState, { status: "no_namespaces", message: `${resolved.profile.dbname} has no user namespaces.` });
+      return renderViews();
+    }
+    const target = { profileId: resolved.profile.id, database: resolved.profile.dbname, namespace: resolved.namespace };
+    viewsState.target = target;
+    const catalog = await postgresRequest(`/api/postgres/profiles/${encodeURIComponent(target.profileId)}/relations?database=${encodeURIComponent(target.database)}&namespace=${encodeURIComponent(target.namespace)}`, { method: "GET" });
+    if (generation !== viewsState.catalogGeneration || viewsState.layer !== "views") return;
+    if (!verifyViewsCatalog(catalog, target)) throw new Error("PostgreSQL returned a catalog outside the exact selected target");
+    const views = catalog.relations.filter(relation => relation && ["view", "materialized_view"].includes(relation.kind) && typeof relation.name === "string");
+    viewsState.views = views;
+    viewsState.selectedId = views.some(item => item.name === priorSelection) ? priorSelection : views[0]?.name ?? null;
+    if (!views.length) {
+      Object.assign(viewsState, { status: "empty", message: `No views or materialized views exist in ${target.database}.${target.namespace}.` });
+      return renderViews();
+    }
+    await inspectViewsRelation(views.find(item => item.name === viewsState.selectedId));
+  } catch (error) {
+    if (generation !== viewsState.catalogGeneration || viewsState.layer !== "views") return;
+    Object.assign(viewsState, { status: "error", message: error.message || "The live Views catalog could not be loaded." });
+    renderViews();
+  }
 }
 
 function standaloneSqlTarget() {
@@ -5658,7 +5663,7 @@ const aiAssistant = window.SchemiiShared.createAiAssistant({
   labels: { trigger: "AI schema assistant", prompt: "Ask about this schema...", newChatCopy: "Proposals will use the currently active design." },
   onOpenChange: open => {
     elements.mainLayout.classList.toggle("ai-open", open);
-    const viewsOpen = viewsPrototypeState.layer === "views";
+    const viewsOpen = viewsState.layer === "views";
     const backgroundStates = new Map([
       [elements.toolRail, open],
       [elements.workspace, open || standaloneSqlState.open || viewsOpen],
@@ -6469,96 +6474,52 @@ elements.viewsConceptStage.addEventListener("click", event => {
   if (paneToggle) return toggleViewsActivePane(paneToggle.dataset.viewsPane);
   const lineageMode = event.target.closest("[data-lineage-mode]");
   if (lineageMode) {
-    viewsPrototypeState.lineageMode = lineageMode.dataset.lineageMode;
-    return renderViewsPrototype();
+    viewsState.lineageMode = lineageMode.dataset.lineageMode;
+    return renderViews();
+  }
+  const kindFilter = event.target.closest("[data-view-kind-filter]");
+  if (kindFilter) {
+    viewsState.kindFilter = kindFilter.dataset.viewKindFilter;
+    return renderViews();
+  }
+  if (event.target.closest("[data-refresh-views]")) return loadViewsCatalog();
+  if (event.target.closest("[data-open-postgres-dialog]")) {
+    renderPostgresCatalogSummary();
+    elements.postgresDialog.showModal();
+    return loadPostgresProfiles();
   }
   if (catalogToggle) {
-    setPrototypeViewCatalogOpen(!viewsPrototypeState.catalogOpen);
-    if (viewsPrototypeState.catalogOpen) elements.viewsConceptStage.querySelector("[data-prototype-view-filter]")?.focus();
+    setViewsCatalogOpen(!viewsState.catalogOpen);
+    if (viewsState.catalogOpen) elements.viewsConceptStage.querySelector("[data-views-filter]")?.focus();
     return;
   }
-  const relationButton = event.target.closest("[data-prototype-relation]");
-  if (relationButton) {
-    viewsPrototypeState.catalogOpen = false;
-    viewsPrototypeState.inspectedRelation = relationButton.dataset.prototypeRelation;
+  if (event.target.closest("[data-inspect-selected-view]")) {
+    viewsState.catalogOpen = false;
+    viewsState.inspectedRelation = viewsState.descriptor;
     const panelOpen = elements.viewsConceptStage.querySelector(".views-focus-shell")?.classList.contains("catalog-open");
-    if (panelOpen) return swapPrototypeSidePanel(renderPrototypeRelationInspector(viewsPrototypeState.inspectedRelation), viewsPrototypeState.inspectedRelation);
-    return renderViewsPrototype();
+    if (panelOpen) return swapViewsSidePanel(renderLiveInspector(viewsState.inspectedRelation), viewsState.inspectedRelation.relation);
+    return renderViews();
   }
-  if (event.target.closest("[data-create-prototype-view]")) return openPrototypeViewEditor();
-  if (event.target.closest("[data-save-prototype-definition]")) {
-    const selected = selectedPrototypeView();
-    selected.savedDraft = selected.definitionDraft ?? prototypeViewDefinition(selected);
-    elements.viewsConceptStage.querySelector("[data-prototype-draft-status]").textContent = "Draft saved in browser memory";
-    showToast("View definition draft saved in browser memory");
-    return;
-  }
-  if (event.target.closest("[data-commit-prototype-definition]")) {
-    elements.prototypeViewCommitDialog.showModal();
-    return;
-  }
-  if (event.target.closest("[data-close-prototype-side]")) {
-    viewsPrototypeState.inspectedRelation = null;
-    setPrototypeViewCatalogOpen(false);
+  if (event.target.closest("[data-close-views-side]")) {
+    viewsState.inspectedRelation = null;
+    setViewsCatalogOpen(false);
     return elements.viewsConceptStage.querySelector("[data-toggle-prototype-catalog]")?.focus();
   }
-  const viewCard = event.target.closest("[data-prototype-view-id]");
-  const editButton = event.target.closest("[data-prototype-edit]");
-  const duplicateButton = event.target.closest("[data-prototype-duplicate]");
-  if (editButton) return openPrototypeViewEditor(editButton.dataset.prototypeEdit);
-  if (duplicateButton) return openPrototypeViewEditor(duplicateButton.dataset.prototypeDuplicate, true);
+  const viewCard = event.target.closest("[data-views-view-id]");
   if (!viewCard) return;
-  viewsPrototypeState.selectedId = viewCard.dataset.prototypeViewId;
-  renderViewsPrototype();
-});
-elements.prototypeViewCommitDialog.addEventListener("close", () => {
-  if (elements.prototypeViewCommitDialog.returnValue !== "confirm") return;
-  const selected = selectedPrototypeView();
-  selected.savedDraft = selected.definitionDraft ?? prototypeViewDefinition(selected);
-  renderViewsPrototype();
-  showToast("Prototype commit reviewed; no PostgreSQL request was made");
+  viewsState.selectedId = viewCard.dataset.viewsViewId;
+  viewsState.catalogOpen = false;
+  inspectViewsRelation(viewsState.views.find(item => item.name === viewsState.selectedId));
 });
 elements.viewsConceptStage.addEventListener("input", event => {
-  const definitionEditor = event.target.closest("[data-prototype-definition-editor]");
-  if (definitionEditor) {
-    selectedPrototypeView().definitionDraft = definitionEditor.value;
-    elements.viewsConceptStage.querySelector("[data-prototype-draft-status]").textContent = "Unsaved browser-local changes";
-    return;
-  }
-  const filter = event.target.closest("[data-prototype-view-filter]");
+  const filter = event.target.closest("[data-views-filter]");
   if (!filter) return;
-  const query = filter.value.trim().toLowerCase();
-  elements.viewsConceptStage.querySelectorAll(".prototype-focus-catalog [data-prototype-view-id]").forEach(card => {
-    card.hidden = Boolean(query) && !card.textContent.toLowerCase().includes(query);
-  });
-});
-document.querySelector("#close-prototype-view-editor").addEventListener("click", () => elements.prototypeViewEditorDialog.close());
-document.querySelector("#cancel-prototype-view-editor").addEventListener("click", () => elements.prototypeViewEditorDialog.close());
-elements.prototypeViewEditorForm.addEventListener("change", event => {
-  if (event.target.name === "prototype-view-kind") rewritePrototypeViewTemplate();
-});
-elements.prototypeViewNamespace.addEventListener("input", rewritePrototypeViewTemplate);
-elements.prototypeViewName.addEventListener("input", rewritePrototypeViewTemplate);
-elements.prototypeViewEditorForm.addEventListener("submit", event => {
-  event.preventDefault();
-  const namespace = elements.prototypeViewNamespace.value.trim() || "bookstore";
-  const name = elements.prototypeViewName.value.trim() || "new_view";
-  const kind = elements.prototypeViewEditorForm.elements["prototype-view-kind"].value;
-  const definition = elements.prototypeViewSql.value.trim();
-  const queryMatch = definition.match(/\bAS\s*\n([\s\S]*?)(?:\nWITH\s+(?:NO\s+)?DATA)?;?\s*$/i);
-  const query = queryMatch?.[1]?.trim() || viewsPrototypeState.editorBody;
-  const existing = viewsPrototypeState.views.find(viewItem => viewItem.id === viewsPrototypeState.editingId);
-  if (existing) {
-    Object.assign(existing, { namespace, name, kind, query });
-    viewsPrototypeState.selectedId = existing.id;
-  } else {
-    const created = { id: uid("prototype_view"), namespace, name, kind, query, sources: ["source_table"], dependents: [], columns: ["id", "display_value"] };
-    viewsPrototypeState.views.push(created);
-    viewsPrototypeState.selectedId = created.id;
-  }
-  elements.prototypeViewEditorDialog.close();
-  renderViewsPrototype();
-  showToast("View draft kept in browser memory");
+  viewsState.search = filter.value;
+  const selection = filter.selectionStart;
+  renderViews();
+  const next = elements.viewsConceptStage.querySelector("[data-views-filter]");
+  next?.focus();
+  next?.setSelectionRange(selection, selection);
 });
 
 elements.standaloneSqlButton.addEventListener("click", () => {
@@ -6721,6 +6682,7 @@ elements.postgresNamespaceSelect.addEventListener("change", event => {
   postgresState.namespace = event.target.value;
   postgresState.plan = null;
   updatePostgresControls();
+  if (viewsState.layer === "views") loadViewsCatalog();
 });
 elements.postgresImportButton.addEventListener("click", importPostgresSchema);
 elements.postgresPreviewButton.addEventListener("click", previewPostgresMigration);
@@ -6757,6 +6719,7 @@ elements.postgresProfilesList.addEventListener("click", async event => {
   postgresState.plan = null;
   renderPostgresProfiles();
   await loadPostgresNamespaces();
+  if (viewsState.layer === "views") loadViewsCatalog();
 });
 elements.postgresProfileForm.addEventListener("submit", async event => {
   event.preventDefault();

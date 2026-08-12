@@ -114,6 +114,12 @@ class FakePostgresService:
             "profileId": profile_id, "database": database, "namespace": namespace, "relation": relation,
             "kind": "table", "columns": [], "fingerprint": "live",
             "definition": {"status": "unavailable", "reason": "not_supported"},
+            "owner": {"status": "available", "name": "developer"},
+            "permissions": {"canSelect": True, "canAlter": True, "canRefresh": False},
+            "dependencies": {"status": "unavailable", "reason": "not_applicable"},
+            "dependents": {"status": "unavailable", "reason": "not_applicable"},
+            "materialized": {"status": "unavailable", "reason": "not_applicable"},
+            "columnProvenance": {"status": "unavailable", "reason": "not_supported"},
         }
 
     def preview_relation_rows(self, profile_id, source, offset, limit):

@@ -178,7 +178,7 @@
           <div class="zoom-display" id="zoom-display">100%</div>
         </section>
 
-        <section class="views-prototype-workspace" id="views-prototype-workspace" aria-label="Views layer prototype" hidden inert>
+        <section class="views-prototype-workspace" id="views-prototype-workspace" aria-label="Live PostgreSQL views catalog" aria-hidden="true" aria-busy="false" hidden inert>
           <div class="views-concept-stage" id="views-concept-stage"></div>
         </section>
 
@@ -683,30 +683,6 @@ ALTER TABLE "public"."books"
         <div class="standalone-sql-save-notice"><strong>Session only</strong><span>This visual prototype clears saved queries when the page reloads.</span></div>
         <label class="standalone-sql-save-field" for="standalone-sql-save-name"><span>Query name</span><input id="standalone-sql-save-name" maxlength="80" autocomplete="off" placeholder="e.g. Recent paid orders" /></label>
         <footer class="dialog-actions"><button class="button button-ghost" id="cancel-standalone-sql-save" type="button">Cancel</button><button class="button button-primary" type="submit">Save query</button></footer>
-      </form>
-    </dialog>
-
-    <dialog id="prototype-view-editor-dialog" class="prototype-view-editor-dialog" aria-labelledby="prototype-view-editor-title">
-      <form id="prototype-view-editor-form">
-        <header class="prototype-view-editor-head">
-          <div><span class="eyebrow">Browser-local definition</span><h2 id="prototype-view-editor-title">Create view</h2><p>Start with a complete PostgreSQL statement, then edit the query body directly.</p></div>
-          <button class="shared-icon-button" id="close-prototype-view-editor" type="button" aria-label="Close view editor"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button>
-        </header>
-        <div class="prototype-view-editor-meta">
-          <fieldset><legend>View kind</legend><label><input type="radio" name="prototype-view-kind" value="view" checked/><span><strong>View</strong><small>Always reads current rows</small></span></label><label><input type="radio" name="prototype-view-kind" value="materialized"/><span><strong>Materialized view</strong><small>Stores rows until refreshed</small></span></label></fieldset>
-          <label><span>Namespace</span><input id="prototype-view-namespace" value="bookstore" autocomplete="off"/></label>
-          <label><span>Name</span><input id="prototype-view-name" value="new_view" autocomplete="off"/></label>
-        </div>
-        <div class="prototype-view-sql-wrap"><header><span><span class="eyebrow">Raw PostgreSQL</span><strong>CREATE statement</strong></span><span>Template updates with kind and identity</span></header><textarea id="prototype-view-sql" spellcheck="false" aria-label="Raw CREATE view statement"></textarea></div>
-        <footer><span>Prototype only · this definition is not saved or executed</span><div class="dialog-actions"><button class="button button-ghost" id="cancel-prototype-view-editor" type="button">Cancel</button><button class="button button-primary" type="submit">Keep draft</button></div></footer>
-      </form>
-    </dialog>
-
-    <dialog id="prototype-view-commit-dialog" class="prototype-view-commit-dialog" aria-labelledby="prototype-view-commit-title">
-      <form method="dialog">
-        <header><div><span class="eyebrow">Browser-local migration review</span><h2 id="prototype-view-commit-title">Commit view changes</h2></div><button class="shared-icon-button" value="cancel" aria-label="Close commit review"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button></header>
-        <section><strong>No PostgreSQL request will be made</strong><p>This visual prototype represents the future migration-preview boundary. A backend phase must validate the live catalog, permissions, dependencies, stale fingerprints, and generated SQL before commit can apply changes.</p></section>
-        <footer><button class="button button-ghost" value="cancel">Return to draft</button><button class="button button-primary" value="confirm">Confirm prototype commit</button></footer>
       </form>
     </dialog>
 

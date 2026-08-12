@@ -9,7 +9,7 @@ This checklist governs the UI-first design and later implementation of two Schem
 - [ ] Obtain explicit approval before starting each phase below.
 - [x] During look-and-feel phases, use static or browser-local prototype state only; do not add execution or persistence APIs.
 - [x] Use browser render checks only while iterating on visual prototypes; defer test creation and test-suite execution until an explicit verification milestone.
-- [ ] Run the complete required verification before completing each backend phase and before merging the branch.
+- [x] Run the complete required verification before completing each backend phase and before merging the branch.
 - [x] Preserve saved canvas layout, profiles, database data, and unrelated user-owned state throughout implementation.
 
 ## Product Decisions To Lock
@@ -107,7 +107,7 @@ Acceptance criteria: read-only mode rejects writes server-side; write mode execu
 
 Approval required before implementation.
 
-- [ ] Extend catalog introspection for ordinary views and materialized views, including definitions, ownership, output columns, dependencies, and stable fingerprints.
+- [x] Phase 5A: extend read-only live catalog inspection and the Views workspace for ordinary and materialized views with definitions, ownership, current-role permissions, output columns, bounded direct lineage, materialized state, explicit unavailable column provenance, unchanged semantic fingerprints, strict exact-response validation, and no reachable mutation behavior.
 - [ ] Add bounded read-only preview for an exact view identity.
 - [ ] Add versioned persistence for Views-layer positions and viewport without changing table-layer layout.
 - [ ] Preserve established view-card layout across introspection refreshes.
