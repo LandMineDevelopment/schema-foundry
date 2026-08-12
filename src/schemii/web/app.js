@@ -5954,6 +5954,9 @@ function renderAiAction(proposal, context) {
     review.className = "ai-action-review";
     review.textContent = JSON.stringify(payload, null, 2);
     card.append(review);
+    if (type === "delete_element" && Array.isArray(payload.impact)) {
+      detail.textContent = `${payload.reason} This deletes ${payload.impact.length} saved object${payload.impact.length === 1 ? "" : "s"}; review the exact impact below.`;
+    }
   }
   const button = document.createElement("button");
   button.type = "button";
@@ -5984,6 +5987,7 @@ async function confirmAiAction(proposal, context, card, button) {
   if (activeSchemaId !== context.schemaId) return showToast("The active design changed. Ask the assistant for a fresh proposal");
   try {
     button.disabled = true;
+    await flushPendingSave();
     const response = await aiAssistant.executeProposal(proposal, context);
     const operation = response.operation;
     if (operation?.state !== "succeeded") throw new Error(operation?.error?.message || "The operation did not succeed");
@@ -5997,6 +6001,31 @@ async function confirmAiAction(proposal, context, card, button) {
 }
 
 async function handleSchemiiAiOperationResult(result, context) {
+  if (result?.kind === "schema_saved") {
+    const payload = await sharedSessionClient.json("/api/schemas", {}, {
+      allowPath: path => path === "/api/schemas",
+      defaultMessage: "The saved schema could not be refreshed"
+    });
+    const records = Array.isArray(payload.schemas) ? payload.schemas : [];
+    const refreshed = records.find(record => record.id === result.schemaId);
+    if (!refreshed) throw new Error("The saved schema could not be refreshed");
+    schemaLibrary = { activeId: activeSchemaId, schemas: records };
+    schema = migrateSchema(clone(refreshed.schema));
+    view = clone(schema.layout.layers.tables.viewport);
+    resetSchemaSession();
+    render();
+    elements.saveStatus.textContent = "Saved to file";
+    return "Saved";
+  }
+  if (result?.kind === "project_created") {
+    const payload = await sharedSessionClient.json("/api/schemas", {}, {
+      allowPath: path => path === "/api/schemas",
+      defaultMessage: "The new project could not be loaded"
+    });
+    schemaLibrary = { activeId: activeSchemaId, schemas: Array.isArray(payload.schemas) ? payload.schemas : [] };
+    await openSchema(result.schemaId, { fit: false });
+    return "Created";
+  }
   if (result?.kind === "client_command" && result.command?.type === "open_schema") {
     await flushPendingSave();
     await openSchema(result.command.schemaId, { fit: false });

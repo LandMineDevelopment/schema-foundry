@@ -482,8 +482,8 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(repaired["text"], visible)
         self.assertEqual(repaired["parts"], [{"type": "text", "text": visible}])
         self.assertNotIn("SCHEMII_PROPOSALS", json.dumps(repaired["parts"]))
-        disabled = {**response, "text": 'SCHEMII_PROPOSALS:[{"type":"create_project","projectName":"Demo","requiresConfirmation":true}]'}
-        self.assertEqual(_proposal_manifest_fallback(disabled)["actions"], [])
+        creation = {**response, "text": 'SCHEMII_PROPOSALS:[{"type":"create_project","projectName":"Demo","requiresConfirmation":true}]'}
+        self.assertEqual(_proposal_manifest_fallback(creation)["actions"][0]["type"], "create_project")
         mixed = {**response, "text": 'SCHEMII_PROPOSALS:[{"type":"unknown_action"}]'}
         self.assertIs(_proposal_manifest_fallback(mixed), mixed)
         query = {**response, "text": 'SCHEMII_PROPOSALS:[{"type":"schema_read_query","sql":"SELECT 1"}]'}
@@ -579,7 +579,7 @@ class ServerTests(unittest.TestCase):
             self.assertNotIn(secret, context_and_text)
         self.assertFalse(any(item[0] == "list_namespaces" for item in self.service.calls))
         self.assertIn("proposals are not executed", call[4].lower())
-        self.assertIn("resource creation are temporarily unavailable", call[4].lower())
+        self.assertIn("local project creation execute in the schemii backend", call[4].lower())
         self.assertNotIn("schema_migration_apply", call[4].lower())
         self.assertFalse(call[5])
 

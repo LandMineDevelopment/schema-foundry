@@ -37,6 +37,25 @@ class AiActionTests(unittest.TestCase):
         self.assertTrue(connection["requiresPasswordEntry"])
         self.assertNotIn("password", connection)
 
+    def test_schemii_mutations_are_exact_and_canonical(self):
+        action = {
+            "type": "add_table", "name": "events", "purpose": "Store events",
+            "columns": [{"name": "id", "type": "uuid", "primary": True}],
+            "requiresConfirmation": True,
+        }
+        normalized = normalize_schemii_action(action, "schema")
+        self.assertEqual(normalized["columns"][0]["name"], "id")
+        with self.assertRaises(ValueError):
+            normalize_schemii_action({**action, "unknown": True}, "schema")
+        with self.assertRaises(ValueError):
+            normalize_schemii_action({**action, "columns": [{"name": "id", "type": "uuid", "extra": True}]}, "schema")
+
+        deletion = normalize_schemii_action({
+            "type": "delete_element", "elementType": "column", "tableId": "table_one", "columnId": "col_one",
+            "reason": "No longer used", "destructive": True, "requiresConfirmation": True,
+        }, "schema")
+        self.assertTrue(deletion["destructive"])
+
     def test_schemer_actions_are_exact_and_revision_bound(self):
         action = {
             "type": "dashboard_open", "dashboardId": "dashboard_one", "expectedRevision": 3,

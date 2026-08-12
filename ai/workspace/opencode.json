@@ -50,6 +50,14 @@
       "target-selection": "allow"
     },
     "schema_read_query": "allow",
+    "schema_populate": "allow",
+    "schema_add_table": "allow",
+    "schema_rename_table": "allow",
+    "schema_add_column": "allow",
+    "schema_update_column": "allow",
+    "schema_delete_element": "allow",
+    "schema_add_relationship": "allow",
+    "schema_project_create": "allow",
     "schema_connection_setup": "allow",
     "schema_project_open": "allow"
   }

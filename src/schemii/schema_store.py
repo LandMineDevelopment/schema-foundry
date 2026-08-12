@@ -12,6 +12,11 @@ from typing import Any
 
 from .atomic_json import write_json
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows uses the process lock only.
+    fcntl = None
+
 
 SCHEMA_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 LAYOUT_TOKEN_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -25,7 +30,13 @@ class SchemaStoreError(Exception):
 
 
 def schema_layout_token(record: dict[str, Any]) -> str:
-    layout = record.get("schema", {}).get("layout", {}) if isinstance(record, dict) else {}
+    schema = record.get("schema", {}) if isinstance(record, dict) else {}
+    tables = schema.get("tables", []) if isinstance(schema, dict) else []
+    legacy = {
+        table.get("id"): {field: table.get(field) for field in ("x", "y", "color") if field in table}
+        for table in tables if isinstance(table, dict) and isinstance(table.get("id"), str)
+    }
+    layout = {"layout": schema.get("layout", {}), "legacyTables": legacy}
     encoded = json.dumps(layout, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
@@ -82,11 +93,40 @@ class SchemaStore:
         self.schema_dir = Path(schema_dir).expanduser()
         self._lock = threading.RLock()
         self._schema_locks: dict[str, threading.RLock] = {}
+        self._lock_state = threading.local()
         self.schema_dir.mkdir(parents=True, exist_ok=True)
+        self.lock_dir = self.schema_dir / ".locks"
+        self.lock_dir.mkdir(mode=0o700, exist_ok=True)
 
     def _schema_lock(self, schema_id: str) -> threading.RLock:
         with self._lock:
             return self._schema_locks.setdefault(schema_id, threading.RLock())
+
+    @contextmanager
+    def _schema_guard(self, schema_id: str):
+        """Serialize schema writes across threads and server processes."""
+        with self._schema_lock(schema_id):
+            depths = getattr(self._lock_state, "depths", {})
+            depth = depths.get(schema_id, 0)
+            depths[schema_id] = depth + 1
+            self._lock_state.depths = depths
+            handle = None
+            try:
+                if depth == 0 and fcntl is not None:
+                    path = self.lock_dir / f"{schema_id}.lock"
+                    path.touch(mode=0o600, exist_ok=True)
+                    os.chmod(path, 0o600)
+                    handle = path.open("a+b")
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                yield
+            finally:
+                if handle is not None:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                    handle.close()
+                if depth:
+                    depths[schema_id] = depth
+                else:
+                    depths.pop(schema_id, None)
 
     @staticmethod
     def validate_id(schema_id: Any) -> str:
@@ -128,18 +168,18 @@ class SchemaStore:
 
     def get(self, schema_id: str) -> dict[str, Any]:
         schema_id = self.validate_id(schema_id)
-        with self._schema_lock(schema_id):
+        with self._schema_guard(schema_id):
             found = self._find(schema_id)
             if found is None:
                 raise SchemaStoreError(404, "not_found", "Schema was not found")
-            return json.loads(json.dumps(found[1]))
+            return {**json.loads(json.dumps(found[1])), "layoutToken": schema_layout_token(found[1])}
 
     @contextmanager
     def guard_revision(self, schema_id: str, expected_revision: Any):
         schema_id = self.validate_id(schema_id)
         if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 1:
             raise SchemaStoreError(400, "invalid_schema_binding", "expectedRevision is invalid")
-        with self._schema_lock(schema_id):
+        with self._schema_guard(schema_id):
             found = self._find(schema_id)
             if found is None:
                 raise SchemaStoreError(404, "not_found", "Schema was not found")
@@ -183,7 +223,7 @@ class SchemaStore:
         if operation not in {"upsert", "delete"}:
             raise SchemaStoreError(400, "invalid_schema_binding", "View operation is invalid")
         schema_id = self.validate_id(schema_id)
-        with self._schema_lock(schema_id):
+        with self._schema_guard(schema_id):
             found = self._find(schema_id)
             if found is None:
                 raise SchemaStoreError(404, "not_found", "Schema was not found")
@@ -222,7 +262,7 @@ class SchemaStore:
     ):
         """Reserve one schema from binding validation through narrow sync."""
         schema_id = self.validate_id(schema_id)
-        with self._schema_lock(schema_id):
+        with self._schema_guard(schema_id):
             self.require_view_mutation_binding(
                 schema_id, expected_revision, layout_token,
                 profile_id, database, namespace, relation, operation, expectation, saved_view_id,
@@ -238,7 +278,7 @@ class SchemaStore:
         if operation not in {"upsert", "delete"} or not isinstance(expected_absent, bool):
             raise SchemaStoreError(400, "invalid_schema_binding", "expectedAbsent is invalid")
         schema_id = self.validate_id(schema_id)
-        with self._schema_lock(schema_id):
+        with self._schema_guard(schema_id):
             found = self._find(schema_id)
             if found is None:
                 raise SchemaStoreError(404, "not_found", "Schema was not found")
@@ -298,7 +338,7 @@ class SchemaStore:
     ) -> dict[str, Any]:
         schema_id = self.validate_id(schema_id)
         record = self._validate_record(record, schema_id)
-        with self._schema_lock(schema_id):
+        with self._schema_guard(schema_id):
             found = self._find(schema_id)
             current_revision = 0
             existing_path = None
@@ -344,9 +384,86 @@ class SchemaStore:
                 "layoutToken": schema_layout_token(stored),
             }
 
+    def apply_ai_mutation(
+        self,
+        schema_id: str,
+        operation_id: str,
+        expected_revision: Any,
+        expected_layout_token: Any,
+        transform,
+    ) -> dict[str, Any]:
+        """Apply one idempotent AI transform and persist its receipt atomically."""
+        schema_id = self.validate_id(schema_id)
+        if not isinstance(operation_id, str) or not SCHEMA_ID_PATTERN.fullmatch(operation_id):
+            raise SchemaStoreError(400, "invalid_operation", "Operation identity is invalid")
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 1:
+            raise SchemaStoreError(400, "invalid_schema_binding", "expectedRevision is invalid")
+        if not isinstance(expected_layout_token, str) or not LAYOUT_TOKEN_PATTERN.fullmatch(expected_layout_token):
+            raise SchemaStoreError(400, "invalid_schema_binding", "layoutToken is invalid")
+        with self._schema_guard(schema_id):
+            found = self._find(schema_id)
+            if found is None:
+                raise SchemaStoreError(404, "not_found", "Schema was not found")
+            path, record = found
+            receipts = record.get("aiOperationReceipts", {})
+            if not isinstance(receipts, dict):
+                raise SchemaStoreError(500, "schema_store_error", "Schema operation receipts are invalid")
+            if operation_id in receipts:
+                return json.loads(json.dumps(receipts[operation_id]))
+            if record.get("revision", 0) != expected_revision:
+                raise SchemaStoreError(409, "schema_conflict", "Schema changed in another session; reload before continuing", currentRevision=record.get("revision", 0))
+            if schema_layout_token(record) != expected_layout_token:
+                raise SchemaStoreError(409, "layout_conflict", "Saved layout changed; hard-refresh before continuing")
+            stored, result = transform(json.loads(json.dumps(record)))
+            self._validate_record(stored, schema_id)
+            stored["revision"] = expected_revision + 1
+            stored["updatedAt"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            receipt = {
+                **result,
+                "kind": "schema_saved",
+                "schemaId": schema_id,
+                "revision": stored["revision"],
+                "updatedAt": stored["updatedAt"],
+                "layoutToken": schema_layout_token(stored),
+            }
+            stored.setdefault("aiOperationReceipts", {})[operation_id] = receipt
+            try:
+                write_json(path, stored)
+            except OSError as exc:
+                raise SchemaStoreError(500, "schema_store_error", "Schema file could not be saved") from exc
+            return json.loads(json.dumps(receipt))
+
+    def create_ai_project(self, operation_id: str, project_name: str) -> dict[str, Any]:
+        if not isinstance(operation_id, str) or not SCHEMA_ID_PATTERN.fullmatch(operation_id):
+            raise SchemaStoreError(400, "invalid_operation", "Operation identity is invalid")
+        digest = hashlib.sha256(f"project:{operation_id}".encode()).hexdigest()[:20]
+        schema_id = f"schema_{digest}"
+        with self._schema_guard(schema_id):
+            found = self._find(schema_id)
+            if found is not None:
+                receipt = found[1].get("aiOperationReceipts", {}).get(operation_id)
+                if isinstance(receipt, dict):
+                    return json.loads(json.dumps(receipt))
+                raise SchemaStoreError(409, "schema_conflict", "Generated project identity is already in use")
+            now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            record = {
+                "id": schema_id, "revision": 1, "updatedAt": now,
+                "schema": {"projectName": project_name, "tables": [], "relationships": [], "functions": []},
+            }
+            receipt = {
+                "kind": "project_created", "schemaId": schema_id, "projectName": project_name,
+                "revision": 1, "updatedAt": now, "layoutToken": schema_layout_token(record),
+            }
+            record["aiOperationReceipts"] = {operation_id: receipt}
+            try:
+                write_json(self.schema_dir / f"{schema_id}.json", record)
+            except OSError as exc:
+                raise SchemaStoreError(500, "schema_store_error", "Schema file could not be saved") from exc
+            return json.loads(json.dumps(receipt))
+
     def delete(self, schema_id: str) -> dict[str, str]:
         schema_id = self.validate_id(schema_id)
-        with self._schema_lock(schema_id):
+        with self._schema_guard(schema_id):
             found = self._find(schema_id)
             if found:
                 try:
