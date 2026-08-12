@@ -159,7 +159,7 @@ class OpenCodeServiceTests(unittest.TestCase):
                     "info": {"role": "assistant", "time": {"created": 200}, "providerID": "opencode", "modelID": "deepseek-v4-flash-free", "path": "/secret"},
                     "parts": [
                         {"type": "text", "text": "I can add that."},
-                        {"type": "tool", "tool": "schema_add_table", "state": {"status": "completed", "input": {"password": "secret"}, "output": "SCHEMII_ACTION:" + json.dumps(action)}},
+                        {"type": "tool", "tool": "schema_project_open", "state": {"status": "completed", "input": {"password": "secret"}, "output": "SCHEMII_ACTION:" + json.dumps(action)}},
                         {"type": "tool", "tool": "bash", "state": {"status": "completed", "output": "secret"}},
                     ],
                 },
@@ -175,7 +175,7 @@ class OpenCodeServiceTests(unittest.TestCase):
         self.assertEqual(history["messages"][0], {"role": "user", "createdAt": 100, "text": "Add events"})
         self.assertEqual(history["messages"][1]["parts"], [
             {"type": "text", "text": "I can add that."},
-            {"type": "tool", "tool": "schema_add_table", "status": "completed"},
+            {"type": "tool", "tool": "schema_project_open", "status": "completed"},
         ])
         self.assertEqual(history["model"], {"providerId": "opencode", "modelId": "deepseek-v4-flash-free"})
         self.assertEqual([call[0].full_url for call in opener.calls], [
@@ -254,15 +254,13 @@ class OpenCodeServiceTests(unittest.TestCase):
         self.assertEqual(result["actions"], [])
 
     def test_prompt_enables_only_schemii_tools_and_normalizes_actions(self):
-        valid = {"type": "add_table", "table": {"name": "events"}}
         project = {"type": "open_project", "schemaId": "schema_orders", "projectName": "Orders", "requiresConfirmation": True}
         opener = Opener({"id": "ses_1", "directory": "/workspace"}, {"info": {"path": {"cwd": "/secret"}}, "parts": [
             {"type": "text", "text": "I propose a table."},
             {"type": "reasoning", "text": "Checked constraints.", "time": {"start": 1000, "end": 1350}},
             {"type": "tool", "tool": "skill", "state": {"status": "completed", "input": {"name": "schema-design-layout"}, "output": "/secret/skill/path"}},
-            {"type": "tool", "tool": "schema_add_table", "state": {"status": "completed", "output": "SCHEMII_ACTION:" + json.dumps(valid)}},
             {"type": "tool", "tool": "schema_project_open", "state": {"status": "completed", "output": "SCHEMII_ACTION:" + json.dumps(project)}},
-            {"type": "tool", "tool": "schema_add_table", "state": {"status": "completed", "output": " SCHEMII_ACTION:{}"}},
+            {"type": "tool", "tool": "schema_project_open", "state": {"status": "completed", "output": " SCHEMII_ACTION:{}"}},
             {"type": "tool", "tool": "bash", "state": {"status": "completed", "output": "SCHEMII_ACTION:{}"}},
         ]})
         result = self.service(opener).prompt(
@@ -277,8 +275,8 @@ class OpenCodeServiceTests(unittest.TestCase):
         self.assertTrue(payload["tools"]["skill"])
         self.assertTrue(all(payload["tools"][tool] is False for tool in ("bash", "read", "write", "edit", "webfetch", "task")))
         self.assertEqual(result["text"], "I propose a table.")
-        self.assertEqual(result["actions"], [valid, project])
-        self.assertEqual(len(result["parts"]), 6)
+        self.assertEqual(result["actions"], [project])
+        self.assertEqual(len(result["parts"]), 5)
         self.assertEqual(result["parts"][1], {"type": "reasoning", "text": "Checked constraints.", "durationMs": 350})
         self.assertEqual(result["parts"][2], {"type": "skill", "skill": "schema-design-layout", "status": "completed"})
         self.assertNotIn("cwd", json.dumps(result))
@@ -287,11 +285,11 @@ class OpenCodeServiceTests(unittest.TestCase):
     def test_prompt_rejects_disabled_and_mismatched_tool_actions(self):
         read_action = {"action": "schema_read_query", "profileId": "local", "namespace": "public", "sql": "SELECT 1"}
         wrong_action = {"type": "delete_element", "tableId": "events", "elementType": "table"}
-        valid_action = {"type": "add_table", "name": "events", "requiresConfirmation": True}
+        valid_action = {"type": "open_project", "schemaId": "events", "projectName": "Events", "requiresConfirmation": True}
         opener = Opener({"id": "ses_1", "directory": "/workspace"}, {"parts": [
             {"type": "tool", "tool": "schema_read_query", "state": {"status": "completed", "output": "SCHEMII_ACTION:" + json.dumps(read_action)}},
-            {"type": "tool", "tool": "schema_add_table", "state": {"status": "completed", "output": "SCHEMII_ACTION:" + json.dumps(wrong_action)}},
-            {"type": "tool", "tool": "schema_add_table", "state": {"status": "completed", "output": "SCHEMII_ACTION:" + json.dumps(valid_action)}},
+            {"type": "tool", "tool": "schema_project_open", "state": {"status": "completed", "output": "SCHEMII_ACTION:" + json.dumps(wrong_action)}},
+            {"type": "tool", "tool": "schema_project_open", "state": {"status": "completed", "output": "SCHEMII_ACTION:" + json.dumps(valid_action)}},
         ]})
 
         result = self.service(opener).prompt(
@@ -303,7 +301,7 @@ class OpenCodeServiceTests(unittest.TestCase):
         self.assertFalse(payload["tools"]["schema_read_query"])
         self.assertEqual(result["actions"], [valid_action])
         self.assertNotIn("schema_read_query", [part.get("tool") for part in result["parts"]])
-        self.assertEqual([part.get("tool") for part in result["parts"]], ["schema_add_table", "schema_add_table"])
+        self.assertEqual([part.get("tool") for part in result["parts"]], ["schema_project_open", "schema_project_open"])
 
     def test_disabled_invalid_ids_and_upstream_failures_are_sanitized(self):
         self.assertEqual(OpenCodeService("", "opencode", "").status()["enabled"], False)
@@ -334,16 +332,16 @@ class OpenCodeServiceTests(unittest.TestCase):
         self.assertEqual(opener.calls[2][0].full_url, "http://127.0.0.1:4096/session/ses_1/abort")
 
     def test_prompt_recovers_split_tool_actions_only_after_the_exact_latest_user_message(self):
-        action = {"type": "populate_schema", "tables": [{"name": "authors"}], "relationships": []}
+        action = {"type": "open_project", "schemaId": "authors", "projectName": "Authors", "requiresConfirmation": True}
         prompt = "Schemii context\n\nUser request:\npopulate it"
         opener = Opener(
             {"id": "ses_1", "directory": "/workspace"},
             {"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "Review the proposal."}]},
             [
                 {"info": {"role": "user"}, "parts": [{"type": "text", "text": "older prompt"}]},
-                {"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "Old"}, {"type": "tool", "tool": "schema_populate", "state": {"status": "completed", "output": "SCHEMII_ACTION:" + json.dumps({"type": "populate_schema", "tables": [{"name": "stale"}], "relationships": []})}}]},
+                {"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "Old"}, {"type": "tool", "tool": "schema_project_open", "state": {"status": "completed", "output": "SCHEMII_ACTION:" + json.dumps({"type": "open_project", "schemaId": "stale", "projectName": "Stale", "requiresConfirmation": True})}}]},
                 {"info": {"role": "user"}, "parts": [{"type": "text", "text": prompt}]},
-                {"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "Working"}, {"type": "tool", "tool": "schema_populate", "state": {"status": "completed", "output": "SCHEMII_ACTION:" + json.dumps(action)}}]},
+                {"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "Working"}, {"type": "tool", "tool": "schema_project_open", "state": {"status": "completed", "output": "SCHEMII_ACTION:" + json.dumps(action)}}]},
                 {"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "Review the proposal."}]},
             ],
         )
@@ -367,7 +365,7 @@ class OpenCodeServiceTests(unittest.TestCase):
             {"type": "session.status", "properties": {"sessionID": "other", "status": {"type": "busy"}}},
             {"type": "session.status", "properties": {"sessionID": "ses_1", "status": {"type": "busy"}}},
             {"type": "message.part.updated", "properties": {"sessionID": "ses_1", "part": {"id": "prt_reason", "type": "reasoning", "text": "private reasoning", "time": {"start": 1}}}},
-            {"type": "message.part.updated", "properties": {"sessionID": "ses_1", "part": {"id": "prt_tool", "type": "tool", "tool": "schema_add_table", "state": {"status": "running", "input": {"name": "secret"}, "metadata": {"path": "/secret"}}}}},
+            {"type": "message.part.updated", "properties": {"sessionID": "ses_1", "part": {"id": "prt_tool", "type": "tool", "tool": "schema_project_open", "state": {"status": "running", "input": {"name": "secret"}, "metadata": {"path": "/secret"}}}}},
             {"type": "message.part.updated", "properties": {"sessionID": "ses_1", "part": {"id": "prt_shell", "type": "tool", "tool": "bash", "state": {"status": "running", "input": {"command": "cat /secret"}}}}},
             {"type": "message.part.updated", "properties": {"sessionID": "ses_1", "part": {"id": "prt_skill", "type": "tool", "tool": "skill", "state": {"status": "completed", "input": {"name": "migration-safety"}, "output": "/secret/skill"}}}},
             {"type": "session.status", "properties": {"sessionID": "ses_1", "status": {"type": "idle"}}},
@@ -380,7 +378,7 @@ class OpenCodeServiceTests(unittest.TestCase):
             {"type": "connection", "state": "connected"},
             {"type": "session", "state": "busy"},
             {"type": "part", "kind": "reasoning", "key": "prt_reason", "state": "running"},
-            {"type": "part", "kind": "tool", "key": "prt_tool", "tool": "schema_add_table", "state": "running"},
+            {"type": "part", "kind": "tool", "key": "prt_tool", "tool": "schema_project_open", "state": "running"},
             {"type": "part", "kind": "skill", "key": "prt_skill", "skill": "migration-safety", "state": "completed"},
             {"type": "session", "state": "idle"},
         ])

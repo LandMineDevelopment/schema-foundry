@@ -98,7 +98,7 @@ Schemii data access has a separate SQL policy:
 
 - `Disabled` shows generated SQL but cannot execute it.
 - `Ask each time` requires confirmation for each query.
-- `Allow for session` executes proposals only after the user deliberately selects that setting; a new chat resets it to disabled.
+- `Ask each time` requires confirmation for every query. Session-wide SQL approval is unavailable because read-only statements can invoke externally effectful functions.
 
 Query results are bounded before being sent back to the model. The server stores the bounded result under an expiring, one-use opaque reference bound to the application, chat session, saved resource revision, and exact PostgreSQL target. Follow-up messages submit only that reference; browser-supplied rows are never accepted as query provenance. PostgreSQL runs these queries in a read-only transaction, but a `SELECT` can invoke database functions with external side effects. Use a narrowly privileged role and review every generated statement.
 
@@ -123,20 +123,13 @@ The embedded agent can load only these packaged skills:
 - Read-only query safety
 - Migration safety
 
-The explicit tools can propose:
+The currently enabled Schemii tools can propose:
 
 - Read-only raw SQL
-- Add or rename a table
-- Add or update a column
-- Delete a table or column
-- Add a foreign-key relationship
-- Atomically populate an active design with complete tables, columns, keys, and relationships
-- Create a local project or open an exact listed project
-- Open an exact listed saved PostgreSQL connection
+- Open an exact listed project
 - Prefill a connection profile without a password
-- Open the migration preview workflow; applying remains available only from the exact reviewed server-issued plan in the migration dialog
 
-Schemer's separate agent can load only Schemer help, dashboard safety, layout safety, and query safety. Its tools can propose creating or opening a dashboard and creating, renaming, duplicating, or deleting a widget. Complete widget proposals must use one exact source from the bounded live catalog, listed columns, a version-2 structured query, and a compatible visualization; Schemer re-inspects the fingerprint, revision-guards and executes the query before mutation, chooses the ID and placement, and persists once. A placeholder is proposed only when explicitly requested. In data mode only, `schemer_read_query` can emit an inert read-query proposal bound to the supplied dashboard revision, profile, database, and namespace; it is disabled in metadata/dashboard modes and never executes inside OpenCode. Confirmed analytic SQL may join relations, but widget configuration remains single-relation. Schemii's schema, connection, and migration tools remain unavailable in the Schemer workspace and prompt policy.
+Schemer's separate agent can load only Schemer help, dashboard safety, layout safety, and query safety. Its currently enabled tools can open an exact listed dashboard and, in data mode only, emit an inert read-query proposal bound to the supplied dashboard revision, profile, database, and namespace. Dashboard and widget mutation tools are temporarily disabled until their server-owned domain adapters provide idempotent persistence, lost-response reconciliation, and exact layout preservation. Confirmed analytic SQL may join relations, but widget configuration remains single-relation. Schemii tools remain unavailable in the Schemer workspace and prompt policy.
 
 The Schemer browser adapter sends the confirmed database, namespace, SQL, dashboard revision, exact chat session, and a local redacted-profile fingerprint to `/api/postgres/profiles/{profileId}/sql`. The backend rejects missing or unknown fields, holds the dashboard revision guard throughout execution, rejects profile changes after confirmation, verifies the saved and connected database plus namespace, rejects superuser and row-security-bypass roles, disables `EXPLAIN`, and returns complete JSON values within 100 rows, 50 columns, and 256 KiB. It also stores a model-facing projection capped at 48 KiB and returns an opaque result reference. A data-mode follow-up can consume that reference once only while the same dashboard revision, chat, disclosure, and PostgreSQL target remain current. Results are rejected in every other disclosure mode. The namespace is a default search path rather than a security boundary, so the saved role must be restricted to only the schemas and functions the user intends the assistant to read.
 
@@ -156,7 +149,7 @@ Free-model providers may retain these prompts and the bounded Schemii metadata c
 
 ## Confirmation And Migration Safety
 
-Every model action is replaced by an expiring server-issued proposal envelope bound to the application, exact chat session, resource, disclosure level, saved revision, and verified data target when applicable. Confirmation atomically claims that envelope before execution; successful persistence consumes it, known pre-effect failures release it, and ambiguous outcomes remain claimed until reconciliation or lease expiry. Browser snapshot checks remain defense in depth. Schema saves must succeed before the UI marks a proposal applied, and existing table layout is preserved.
+Every model action is validated and canonicalized before being replaced by an expiring server-issued proposal envelope bound to the application, exact chat session, resource, disclosure level, saved revision, and verified data target when applicable. Confirmation starts one persistent operation keyed by the proposal ID. Concurrent or repeated requests observe that same operation instead of repeating its effect; lost responses reconcile through the operation record. Success and known failure are terminal, while an interrupted running lease becomes `uncertain` and cannot be replayed. Records use application-scoped inter-process locking and atomic JSON writes in the protected config volume.
 
 Initial example-schema generation uses one `populate_schema` action rather than separate table cards. Schemii validates table and column counts, names, types, declared keys, defaults, relationship endpoints, type compatibility, referenced uniqueness, referential actions, and unsupported fields before showing confirmation. PostgreSQL-valid keyless tables are allowed; only foreign-key targets must be primary or unique. Approval applies the validated batch atomically, lays out only the new tables, preserves all existing table layout, and saves once. If a provider fails to execute a custom proposal tool, Schemii accepts only a bounded `SCHEMII_PROPOSALS:` fallback manifest containing this same inert action; the browser performs identical validation and confirmation.
 
@@ -168,7 +161,7 @@ Saved-connection opening accepts only an exact listed profile ID. On review Sche
 
 Migration proposals never bypass Schemii's existing safety flow. AI can open a fresh preview only; it cannot emit a standalone apply proposal. The exact profile and namespace must still be selected, SQL must be previewed, destructive planning must be explicitly enabled, destructive steps require the separate checkbox, and apply uses the exact server-issued plan reviewed in the migration dialog with expiry, profile, fingerprint, advisory-lock, timeout, transaction, and rollback checks.
 
-Natural-language messages such as "yes", "confirm", or "apply" are never authorization.
+Natural-language messages such as "yes", "confirm", or "apply" are never authorization. Schema/dashboard mutation proposals, resource creation, connection opening, and AI migration preview remain disabled until action-specific server execution and reconciliation adapters are complete; use the normal application UI for those workflows.
 
 ## Persistent Volumes
 

@@ -10,6 +10,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from schemii.postgres_http import PostgresHttpMixin
 from schemii.ai_http import ai_context_fingerprint
+from schemii.ai_authority import AiAuthority
 from schemii.dashboard_store import DashboardStore
 from schemii.schemer_examples import MERCURY_PROFILE_ID
 from schemii.schemer_server import _ai_catalog_sources, make_handler
@@ -45,6 +46,7 @@ class SchemerServerTests(unittest.TestCase):
             self.dashboard_store,
             "session-token",
             server_id="schemer-server",
+            ai_authority=AiAuthority(Path(self.temporary_directory.name) / "authority", "schemer"),
             ai_service=self.ai_service,
         )
         self.assertTrue(issubclass(handler, PostgresHttpMixin))

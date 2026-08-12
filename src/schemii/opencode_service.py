@@ -25,33 +25,13 @@ SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 ACTION_PREFIX = "SCHEMII_ACTION:"
 CUSTOM_TOOLS = {
     "schema_read_query",
-    "schema_add_table",
-    "schema_rename_table",
-    "schema_add_column",
-    "schema_update_column",
-    "schema_delete_element",
-    "schema_add_relationship",
-    "schema_populate",
     "schema_connection_setup",
-    "schema_project_create",
     "schema_project_open",
-    "schema_connection_open",
-    "schema_migration_preview",
 }
 TOOL_ACTION_TYPES = {
     "schema_read_query": "schema_read_query",
-    "schema_add_table": "add_table",
-    "schema_rename_table": "rename_table",
-    "schema_add_column": "add_column",
-    "schema_update_column": "update_column",
-    "schema_delete_element": "delete_element",
-    "schema_add_relationship": "add_relationship",
-    "schema_populate": "populate_schema",
     "schema_connection_setup": "connection_setup",
-    "schema_project_create": "create_project",
     "schema_project_open": "open_project",
-    "schema_connection_open": "open_connection",
-    "schema_migration_preview": "migration_preview",
 }
 SAFE_SKILLS = {
     "schemii-help",

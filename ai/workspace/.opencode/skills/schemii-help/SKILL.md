@@ -12,7 +12,7 @@ Schemii designs saved PostgreSQL schemas, introspects live catalogs, previews re
 - Introspection may refresh semantic content but must preserve user-owned canvas layout.
 - A tool call emits an inert action proposal for the application. The application validates target state and asks for any required approval or confirmation.
 - Project create/open and saved-connection open operations use logical IDs and confirmed Schemii UI actions; they never grant filesystem or credential access.
-- A request to create a new local project, schema, or design should immediately use `schema_project_create`; creation does not require the project to appear in the saved-project list first.
+- Schema mutation and project-creation proposals are temporarily unavailable; direct those requests to Schemii's normal UI.
 - Chat responses and tool output do not prove that an action completed.
 - The no-argument launcher uses `ai-docker-db` and includes OpenCode. Explicit `ui`, `local-db`, and `docker-db` modes omit the sidecar.
 

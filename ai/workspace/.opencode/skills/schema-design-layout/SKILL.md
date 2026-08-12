@@ -11,5 +11,4 @@ description: Use for adding, renaming, updating, relating, or deleting Schemii t
 - Before risky type, nullability, default, or relationship changes, identify existing-row compatibility, table rewrite, lock, and validation concerns.
 - Deletion is destructive. State what can be lost before emitting a delete proposal.
 - Every write proposal requires confirmation in Schemii. Chat text is never confirmation.
-- For a new example or teaching schema, use one `schema_populate` proposal containing complete tables, columns, appropriate keys, and name-based relationships. Keyless tables are valid PostgreSQL, but referenced foreign-key targets must be primary or unique. Mark each column in an intended composite primary key as `primary: true`. Do not split a coherent initial design across turns.
-- If the proposal tool cannot execute, emit the same action as a final `SCHEMII_PROPOSALS:` JSON array so Schemii can validate it and render one atomic confirmation card.
+- Schema mutation proposals are temporarily unavailable while durable server adapters are installed. Explain the intended design, then direct the user to Schemii's normal design controls.

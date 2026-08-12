@@ -300,6 +300,9 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         self._console = PostgresConsole(self)
         self._ensure_config_dir()
 
+    def profile_context_fingerprint(self, profile_id: str) -> str:
+        return _profile_context_fingerprint(profile_id, self._profile(profile_id))
+
     def execute_console(self, profile_id: str, payload: Any, binding: str, server_id: str, policy: ConsolePolicy | None = None) -> dict[str, Any]:
         return self._console.execute(profile_id, payload, binding, server_id, policy or ConsolePolicy(statement_timeout_ms=self._statement_timeout_ms))
 

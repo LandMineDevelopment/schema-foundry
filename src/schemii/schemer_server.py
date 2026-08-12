@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .ai_authority import AiAuthority, AiAuthorityError
+from .ai_actions import normalize_schemer_action
 from .ai_http import AiHttpRouter, ai_context_fingerprint, ai_session_prefix, authority_call, bounded_ai_query_result, issue_ai_proposals, list_bound_ai_sessions, require_ai_session_binding
 from .dashboard_store import DashboardStore, DashboardStoreError
 from .http_common import make_local_app_handler
@@ -94,13 +95,13 @@ def make_handler(
     session_token: str,
     *,
     server_id: str,
+    ai_authority: AiAuthority,
     ai_service: OpenCodeService | None = None,
     behind_loopback_proxy: bool = False,
 ):
     base_handler = make_local_app_handler(
         web_dir, service, session_token, server_id=server_id, behind_loopback_proxy=behind_loopback_proxy,
     )
-    ai_authority = AiAuthority()
     ai_router = AiHttpRouter(
         ai_service,
         lambda handler, current_service, session_id, body: handler._ai_message(current_service, session_id, body),
@@ -108,6 +109,9 @@ def make_handler(
             current_service, session_id, proposal_id, operation, body,
         ),
         lambda handler, current_service, session_id: handler._ai_history(current_service, session_id),
+        lambda handler, current_service, session_id, operation_id: handler._ai_operation_status(
+            current_service, session_id, operation_id,
+        ),
     )
 
     class SchemerHandler(PostgresHttpMixin, base_handler):
@@ -120,7 +124,6 @@ def make_handler(
             "require_profile_fingerprint": True,
             "reject_privileged_role": True,
             "context_fields": frozenset({"dashboardId", "expectedRevision"}),
-            "ai_context_fields": frozenset({"sessionId", "accessLevel"}),
             "allow_explain": False,
             "max_rows": 100,
             "max_columns": 50,
@@ -205,27 +208,6 @@ def make_handler(
                 self.send_json(error.status, error.payload)
             except AiAuthorityError as error:
                 self.send_json(error.status, error.to_dict())
-
-        def _postgres_read_sql_result(self, body, result):
-            session_id = body.get("sessionId")
-            dashboard_id = body.get("dashboardId")
-            if body.get("accessLevel") != "data":
-                raise PostgresServiceError(400, "validation_error", "AI SQL access level is invalid")
-            require_ai_session_binding(
-                ai_service, session_id, "SCHEMER_CONTEXT", dashboard_id, "data", [
-                    result["profileId"], result["database"], result["namespace"], body.get("profileFingerprint"),
-                ],
-            )
-            reference = ai_authority.register_query_result(
-                application="schemer", session_id=session_id, resource=dashboard_id,
-                target={
-                    "profileId": result["profileId"], "database": result["database"],
-                    "namespace": result["namespace"], "profileFingerprint": body.get("profileFingerprint"),
-                },
-                binding={"revision": body.get("expectedRevision"), "access": "data"},
-                result=bounded_ai_query_result(result, max_rows=100, max_columns=50, max_bytes=48 * 1024),
-            )
-            return {**result, "resultRef": reference["id"]}
 
         @staticmethod
         def _dashboard_id(path: str) -> str | None:
@@ -366,10 +348,6 @@ def make_handler(
                         allow_data=access_level == "data",
                     ), allow_data=access_level == "data")
                 except Exception:
-                    if reservation is not None:
-                        ai_authority.release_query_result(
-                            body["resultRef"], reservation["reservationToken"], application="schemer", session_id=session_id,
-                        )
                     raise
                 if reservation is not None:
                     ai_authority.consume_query_result(
@@ -380,7 +358,7 @@ def make_handler(
                     binding["target"] = {**target, "profileFingerprint": profile_fingerprint}
                 return issue_ai_proposals(
                     ai_authority, response, application="schemer", session_id=session_id,
-                    resource=dashboard_id, access=access_level, binding=binding,
+                    resource=dashboard_id, access=access_level, binding=binding, normalize_action=normalize_schemer_action,
                 )
 
             return self._ai_call(send_prompt)
@@ -422,7 +400,13 @@ def make_handler(
             return self._ai_call(history)
 
         def _ai_proposal(self, current_ai_service, session_id: str, proposal_id: str, operation: str, body: dict):
+            if operation == "reconcile":
+                return authority_call(self, lambda: {"operation": ai_authority.operation_for_proposal(
+                    proposal_id, application="schemer", session_id=session_id,
+                )})
             current_ai_service.verify_session(session_id)
+            if operation == "execute":
+                return self._ai_execute_proposal(current_ai_service, session_id, proposal_id, body)
             if operation in {"finalize", "release"}:
                 if set(body) != {"claimToken"}:
                     return self.send_json(400, {"error": {"code": "validation_error", "message": "Proposal completion fields are invalid"}})
@@ -463,6 +447,85 @@ def make_handler(
                 proposal_id, application="schemer", session_id=session_id, resource=dashboard_id,
                 access=access_level, binding=binding,
             ))
+
+        def _ai_operation_status(self, current_ai_service, session_id: str, operation_id: str):
+            return authority_call(self, lambda: {"operation": ai_authority.operation(
+                operation_id, application="schemer", session_id=session_id,
+            )})
+
+        def _ai_execute_proposal(self, current_ai_service, session_id: str, proposal_id: str, body: dict):
+            allowed = {"dashboardId", "accessLevel", "profileId", "database", "namespace", "confirmation"}
+            if set(body) - allowed or body.get("confirmation") != {"accepted": True, "mode": "explicit"}:
+                return self.send_json(400, {"error": {"code": "validation_error", "message": "Proposal execution fields are invalid"}})
+            dashboard_id = body.get("dashboardId")
+            access = body.get("accessLevel")
+            record = dashboard_store.get(dashboard_id)
+            binding = {"revision": record["revision"]}
+            profile = None
+            binding_parts = None
+            if access == "data":
+                profile = next((item for item in service.list_profiles() if item.get("id") == body.get("profileId")), None)
+                if profile is None or profile.get("dbname") != body.get("database"):
+                    return self.send_json(409, {"error": {"code": "database_changed", "message": "The PostgreSQL target changed"}})
+                fingerprint = ai_context_fingerprint([
+                    profile.get("id"), profile.get("host"), profile.get("port"), profile.get("dbname"), profile.get("user"), profile.get("sslmode"),
+                ])
+                binding_parts = [profile["id"], profile["dbname"], body.get("namespace"), fingerprint]
+                binding["target"] = {
+                    "profileId": profile["id"], "database": profile["dbname"], "namespace": body.get("namespace"),
+                    "profileFingerprint": fingerprint,
+                }
+            require_ai_session_binding(current_ai_service, session_id, "SCHEMER_CONTEXT", dashboard_id, access, binding_parts)
+            try:
+                operation = ai_authority.create_operation(
+                    proposal_id, application="schemer", session_id=session_id, resource=dashboard_id,
+                    access=access, binding=binding,
+                )
+            except AiAuthorityError as error:
+                return self.send_json(error.status, error.to_dict())
+            execution_owner = operation.pop("executionOwner", False)
+            if not execution_owner:
+                return self.send_json(200, {"operation": operation})
+            action = ai_authority.operation_action(operation["id"], application="schemer", session_id=session_id)
+            try:
+                action_type = action.get("type")
+                if action_type == "read_query":
+                    if profile is None or any(action.get(key) != binding["target"][key] for key in ("profileId", "database", "namespace")):
+                        raise PostgresServiceError(409, "action_target_changed", "Query target no longer matches the proposal")
+                    result = service.execute_read_only_sql(
+                        profile["id"], binding["target"]["namespace"], action.get("sql"), database=profile["dbname"],
+                        expected_profile_fingerprint=service.profile_context_fingerprint(profile["id"]), reject_privileged_role=True,
+                        allow_explain=False, max_rows=100, max_columns=50, max_result_bytes=256 * 1024,
+                    )
+                    reference = ai_authority.register_query_result(
+                        application="schemer", session_id=session_id, resource=dashboard_id, target=binding["target"],
+                        binding={"revision": record["revision"], "access": "data"},
+                        result=bounded_ai_query_result(result, max_rows=100, max_columns=50, max_bytes=48 * 1024),
+                    )
+                    result = {"kind": "sql_result", "display": result, "resultRef": reference["id"], "binding": binding}
+                elif action_type == "dashboard_open":
+                    target = dashboard_store.get(action.get("dashboardId"))
+                    if target["revision"] != action.get("expectedRevision") or target["dashboard"]["title"] != action.get("title"):
+                        raise DashboardStoreError(409, "dashboard_changed", "Target dashboard changed; request a fresh proposal")
+                    result = {"kind": "client_command", "command": {"type": "open_dashboard", "dashboardId": target["id"], "revision": target["revision"]}}
+                else:
+                    raise OpenCodeServiceError(409, "action_temporarily_unavailable", "This action is unavailable until its server execution adapter is installed")
+            except (OpenCodeServiceError, DashboardStoreError, PostgresServiceError, AiAuthorityError) as error:
+                payload = error.payload if hasattr(error, "payload") else error.to_dict()
+                finished = ai_authority.finish_operation(
+                    operation["id"], application="schemer", session_id=session_id, state="failed", error=payload["error"],
+                )
+                return self.send_json(getattr(error, "status", 400), {"operation": finished})
+            except Exception:
+                finished = ai_authority.finish_operation(
+                    operation["id"], application="schemer", session_id=session_id, state="uncertain",
+                    error={"code": "execution_outcome_unknown", "message": "Operation outcome is uncertain; reload authoritative state"},
+                )
+                return self.send_json(500, {"operation": finished})
+            finished = ai_authority.finish_operation(
+                operation["id"], application="schemer", session_id=session_id, state="succeeded", result=result,
+            )
+            return self.send_json(200, {"operation": finished})
 
         def do_PUT(self):
             path = urlparse(self.path).path
@@ -533,6 +596,7 @@ def main() -> None:
         dashboard_store,
         secrets.token_urlsafe(32),
         server_id=secrets.token_urlsafe(18),
+        ai_authority=AiAuthority(config_dir / "ai_authority" / "v1", "schemer"),
         ai_service=ai_service,
         behind_loopback_proxy=behind_loopback_proxy,
     )

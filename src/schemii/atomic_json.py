@@ -18,6 +18,12 @@ def _sync_directory(directory: Path) -> None:
         os.close(descriptor)
 
 
+def remove_file(path: str | os.PathLike[str]) -> None:
+    destination = Path(path)
+    destination.unlink(missing_ok=True)
+    _sync_directory(destination.parent)
+
+
 def write_json(
     destination: str | os.PathLike[str],
     payload: Any,

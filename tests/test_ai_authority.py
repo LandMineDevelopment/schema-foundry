@@ -1,4 +1,5 @@
 import sys
+import tempfile
 import threading
 import unittest
 from pathlib import Path
@@ -23,8 +24,10 @@ class Clock:
 
 class AiAuthorityTests(unittest.TestCase):
     def setUp(self):
+        self.temporary_directory = tempfile.TemporaryDirectory()
         self.clock = Clock()
         self.authority = AiAuthority(
+            Path(self.temporary_directory.name), "schemii",
             max_entries=10, proposal_ttl=20, claim_lease=5,
             result_ttl=10, max_payload_bytes=2048, clock=self.clock,
         )
@@ -34,10 +37,13 @@ class AiAuthorityTests(unittest.TestCase):
             "binding": {"revision": 3},
         }
         self.result_context = {
-            "application": "schemer", "session_id": "session-1",
+            "application": "schemii", "session_id": "session-1",
             "resource": "dashboard-1", "target": {"database": "demo"},
             "binding": {"revision": 7},
         }
+
+    def tearDown(self):
+        self.temporary_directory.cleanup()
 
     def register_proposal(self, action=None):
         return self.authority.register_proposal(
@@ -77,20 +83,13 @@ class AiAuthorityTests(unittest.TestCase):
             ),
         )
 
-    def test_proposal_expiry_and_expired_claim_lease_recovery(self):
+    def test_proposal_expiry_and_expired_claim_becomes_uncertain(self):
         envelope = self.register_proposal()
         first = self.authority.claim_proposal(envelope["id"], **self.proposal_context)
         self.clock.advance(5)
-        second = self.authority.claim_proposal(envelope["id"], **self.proposal_context)
-        self.assertNotEqual(first["claimToken"], second["claimToken"])
         self.assert_error(
-            "invalid_claim",
-            lambda: self.authority.release_proposal(
-                envelope["id"], first["claimToken"], application="schemii", session_id="session-1",
-            ),
-        )
-        self.authority.release_proposal(
-            envelope["id"], second["claimToken"], application="schemii", session_id="session-1",
+            "proposal_outcome_uncertain",
+            lambda: self.authority.claim_proposal(envelope["id"], **self.proposal_context),
         )
         self.clock.advance(15)
         self.assert_error(
@@ -180,7 +179,7 @@ class AiAuthorityTests(unittest.TestCase):
         self.assertEqual(again["action"]["items"][0]["name"], "before")
 
     def test_capacity_is_shared_and_expired_entries_free_space(self):
-        authority = AiAuthority(max_entries=2, proposal_ttl=2, result_ttl=2, clock=self.clock)
+        authority = AiAuthority(Path(self.temporary_directory.name) / "capacity", "schemii", max_entries=2, proposal_ttl=2, result_ttl=2, clock=self.clock)
         authority.register_proposal(**self.proposal_context, action={"type": "one"})
         authority.register_query_result(**self.result_context, result={"rows": []})
         self.assert_error(
@@ -195,12 +194,12 @@ class AiAuthorityTests(unittest.TestCase):
         first = self.authority.reserve_query_result(reference["id"], **self.result_context)
         self.assertEqual(first["result"]["rows"], [[3]])
         self.authority.release_query_result(
-            reference["id"], first["reservationToken"], application="schemer", session_id="session-1",
+            reference["id"], first["reservationToken"], application="schemii", session_id="session-1",
         )
         second = self.authority.reserve_query_result(reference["id"], **self.result_context)
         self.assertNotEqual(first["reservationToken"], second["reservationToken"])
         consumed = self.authority.consume_query_result(
-            reference["id"], second["reservationToken"], application="schemer", session_id="session-1",
+            reference["id"], second["reservationToken"], application="schemii", session_id="session-1",
         )
         self.assertEqual(consumed["state"], "consumed")
         self.assert_error(
@@ -210,14 +209,14 @@ class AiAuthorityTests(unittest.TestCase):
         self.assert_error(
             "invalid_result_reservation",
             lambda: self.authority.consume_query_result(
-                reference["id"], second["reservationToken"], application="schemer", session_id="session-1",
+                reference["id"], second["reservationToken"], application="schemii", session_id="session-1",
             ),
         )
 
     def test_query_result_rejects_cross_binding_and_wrong_token(self):
         reference = self.register_result()
         for key, value in (
-            ("application", "schemii"), ("session_id", "other"),
+            ("application", "schemer"), ("session_id", "other"),
             ("resource", "other"), ("target", {"database": "other"}),
             ("binding", {"revision": 8}),
         ):
@@ -230,17 +229,17 @@ class AiAuthorityTests(unittest.TestCase):
         self.assert_error(
             "invalid_result_reservation",
             lambda: self.authority.release_query_result(
-                reference["id"], "wrong", application="schemer", session_id="session-1",
+                reference["id"], "wrong", application="schemii", session_id="session-1",
             ),
         )
         self.assert_error(
             "result_binding_mismatch",
             lambda: self.authority.release_query_result(
-                reference["id"], reservation["reservationToken"], application="schemii", session_id="session-1",
+                reference["id"], reservation["reservationToken"], application="schemer", session_id="session-1",
             ),
         )
         self.authority.release_query_result(
-            reference["id"], reservation["reservationToken"], application="schemer", session_id="session-1",
+            reference["id"], reservation["reservationToken"], application="schemii", session_id="session-1",
         )
 
     def test_query_result_reservation_is_atomic_across_threads(self):
@@ -289,7 +288,7 @@ class AiAuthorityTests(unittest.TestCase):
         self.assert_error(
             "result_not_found",
             lambda: self.authority.release_query_result(
-                reference["id"], reserved["reservationToken"], application="schemer", session_id="session-1",
+                reference["id"], reserved["reservationToken"], application="schemii", session_id="session-1",
             ),
         )
 
@@ -307,6 +306,67 @@ class AiAuthorityTests(unittest.TestCase):
             lambda: self.authority.register_proposal(
                 **{**self.proposal_context, "application": " schemii"}, action={"type": "x"},
             ),
+        )
+
+    def test_records_survive_restart_and_tokens_are_hashed(self):
+        envelope = self.register_proposal()
+        claim = self.authority.claim_proposal(envelope["id"], **self.proposal_context)
+        replacement = AiAuthority(
+            Path(self.temporary_directory.name), "schemii", max_entries=10,
+            proposal_ttl=20, claim_lease=5, result_ttl=10, max_payload_bytes=2048, clock=self.clock,
+        )
+        stored = (replacement.proposal_dir / f"{envelope['id']}.json").read_text()
+        self.assertNotIn(claim["claimToken"], stored)
+        consumed = replacement.finalize_proposal(
+            envelope["id"], claim["claimToken"], application="schemii", session_id="session-1",
+        )
+        self.assertEqual(consumed["state"], "consumed")
+        self.assertEqual(replacement.list_proposals(**self.proposal_context)[0]["state"], "consumed")
+
+    def test_operation_is_idempotent_and_persistent(self):
+        envelope = self.register_proposal()
+        first = self.authority.create_operation(envelope["id"], **self.proposal_context)
+        second = self.authority.create_operation(envelope["id"], **self.proposal_context)
+        self.assertEqual(first["id"], second["id"])
+        self.assertTrue(first["executionOwner"])
+        self.assertFalse(second["executionOwner"])
+        finished = self.authority.finish_operation(
+            first["id"], application="schemii", session_id="session-1", state="succeeded",
+            result={"kind": "test", "revision": 4},
+        )
+        replacement = AiAuthority(Path(self.temporary_directory.name), "schemii", clock=self.clock)
+        self.assertEqual(replacement.operation(first["id"], application="schemii", session_id="session-1"), finished)
+        repeated = replacement.create_operation(envelope["id"], **self.proposal_context)
+        self.assertEqual(repeated["id"], finished["id"])
+        self.assertFalse(repeated["executionOwner"])
+
+    def test_operation_execution_has_one_owner_across_threads(self):
+        envelope = self.register_proposal()
+        barrier = threading.Barrier(10)
+        operations = []
+        guard = threading.Lock()
+
+        def begin():
+            barrier.wait()
+            result = self.authority.create_operation(envelope["id"], **self.proposal_context)
+            with guard:
+                operations.append(result)
+
+        threads = [threading.Thread(target=begin) for _ in range(10)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(len({item["id"] for item in operations}), 1)
+        self.assertEqual(sum(item["executionOwner"] for item in operations), 1)
+
+    def test_application_storage_is_isolated(self):
+        self.register_proposal()
+        schemer = AiAuthority(Path(self.temporary_directory.name), "schemer", clock=self.clock)
+        self.assertEqual(list(schemer.proposal_dir.glob("*.json")), [])
+        self.assert_error(
+            "proposal_binding_mismatch",
+            lambda: schemer.list_proposals(**self.proposal_context),
         )
 
 

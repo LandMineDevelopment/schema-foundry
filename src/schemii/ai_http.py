@@ -14,7 +14,11 @@ AI_SESSION_PATH = re.compile(r"^/api/ai/sessions/([A-Za-z0-9][A-Za-z0-9_.:-]{0,1
 AI_ACTIVITY_PATH = re.compile(r"^/api/ai/sessions/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})/activity$")
 AI_PROPOSAL_PATH = re.compile(
     r"^/api/ai/sessions/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})/proposals/"
-    r"(proposal_[A-Za-z0-9_-]{16,128})/(claim|finalize|release)$"
+    r"(proposal_[A-Za-z0-9_-]{16,128})/(claim|finalize|release|execute|reconcile)$"
+)
+AI_OPERATION_PATH = re.compile(
+    r"^/api/ai/sessions/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})/operations/"
+    r"(operation_[A-Za-z0-9_-]{16,128})/status$"
 )
 
 
@@ -67,11 +71,13 @@ class AiHttpRouter:
         message_handler: Callable[[Any, OpenCodeService, str, dict[str, Any]], Any],
         proposal_handler: Callable[[Any, OpenCodeService, str, str, str, dict[str, Any]], Any] | None = None,
         history_handler: Callable[[Any, OpenCodeService, str | None], Any] | None = None,
+        operation_handler: Callable[[Any, OpenCodeService, str, str], Any] | None = None,
     ):
         self.service = service
         self.message_handler = message_handler
         self.proposal_handler = proposal_handler
         self.history_handler = history_handler
+        self.operation_handler = operation_handler
 
     @staticmethod
     def _authorize(handler) -> bool:
@@ -86,7 +92,8 @@ class AiHttpRouter:
     def handle_get(self, handler, path: str) -> bool:
         session_match = AI_SESSION_PATH.fullmatch(path)
         activity_match = AI_ACTIVITY_PATH.fullmatch(path)
-        if path not in {"/api/ai/status", "/api/ai/sessions"} and not session_match and not activity_match:
+        operation_match = AI_OPERATION_PATH.fullmatch(path)
+        if path not in {"/api/ai/status", "/api/ai/sessions"} and not session_match and not activity_match and not operation_match:
             return False
         if not self._authorize(handler):
             return True
@@ -105,6 +112,8 @@ class AiHttpRouter:
                 self.history_handler(handler, service, None)
         elif activity_match:
             self._activity_stream(handler, service, activity_match.group(1))
+        elif operation_match and self.operation_handler is not None:
+            self.operation_handler(handler, service, operation_match.group(1), operation_match.group(2))
         elif session_match and session_match.group(2) == "messages":
             if self.history_handler is None:
                 handler._ai_call(lambda: service.session_messages(session_match.group(1)))
@@ -192,7 +201,7 @@ class AiHttpRouter:
             pass
 
 
-def issue_ai_proposals(authority, response, *, application, session_id, resource, access, binding):
+def issue_ai_proposals(authority, response, *, application, session_id, resource, access, binding, normalize_action=None):
     """Replace model-authored actions with server-issued, context-bound envelopes."""
     if not isinstance(response, dict):
         return response
@@ -200,6 +209,11 @@ def issue_ai_proposals(authority, response, *, application, session_id, resource
     for action in response.get("actions", []):
         if not isinstance(action, dict):
             continue
+        if normalize_action is not None:
+            try:
+                action = normalize_action(action, access)
+            except (TypeError, ValueError):
+                continue
         proposal = authority.register_proposal(
             application=application,
             session_id=session_id,

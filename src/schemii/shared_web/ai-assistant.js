@@ -65,7 +65,7 @@
     const {
       sessionClient, root, trigger, settingsDialog, historyDialog, storageKey, getContext,
       buildMessagePayload, createSessionTitle, contextKey = () => null, parseSession = session => ({ title: session.title || "Untitled chat", key: null }),
-      buildProposalClaimPayload, buildHistoryQuery, renderAction, validateAction, applyAction, toolLabels = {}, skillLabels = {}, labels = {},
+      buildProposalClaimPayload, buildHistoryQuery, renderAction, validateAction, handleOperationResult, toolLabels = {}, skillLabels = {}, labels = {},
       onOpenChange = () => {}, onAccessChange = () => {}, onNewChat = () => {}, state: suppliedState,
       canViewSession = () => true, extraBusyControls = [],
     } = options;
@@ -452,13 +452,33 @@
       });
     }
 
-    async function claimProposal(proposal, capture) {
-      const body = buildProposalClaimPayload ? buildProposalClaimPayload(capture, elements.access.value) : {};
-      return proposalRequest(proposal, "claim", body);
+    async function executeProposal(proposal, capture) {
+      const context = buildProposalClaimPayload ? buildProposalClaimPayload(capture, elements.access.value) : {};
+      const body = { ...context, confirmation: { accepted: true, mode: "explicit" } };
+      try {
+        const response = await proposalRequest(proposal, "execute", body);
+        return response.operation?.state === "running" ? waitForOperation(proposal, response.operation) : response;
+      } catch (error) {
+        try {
+          const response = await proposalRequest(proposal, "reconcile", context);
+          return response.operation?.state === "running" ? waitForOperation(proposal, response.operation) : response;
+        }
+        catch (reconcileError) {
+          if (reconcileError.code === "operation_not_started") throw error;
+          reconcileError.message = "Outcome unknown. Reconnect or reload to check this operation.";
+          throw reconcileError;
+        }
+      }
     }
 
-    async function completeProposal(proposal, operation, claimToken) {
-      return proposalRequest(proposal, operation, { claimToken });
+    async function waitForOperation(proposal, operation) {
+      for (let attempt = 0; attempt < 360 && operation?.state === "running"; attempt += 1) {
+        await new Promise(resolve => setTimeout(resolve, document.hidden ? 2000 : 500));
+        const response = await request(`/api/ai/sessions/${encodeURIComponent(proposal.sessionId)}/operations/${encodeURIComponent(operation.id)}/status`, { method: "GET" });
+        operation = response.operation;
+      }
+      if (operation?.state === "running") throw new Error("Operation is still running. Reopen this conversation to check its status.");
+      return { operation };
     }
 
     function renderGenericAction(proposal, capture) {
@@ -473,15 +493,15 @@
       if (normalized.review) { const review = document.createElement("pre"); review.textContent = normalized.review; card.append(review); }
       const button = document.createElement("button"); button.type = "button"; button.className = "button button-primary"; button.textContent = normalized.buttonLabel || (normalized.destructive ? "Review deletion" : "Review & confirm");
       button.addEventListener("click", async () => {
+        if (!confirm(`${normalized.summary}\n\nContinue?`)) return;
         card.querySelectorAll(".ai-action-error").forEach(error => error.remove()); button.disabled = true;
-        let claim;
         try {
-          claim = await claimProposal(proposal, capture);
-          const appliedLabel = await applyAction({ ...normalized, action: claim.action }, capture);
-          await completeProposal(proposal, "finalize", claim.claimToken);
+          const response = await executeProposal(proposal, capture);
+          const operation = response.operation;
+          if (operation?.state !== "succeeded") throw new Error(operation?.error?.message || "The operation did not succeed");
+          const appliedLabel = await handleOperationResult?.(operation.result, capture);
           button.textContent = appliedLabel || normalized.appliedLabel || "Applied"; card.classList.add("applied");
         } catch (error) {
-          if (claim && error.proposalOutcome !== "ambiguous") await completeProposal(proposal, "release", claim.claimToken).catch(() => {});
           button.disabled = false; const detail = document.createElement("p"); detail.className = "ai-action-error"; detail.textContent = error.message; card.append(detail);
         }
       });
@@ -610,7 +630,7 @@
 
     const api = Object.freeze({
       appendMessage, appendQueryResult, renderResponse, sendMessage, scrollToEnd,
-      claimProposal, completeProposal,
+      executeProposal,
       get accessLevel() { return elements.access.value; }, get state() { return state; },
     });
     trigger.addEventListener("click", () => setOpen(!root.classList.contains("open")));

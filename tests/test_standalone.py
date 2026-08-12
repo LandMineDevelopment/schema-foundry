@@ -280,26 +280,16 @@ esac
 
     def test_ai_navigation_tools_accept_only_logical_ids_and_public_labels(self):
         tools = "\n".join(path.read_text(encoding="utf-8") for path in sorted((ROOT / "ai" / "workspace" / ".opencode" / "tools").glob("schema_*_open.ts")))
-        create_tool = (ROOT / "ai" / "workspace" / ".opencode" / "tools" / "schema_project_create.ts").read_text(encoding="utf-8")
         instructions = (ROOT / "ai" / "workspace" / "AGENTS.md").read_text(encoding="utf-8")
 
         self.assertIn("schemaId", tools)
-        self.assertIn("profileId", tools)
         self.assertNotRegex(tools, r"\b(?:password|path|url|host|shell|command)\b")
-        self.assertIn("needs no schemaId or availableProjects entry", create_tool)
-        self.assertIn("immediately call `schema_project_create`", instructions)
+        self.assertFalse((ROOT / "ai" / "workspace" / ".opencode" / "tools" / "schema_project_create.ts").exists())
 
-    def test_ai_population_tool_requires_complete_tables_and_name_based_relationships(self):
-        populate = (ROOT / "ai" / "workspace" / ".opencode" / "tools" / "schema_populate.ts").read_text(encoding="utf-8")
-        add_table = (ROOT / "ai" / "workspace" / ".opencode" / "tools" / "schema_add_table.ts").read_text(encoding="utf-8")
-        relationship = (ROOT / "ai" / "workspace" / ".opencode" / "tools" / "schema_add_relationship.ts").read_text(encoding="utf-8")
-
-        self.assertIn('type: "populate_schema"', populate)
-        self.assertIn("columns: tool.schema.array(column).min(1)", populate)
-        self.assertIn("relationships: tool.schema.array(relationship)", populate)
-        self.assertIn("columns: tool.schema.array(column).min(1)", add_table)
-        for field in ("fromTableName", "fromColumnName", "toTableName", "toColumnName"):
-            self.assertIn(field, relationship)
+    def test_ai_schema_mutation_tools_are_fail_closed_until_server_adapters_exist(self):
+        tool_dir = ROOT / "ai" / "workspace" / ".opencode" / "tools"
+        for name in ("schema_populate.ts", "schema_add_table.ts", "schema_add_relationship.ts"):
+            self.assertFalse((tool_dir / name).exists())
 
 
 if __name__ == "__main__":
