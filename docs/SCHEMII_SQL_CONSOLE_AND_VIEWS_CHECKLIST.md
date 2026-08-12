@@ -20,7 +20,7 @@ This checklist governs the UI-first design and later implementation of two Schem
 - [ ] Decide whether one Run action may contain multiple SQL statements.
 - [ ] Decide whether successful write statements auto-commit individually or run as one submitted transaction.
 - [ ] Approve the Tables / Views layer switch and whether each layer keeps an independent viewport.
-- [ ] Approve ordinary-view and materialized-view card treatments, dependency lines, empty states, and editor layouts.
+- [ ] Approve ordinary-view and materialized-view card treatments, dependency lines, empty states, and editor layouts. Direction selected: lineage-focused workspace with a hidden searchable catalog drawer; remaining states still require review.
 - [ ] Approve how destructive materialized-view replacement and refresh actions are presented.
 
 ## Phase 1: SQL Console Look And Feel
@@ -44,17 +44,19 @@ Acceptance criteria: the user approves the complete console workflow and all vis
 
 Approval required before application code changes.
 
-- [ ] Prototype a clear Tables / Views layer switch outside the existing table canvas.
-- [ ] Keep the existing table graphical view unchanged while the Views layer is active.
+- [x] Prototype a clear Tables / Views layer switch outside the existing table canvas.
+- [x] Keep the existing table graphical view unchanged while the Views layer is active.
 - [ ] Give the Views layer its own cards, dependency connectors, viewport, zoom, pan, selection, and empty state.
-- [ ] Visually distinguish ordinary views from materialized views without relying on color alone.
+- [x] Visually distinguish ordinary views from materialized views without relying on color alone.
 - [ ] Prototype create, inspect, edit, duplicate, and delete entry points for ordinary views.
 - [ ] Prototype create, inspect, replace, refresh, and delete entry points for materialized views.
 - [ ] Prototype a view editor with name, namespace, SQL definition, output-column snapshot, dependencies, and bounded row preview.
 - [ ] Show read-only definitions when ownership or PostgreSQL permissions do not permit editing.
 - [ ] Show stale-definition, dependency, validation, destructive-replacement, and migration-preview states.
 - [ ] Validate desktop and mobile behavior with dense and empty catalogs.
-- [ ] Use synthetic local data only; do not introspect, migrate, refresh, or persist views in this phase.
+- [x] Use synthetic local data only; do not introspect, migrate, refresh, or persist views in this phase.
+
+Selected direction: concept B's selected-view lineage and raw-definition focus, with the relation catalog/search hidden in an overlay drawer until requested. Browser render checks cover desktop and mobile layout, drawer open/close, filtering, selection, and ordinary/materialized editor templates.
 
 Acceptance criteria: the user approves layer navigation, card language, dependency presentation, and all editor states before catalog or migration work begins.
 
