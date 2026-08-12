@@ -17,10 +17,10 @@ This checklist governs the UI-first design and later implementation of two Schem
 - [ ] Approve where the SQL Console entry appears in the tool rail and how its independent workspace opens/closes.
 - [ ] Approve the console header, target identity, editor, result, error, history, and empty states on desktop and mobile.
 - [ ] Approve the write-mode toggle placement, wording, warning color, and confirmation interaction.
-- [ ] Decide whether one Run action may contain multiple SQL statements.
-- [ ] Decide whether successful write statements auto-commit individually or run as one submitted transaction.
+- [x] Decide whether one Run action may contain multiple SQL statements. Decision: allow up to 20 top-level statements.
+- [x] Decide whether successful write statements auto-commit individually or run as one submitted transaction. Decision: one submitted script is one all-or-nothing server-owned transaction.
 - [ ] Approve the Tables / Views layer switch and whether each layer keeps an independent viewport.
-- [ ] Approve ordinary-view and materialized-view card treatments, dependency lines, empty states, and editor layouts. Direction selected: lineage-focused workspace with a hidden searchable catalog drawer; remaining states still require review.
+- [ ] Approve ordinary-view and materialized-view card treatments, dependency lines, empty states, and editor layouts. Direction selected: lineage-focused workspace with a searchable right-side sibling pane; remaining states still require review.
 - [ ] Approve how destructive materialized-view replacement and refresh actions are presented.
 
 ## Phase 1: SQL Console Look And Feel
@@ -56,7 +56,7 @@ Approval required before application code changes.
 - [ ] Validate desktop and mobile behavior with dense and empty catalogs.
 - [x] Use synthetic local data only; do not introspect, migrate, refresh, or persist views in this phase.
 
-Selected direction: concept B's selected-view lineage and raw-definition focus, with the relation catalog/search hidden in an overlay drawer until requested. Browser render checks cover desktop and mobile layout, drawer open/close, filtering, selection, and ordinary/materialized editor templates.
+Selected direction: concept B's selected-view lineage and raw-definition focus, with the relation catalog/search hidden in a right-side sibling pane until requested. Browser render checks cover desktop and mobile layout, pane open/close, filtering, selection, and ordinary/materialized editor templates.
 
 Acceptance criteria: the user approves layer navigation, card language, dependency presentation, and all editor states before catalog or migration work begins.
 
@@ -64,19 +64,21 @@ Acceptance criteria: the user approves layer navigation, card language, dependen
 
 Approval required before backend implementation.
 
-- [ ] Define exact profile, database, namespace, role, and session binding for every console and view request.
-- [ ] Keep console execution server-side and credentials out of browser responses and saved history.
-- [ ] Enforce read-only PostgreSQL transactions while write mode is off, regardless of browser state.
-- [ ] Require an explicit write-enabled request contract while write mode is on; never infer write permission from SQL text alone.
-- [ ] Reset write authorization on target changes, console close, refresh, server restart, and session replacement.
-- [ ] Define statement timeout, cancellation, result-size, response-size, and concurrent-execution limits.
-- [ ] Define transaction, auto-commit, multi-statement, notices, row-count, and partial-failure semantics.
-- [ ] Rely on the selected PostgreSQL role's permissions; do not elevate privileges for the console.
-- [ ] Define safe audit metadata without recording credentials or sensitive SQL parameters unintentionally.
-- [ ] Define versioned saved records for view-layer layout and viewport state, separate from the table layer.
-- [ ] Treat the live PostgreSQL catalog as authoritative for view kind, definition, dependencies, ownership, and output columns.
-- [ ] Define stale-catalog fingerprints and conflict responses for view edits and materialized-view actions.
-- [ ] Route view changes through migration preview and confirmation rather than ad hoc DDL execution.
+- [x] Define exact profile, database, namespace, role, and session binding for every console and view request.
+- [x] Keep console execution server-side and credentials out of browser responses and saved history.
+- [x] Enforce read-only PostgreSQL transactions while write mode is off, regardless of browser state.
+- [x] Require an explicit write-enabled request contract while write mode is on; never infer write permission from SQL text alone.
+- [x] Reset write authorization on target changes, console close, refresh, server restart, and session replacement.
+- [x] Define statement timeout, cancellation, result-size, response-size, and concurrent-execution limits.
+- [x] Define transaction, auto-commit, multi-statement, notices, row-count, and partial-failure semantics.
+- [x] Rely on the selected PostgreSQL role's permissions; do not elevate privileges for the console.
+- [x] Define safe audit metadata without recording credentials or sensitive SQL parameters unintentionally.
+- [x] Define versioned saved records for view-layer layout and viewport state, separate from the table layer.
+- [x] Treat the live PostgreSQL catalog as authoritative for view kind, definition, dependencies, ownership, and output columns.
+- [x] Define stale-catalog fingerprints and conflict responses for view edits and materialized-view actions.
+- [x] Route view changes through migration preview and confirmation rather than ad hoc DDL execution.
+
+Contract source of truth: `docs/SCHEMII_SQL_CONSOLE_AND_VIEWS_CONTRACTS.md`.
 
 Acceptance criteria: request contracts, transaction boundaries, permission behavior, destructive operations, and persisted layout ownership are documented and approved.
 
