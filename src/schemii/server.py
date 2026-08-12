@@ -15,6 +15,7 @@ from .opencode_service import OpenCodeService, OpenCodeServiceError
 from .postgres_http import (
     POSTGRES_CATALOG_CAPABILITY,
     POSTGRES_CONSOLE_CAPABILITY,
+    POSTGRES_CONSOLE_WRITE_CAPABILITY,
     POSTGRES_PROFILE_CAPABILITY,
     POSTGRES_READ_SQL_CAPABILITY,
     POSTGRES_SCHEMA_CAPABILITY,
@@ -22,6 +23,7 @@ from .postgres_http import (
     PostgresHttpMixin,
 )
 from .postgres_service import PostgresService, PostgresServiceError
+from .postgres_console import ConsolePolicy
 from .schema_store import SchemaStore, SchemaStoreError
 from .server_runtime import begin_http_shutdown, parse_port, parse_proxy_setting, run_server, validate_static_directory
 
@@ -279,8 +281,9 @@ def make_handler(
     class SchemiiHandler(PostgresHttpMixin, base_handler):
         postgres_capabilities = frozenset({
             POSTGRES_PROFILE_CAPABILITY, POSTGRES_CATALOG_CAPABILITY, POSTGRES_SCHEMA_CAPABILITY,
-            POSTGRES_READ_SQL_CAPABILITY, POSTGRES_CONSOLE_CAPABILITY,
+            POSTGRES_READ_SQL_CAPABILITY, POSTGRES_CONSOLE_CAPABILITY, POSTGRES_CONSOLE_WRITE_CAPABILITY,
         })
+        postgres_console_policy = ConsolePolicy(allow_write=True)
 
         def _schema_call(self, callback):
             try:

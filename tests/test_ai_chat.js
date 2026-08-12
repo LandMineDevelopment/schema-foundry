@@ -173,7 +173,7 @@ assert.match(html, /id="ai-provider[^" ]*"|id="ai-providers"/, "provider setting
 assert.doesNotMatch(html, /id="ai[^\n]+value="[^\n]*(?:key|token|secret)/i, "provider secrets must not be embedded in HTML");
 const panelState = source.slice(source.indexOf("const aiAssistant ="), source.indexOf("elements.tablesLayer.addEventListener"));
 assert.match(panelState, /mainLayout\.classList\.toggle\("ai-open", open\)/, "AI chat must replace the left tool rail");
-assert.match(panelState, /\[elements\.toolRail, elements\.workspace, elements\.inspector\][\s\S]*background\.inert = open/, "background schema controls must not remain keyboard-accessible");
+assert.match(panelState, /\[elements\.toolRail, open\][\s\S]*\[elements\.workspace, open \|\| standaloneSqlState\.open \|\| viewsOpen\][\s\S]*\[elements\.inspector, open \|\| standaloneSqlState\.open \|\| viewsOpen\][\s\S]*\[elements\.standaloneSqlWorkspace, open \|\| !standaloneSqlState\.open\][\s\S]*\[elements\.viewsPrototypeWorkspace, open \|\| !viewsOpen\][\s\S]*background\.inert = inactive/, "AI and alternate workspaces must keep every inactive background surface out of keyboard navigation");
 assert.doesNotMatch(panelState, /mobile-open|inspector-dismissed/, "AI chat must not open, dismiss, or resize the right inspector");
 assert.match(sharedStyles, /\.ai-panel \{[^}]*left: 0;[^}]*translate3d\(-100%/, "AI chat must dock from the left");
 assert.match(styles, /\.schema-library-connection/, "saved schema cards must display connection ownership");

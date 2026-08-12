@@ -88,14 +88,18 @@ Approval required before implementation.
 
 - [x] Add capability-scoped SQL console routes using the shared PostgreSQL profile and session infrastructure.
 - [x] Verify the connected database before every execution.
-- [ ] Execute with read-only transaction enforcement unless the request carries current write authorization.
-- [ ] Allow PostgreSQL statements permitted by the selected role while write mode is explicitly enabled, including insert, update, delete, DDL, and function calls.
+- [x] Execute with read-only transaction enforcement unless the request carries current write authorization.
+- [x] Allow PostgreSQL statements permitted by the selected role while write mode is explicitly enabled, including insert, update, delete, DDL, and function calls.
 - [x] Implement cancellation, timeouts, bounded tabular results, command summaries, notices, and PostgreSQL error details.
 - [x] Ensure failed multi-statement or transactional submissions follow the approved rollback semantics.
-- [ ] Invalidate or recheck linked catalog fingerprints after schema-changing statements.
+- [x] Invalidate or recheck linked catalog fingerprints after schema-changing statements.
 - [x] Add focused service, route, authorization, transaction, timeout, cancellation, and browser tests for the read-only execution slice.
 - [x] Run selected SQL or the caret statement by default, provide explicit Run all, and present ordered results as pinnable browser-local tabs.
-- [ ] Verify writes and rollback behavior against disposable PostgreSQL data and remove all test objects afterward.
+- [x] Keep browser-local query views independently named and removable, with stable per-view `consoleId` values and uniquely named, renameable result tabs.
+- [x] Make write mode and its grant per query view; new views start read-only, rename preserves authorization identity, and removal revokes the owning grant.
+- [x] Revoke every query-view grant on target change or Console close, and ensure switching views cannot reuse another view's grant.
+- [x] Apply the same current-grant requirement to selection/caret Run and Run all; pinned results, renamed tabs, query names, and history must not affect authorization.
+- [x] Verify writes and rollback behavior against disposable PostgreSQL data and remove all test objects afterward.
 
 Acceptance criteria: read-only mode rejects writes server-side; write mode executes only with explicit current authorization and selected-role permission; failures cannot leave an ambiguous transaction state.
 

@@ -1,6 +1,6 @@
 # Schemii SQL Console And Views Contracts
 
-Status: Phase 3 design approved and documented. Backend implementation remains approval-gated.
+Status: Phase 3 design approved. Phase 4 SQL Console read and write execution implemented; Views backend remains approval-gated.
 
 This document defines the execution, catalog, persistence, conflict, and migration boundaries for Schemii's independent SQL Console and graphical Views layer. It extends focused shared infrastructure used by Schemii and Schemer without combining their application workflows or weakening their distinct revision guards.
 
@@ -78,7 +78,7 @@ POST   /api/postgres/profiles/{profileId}/console/executions
 DELETE /api/postgres/profiles/{profileId}/console/executions/{executionId}
 ```
 
-The browser creates a UUID `executionId` before POST so a parallel DELETE can cancel the active PostgreSQL connection. The POST remains open until completion and returns the final result. Registry entries are process-local, session-bound, short-lived, and removed after completion.
+The browser creates a UUID `executionId` before POST so a parallel DELETE can cancel the active PostgreSQL connection. Each browser-local query view owns one stable `consoleId`; renaming that view does not change its identity. The POST remains open until completion and returns the final result. Registry entries are process-local, session-bound, short-lived, and removed after completion.
 
 Request:
 
@@ -98,7 +98,7 @@ Request:
 
 ### Script And Transaction Semantics
 
-- One Run action may submit 1-20 top-level PostgreSQL statements, with at most 100,000 total characters.
+- Normal Run submits the selected text when present, otherwise the top-level statement containing the caret. Run all submits the complete editor. Either action may submit 1-20 top-level PostgreSQL statements, with at most 100,000 total characters.
 - Extend the existing quote/comment-aware statement scanner; do not add a second parser or infer safety from browser parsing.
 - The server owns one transaction for the complete script.
 - Read mode executes the complete transaction with `SET TRANSACTION READ ONLY`.
@@ -125,6 +125,10 @@ Each statement returns one ordered result entry:
 
 For write mode, `committed` is true only after successful commit. Command results include PostgreSQL command name and affected row count. No response may imply a commit before it occurs.
 
+The browser presents ordered statement entries as result tabs owned by the current query view. New execution results replace only unpinned tabs; pinned tabs remain browser-local reference data. Tab labels are unique within the query view and may be renamed without changing execution or authorization identity. Pinned or renamed results never authorize execution and never alter server transaction semantics. Cancellation remains attached to the active Results pane and applies only to the current registered `executionId`.
+
+Browser-local query views are created, selected, renamed, and removed through the Console header menu. A new query view receives a new `consoleId`, begins read-only, and has no grant. Renaming preserves its `consoleId`; removing it revokes its grant and removes its browser-local SQL and results. Removing the final view creates a fresh blank read-only view.
+
 ### Write Grants
 
 Write authorization is an ephemeral Schemii-only server resource:
@@ -134,11 +138,11 @@ POST   /api/postgres/profiles/{profileId}/console/write-grants
 DELETE /api/postgres/profiles/{profileId}/console/write-grants/{writeGrantId}
 ```
 
-Grant creation requires exact `consoleId`, `database`, `namespace`, and a deliberate browser confirmation flag. The returned opaque grant binds to the current HTTP session, server ID, console ID, profile ID, database, namespace, and current stored-profile fingerprint.
+Grant creation requires the exact active query view's `consoleId`, `database`, `namespace`, and a deliberate browser confirmation flag. The returned opaque grant binds to the current HTTP session, server ID, console ID, profile ID, database, namespace, and current stored-profile fingerprint. Write mode and its grant are owned by that query view, not by a result tab or the Console workspace globally.
 
 A grant is invalid after:
 
-- explicit revocation when the Console closes or write mode is disabled;
+- explicit revocation when the owning query view is removed, the Console closes, or that query view's write mode is disabled;
 - target or saved-profile change;
 - browser refresh because the browser loses the opaque grant ID;
 - HTTP session or server replacement;
@@ -146,6 +150,8 @@ A grant is invalid after:
 - five minutes without a write execution or fifteen minutes absolute lifetime.
 
 The server never infers write authorization from SQL text, a browser toggle, or possession of the local session token alone.
+
+Switching query views reflects the selected view's own authorization state. A query view without a current grant remains read-only even when another query view has write mode enabled. Normal Run and Run all use the same grant requirement; selected SQL, caret selection, pinned results, result names, query names, and saved-history entries cannot broaden a grant. The UI revokes every query-view grant on target change or Console close and attempts revocation when the page is leaving, while server expiry remains authoritative if browser delivery is interrupted.
 
 ### Limits, Cancellation, And Concurrency
 

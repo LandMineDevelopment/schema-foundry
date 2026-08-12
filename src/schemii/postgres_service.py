@@ -306,6 +306,12 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
     def cancel_console(self, profile_id: str, execution_id: Any, binding: str, server_id: str) -> dict[str, bool]:
         return self._console.cancel(profile_id, execution_id, binding, server_id)
 
+    def create_console_write_grant(self, profile_id: str, payload: Any, binding: str, server_id: str) -> dict[str, Any]:
+        return self._console.create_write_grant(profile_id, payload, binding, server_id)
+
+    def revoke_console_write_grant(self, profile_id: str, grant_id: Any, binding: str, server_id: str) -> dict[str, bool]:
+        return self._console.revoke_write_grant(profile_id, grant_id, binding, server_id)
+
     def close(self) -> None:
         self._console.close()
 

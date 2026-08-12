@@ -3,6 +3,7 @@ import threading
 from http.server import ThreadingHTTPServer
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+from uuid import uuid4
 
 
 class QuietHandlerMixin:
@@ -79,8 +80,8 @@ class FakePostgresService:
         self.calls.append(("execute_read_only_sql", profile_id, namespace, statement, policy))
         return {"columns": [{"name": "answer"}], "rows": [[1]], "rowCount": 1, "truncated": False}
 
-    def execute_console(self, profile_id, body, binding, server_id):
-        self.calls.append(("execute_console", profile_id, body, binding, server_id))
+    def execute_console(self, profile_id, body, binding, server_id, policy=None):
+        self.calls.append(("execute_console", profile_id, body, binding, server_id, policy))
         return {
             "executionId": body["executionId"],
             "target": {"profileId": profile_id, "database": body["database"], "namespace": body["namespace"]},
@@ -90,6 +91,14 @@ class FakePostgresService:
     def cancel_console(self, profile_id, execution_id, binding, server_id):
         self.calls.append(("cancel_console", profile_id, execution_id, binding, server_id))
         return {"requested": True}
+
+    def create_console_write_grant(self, profile_id, body, binding, server_id):
+        self.calls.append(("create_console_write_grant", profile_id, body, binding, server_id))
+        return {"writeGrantId": str(uuid4())}
+
+    def revoke_console_write_grant(self, profile_id, grant_id, binding, server_id):
+        self.calls.append(("revoke_console_write_grant", profile_id, grant_id, binding, server_id))
+        return {"revoked": True}
 
     def list_namespaces(self, profile_id):
         self.calls.append(("list_namespaces", profile_id))

@@ -207,6 +207,8 @@ const elements = {
   standaloneSqlWriteDialog: document.querySelector("#standalone-sql-write-dialog"),
   standaloneSqlWriteAck: document.querySelector("#standalone-sql-write-ack"),
   standaloneSqlWriteConfirm: document.querySelector("#confirm-standalone-sql-write"),
+  standaloneSqlWriteQuery: document.querySelector("#standalone-sql-write-query"),
+  standaloneSqlWriteDialogTarget: document.querySelector("#standalone-sql-write-dialog-target"),
   databaseDriftBanner: document.querySelector("#database-drift-banner"),
   databaseDriftMessage: document.querySelector("#database-drift-message"),
   objectIconMenu: document.querySelector("#object-icon-menu"),
@@ -376,7 +378,6 @@ const prototypeRelationCatalog = {
 };
 let standaloneSqlState = {
   open: false,
-  writeMode: false,
   running: false,
   executionId: null,
   executionProfileId: null,
@@ -385,7 +386,7 @@ let standaloneSqlState = {
   activeViewId: "query-1",
   activePane: "editor",
   views: [
-    { id: "query-1", name: "Query 1", sql: "", activePane: "editor" }
+    { id: "query-1", name: "Query 1", sql: "", activePane: "editor", writeMode: false, writeGrantId: null }
   ],
   historyCollapsed: true,
   savedQueries: [
@@ -393,6 +394,9 @@ let standaloneSqlState = {
     { label: "Unfulfilled orders", sql: 'SELECT id, customer_id, status\nFROM "public"."orders"\nWHERE status IN (\'paid\', \'processing\')\nORDER BY created_at;' }
   ],
   targetKey: "",
+  pendingWriteConfirmation: null,
+  closing: false,
+  targetSyncKey: null,
   history: [
     { kind: "Read", label: "Recent orders", meta: "12 rows · 31 ms", sql: 'SELECT id, status, total\nFROM "public"."orders"\nORDER BY created_at DESC\nLIMIT 12;' },
     { kind: "Write", label: "Archive stale carts", meta: "4 rows · 18 ms", sql: 'UPDATE "public"."carts"\nSET archived = true\nWHERE updated_at < now() - interval \'30 days\';' },
@@ -740,24 +744,94 @@ function standaloneSqlTargetLabel() {
   return `${target.profile} · ${target.database}.${target.namespace}`;
 }
 
-function setStandaloneSqlWriteMode(enabled) {
-  standaloneSqlState.writeMode = enabled;
+function standaloneSqlTargetKey(target = standaloneSqlTarget()) {
+  return `${target.profileId ?? ""}\u0000${target.database}\u0000${target.namespace}`;
+}
+
+function clearStandaloneSqlWriteGrant(viewState) {
+  viewState.writeMode = false;
+  viewState.writeGrantId = null;
+  viewState.writeGrantProfileId = null;
+  viewState.writeGrantTargetKey = null;
+  viewState.writeGrantExpiresAt = null;
+}
+
+function setStandaloneSqlWriteMode() {
+  const viewState = currentStandaloneSqlView();
+  const target = standaloneSqlTarget();
+  const available = Boolean(target.profileId && target.database !== "Not selected" && target.namespace !== "Not selected");
+  const enabled = Boolean(viewState.writeMode && viewState.writeGrantId);
   elements.standaloneSqlWriteMode.setAttribute("aria-pressed", String(enabled));
   elements.standaloneSqlWriteMode.classList.toggle("active", enabled);
+  elements.standaloneSqlWriteMode.disabled = !available || Boolean(viewState.writeGrantRequest);
+  elements.standaloneSqlWriteMode.setAttribute("aria-label", available ? (enabled ? `Disable write mode for ${viewState.name}` : `Enable write mode for ${viewState.name}`) : "Select a PostgreSQL target to enable write mode");
+  elements.standaloneSqlWriteMode.dataset.tooltip = available ? (enabled ? "Disable writes for this query" : "Enable writes for this query") : "Select a PostgreSQL target first";
   elements.standaloneSqlWriteWarning.hidden = !enabled;
   elements.standaloneSqlWriteTarget.textContent = standaloneSqlTargetLabel();
 }
 
-function syncStandaloneSqlTarget(resetWriteMode = false) {
-  const target = standaloneSqlTarget();
-  const targetKey = `${target.profile}\u0000${target.database}\u0000${target.namespace}`;
-  const targetChanged = standaloneSqlState.targetKey && standaloneSqlState.targetKey !== targetKey;
-  standaloneSqlState.targetKey = targetKey;
+async function revokeStandaloneSqlWriteGrant(viewState) {
+  if (!viewState?.writeGrantId) {
+    if (viewState) clearStandaloneSqlWriteGrant(viewState);
+    return;
+  }
+  if (viewState.writeGrantRequest) return viewState.writeGrantRequest;
+  const grantId = viewState.writeGrantId;
+  const profileId = viewState.writeGrantProfileId;
+  viewState.writeGrantRequest = postgresRequest(`/api/postgres/profiles/${encodeURIComponent(profileId)}/console/write-grants/${encodeURIComponent(grantId)}`, { method: "DELETE" });
+  try {
+    await viewState.writeGrantRequest;
+    if (viewState.writeGrantId === grantId) clearStandaloneSqlWriteGrant(viewState);
+  } finally {
+    viewState.writeGrantRequest = null;
+    if (viewState.id === standaloneSqlState.activeViewId) setStandaloneSqlWriteMode();
+  }
+}
+
+async function revokeAllStandaloneSqlWriteGrants(clearFailures = false) {
+  const pendingRequests = standaloneSqlState.views.map(viewState => viewState.writeGrantRequest).filter(Boolean);
+  if (pendingRequests.length) await Promise.allSettled(pendingRequests);
+  const grantedViews = standaloneSqlState.views.filter(viewState => viewState.writeGrantId);
+  const results = await Promise.allSettled(grantedViews.map(viewState => revokeStandaloneSqlWriteGrant(viewState)));
+  const failures = [];
+  results.forEach((result, index) => {
+    if (result.status === "rejected") failures.push(result.reason);
+    if (clearFailures && result.status === "rejected") clearStandaloneSqlWriteGrant(grantedViews[index]);
+  });
+  setStandaloneSqlWriteMode();
+  if (failures.length) throw failures[0];
+}
+
+function renderStandaloneSqlTarget(target) {
   elements.standaloneSqlProfile.textContent = target.profile;
   elements.standaloneSqlDatabase.textContent = target.database;
   elements.standaloneSqlNamespace.textContent = target.namespace;
   elements.standaloneSqlWriteTarget.textContent = standaloneSqlTargetLabel();
-  if (resetWriteMode || (targetChanged && standaloneSqlState.open)) setStandaloneSqlWriteMode(false);
+  setStandaloneSqlWriteMode();
+}
+
+async function syncStandaloneSqlTarget(resetWriteMode = false) {
+  const target = standaloneSqlTarget();
+  const targetKey = standaloneSqlTargetKey(target);
+  const targetChanged = standaloneSqlState.targetKey && standaloneSqlState.targetKey !== targetKey;
+  if (targetChanged && standaloneSqlState.open) {
+    if (standaloneSqlState.targetSyncKey === targetKey) return;
+    standaloneSqlState.targetSyncKey = targetKey;
+    standaloneSqlState.views.forEach(viewState => { viewState.writeMode = false; });
+    setStandaloneSqlWriteMode();
+    try {
+      await revokeAllStandaloneSqlWriteGrants(true);
+    } catch (error) {
+      showToast(`${error.message}. Write mode was reset; server expiry remains authoritative.`);
+    } finally {
+      standaloneSqlState.targetSyncKey = null;
+    }
+    if (standaloneSqlTargetKey() !== targetKey) return syncStandaloneSqlTarget(resetWriteMode);
+  } else if (resetWriteMode) {
+    standaloneSqlState.views.forEach(clearStandaloneSqlWriteGrant);
+  }
+  standaloneSqlState.targetKey = targetKey;
+  renderStandaloneSqlTarget(target);
 }
 
 function renderStandaloneSqlHistory() {
@@ -867,8 +941,67 @@ function renderStandaloneSqlView(viewState) {
   elements.standaloneSqlCopy.disabled = empty;
   elements.standaloneSqlClear.disabled = empty;
   currentStandaloneSqlView();
+  setStandaloneSqlWriteMode();
   renderStandaloneSqlResultTabs();
   setStandaloneSqlActivePane(viewState.activePane || "editor");
+}
+
+function openStandaloneSqlWriteDialog() {
+  const target = standaloneSqlTarget();
+  if (!target.profileId || target.database === "Not selected" || target.namespace === "Not selected") return;
+  const viewState = currentStandaloneSqlView();
+  standaloneSqlState.pendingWriteConfirmation = { viewId: viewState.id, targetKey: standaloneSqlTargetKey(target), target };
+  elements.standaloneSqlWriteQuery.textContent = viewState.name;
+  elements.standaloneSqlWriteDialogTarget.textContent = `${target.profile} · ${target.database}.${target.namespace}`;
+  elements.standaloneSqlWriteDialog.showModal();
+}
+
+async function enableStandaloneSqlWriteMode() {
+  if (!elements.standaloneSqlWriteAck.checked) return;
+  const pending = standaloneSqlState.pendingWriteConfirmation;
+  const viewState = standaloneSqlState.views.find(view => view.id === pending?.viewId);
+  if (!pending || !viewState || viewState.id !== standaloneSqlState.activeViewId || pending.targetKey !== standaloneSqlTargetKey()) {
+    elements.standaloneSqlWriteDialog.close();
+    showToast("The query or PostgreSQL target changed. Confirm write mode again.");
+    return;
+  }
+  elements.standaloneSqlWriteConfirm.disabled = true;
+  viewState.writeGrantRequest = postgresRequest(`/api/postgres/profiles/${encodeURIComponent(pending.target.profileId)}/console/write-grants`, {
+    method: "POST",
+    body: JSON.stringify({ consoleId: viewState.consoleId, database: pending.target.database, namespace: pending.target.namespace, confirmed: true }),
+  });
+  try {
+    const grant = await viewState.writeGrantRequest;
+    if (!grant.writeGrantId) throw new Error("The server did not return write authorization");
+    if (standaloneSqlState.closing || viewState.id !== standaloneSqlState.activeViewId || pending.targetKey !== standaloneSqlTargetKey()) {
+      viewState.writeGrantId = grant.writeGrantId;
+      viewState.writeGrantProfileId = pending.target.profileId;
+      viewState.writeGrantRequest = null;
+      await revokeStandaloneSqlWriteGrant(viewState);
+      throw new Error("The query or PostgreSQL target changed while write mode was being enabled");
+    }
+    viewState.writeGrantId = grant.writeGrantId;
+    viewState.writeMode = true;
+    viewState.writeGrantProfileId = pending.target.profileId;
+    viewState.writeGrantTargetKey = pending.targetKey;
+    viewState.writeGrantExpiresAt = grant.expiresAt ?? grant.expiresAtEpoch ?? null;
+    elements.standaloneSqlWriteDialog.close();
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    viewState.writeGrantRequest = null;
+    if (viewState.id === standaloneSqlState.activeViewId) setStandaloneSqlWriteMode();
+  }
+}
+
+async function toggleStandaloneSqlWriteMode() {
+  const viewState = currentStandaloneSqlView();
+  if (!viewState.writeMode || !viewState.writeGrantId) return openStandaloneSqlWriteDialog();
+  try {
+    await revokeStandaloneSqlWriteGrant(viewState);
+  } catch (error) {
+    showToast(`${error.message}. Write mode remains enabled until revocation succeeds or the grant expires.`);
+  }
 }
 
 function nextStandaloneSqlViewName() {
@@ -891,22 +1024,28 @@ function addStandaloneSqlView() {
   if (standaloneSqlState.running) return;
   captureStandaloneSqlView();
   const name = nextStandaloneSqlViewName();
-  const viewState = { id: crypto.randomUUID(), name, sql: "", activePane: "editor" };
+  const viewState = { id: crypto.randomUUID(), name, sql: "", activePane: "editor", writeMode: false, writeGrantId: null };
   standaloneSqlState.views.push(viewState);
   standaloneSqlState.activeViewId = viewState.id;
   standaloneSqlState.renamingViewId = viewState.id;
   renderStandaloneSqlView(viewState);
 }
 
-function removeStandaloneSqlView(viewId = standaloneSqlState.activeViewId) {
+async function removeStandaloneSqlView(viewId = standaloneSqlState.activeViewId) {
   if (standaloneSqlState.running) return;
   captureStandaloneSqlView();
   const removed = standaloneSqlState.views.find(viewState => viewState.id === viewId);
   if (!removed) return;
   if ((removed.sql.trim() || removed.resultTabs?.length) && !confirm(`Remove ${removed.name} and its browser-local SQL and results?`)) return;
+  try {
+    await revokeStandaloneSqlWriteGrant(removed);
+  } catch (error) {
+    showToast(`${error.message}. ${removed.name} was retained so its write grant can be revoked safely.`);
+    return;
+  }
   const index = standaloneSqlState.views.findIndex(viewState => viewState.id === removed.id);
   standaloneSqlState.views.splice(index, 1);
-  if (!standaloneSqlState.views.length) standaloneSqlState.views.push({ id: crypto.randomUUID(), name: "Query 1", sql: "", activePane: "editor" });
+  if (!standaloneSqlState.views.length) standaloneSqlState.views.push({ id: crypto.randomUUID(), name: "Query 1", sql: "", activePane: "editor", writeMode: false, writeGrantId: null });
   if (removed.id === standaloneSqlState.activeViewId) {
     const next = standaloneSqlState.views[Math.min(index, standaloneSqlState.views.length - 1)];
     standaloneSqlState.activeViewId = next.id;
@@ -1011,8 +1150,9 @@ function standaloneSqlTabContent(tab) {
   if (tab.kind === "loading") return `<div class="standalone-sql-loading"><i></i><span>${escapeHtml(tab.message)}</span></div>`;
   if (tab.kind === "error") return standaloneSqlEmpty(tab.message, tab.detail, true);
   const statement = tab.statement;
-  if (!statement.columns.length) return `<div class="standalone-sql-command"><span>Read-only transaction</span><strong>${escapeHtml(statement.command)} ${statement.rowCount}</strong><small>Rolled back after execution</small></div>`;
-  return `<table class="standalone-sql-table"><thead><tr>${statement.columns.map(column => `<th>${escapeHtml(column.name)}</th>`).join("")}</tr></thead><tbody>${statement.rows.map(row => `<tr>${row.map(value => `<td>${standaloneSqlCell(value)}</td>`).join("")}</tr>`).join("")}</tbody><caption>${statement.truncated ? "Result truncated at the configured safety limit" : `${statement.rowCount} rows returned`}</caption></table>`;
+  if (!statement.columns.length) return `<div class="standalone-sql-command"><span>${tab.committed ? "Committed write transaction" : "Read-only transaction"}</span><strong>${escapeHtml(statement.command)} ${statement.rowCount}</strong><small>${tab.committed ? "Committed transactionally" : "Rolled back after execution"}</small></div>`;
+  const transactionState = tab.committed ? "committed" : "rolled back";
+  return `<table class="standalone-sql-table"><thead><tr>${statement.columns.map(column => `<th>${escapeHtml(column.name)}</th>`).join("")}</tr></thead><tbody>${statement.rows.map(row => `<tr>${row.map(value => `<td>${standaloneSqlCell(value)}</td>`).join("")}</tr>`).join("")}</tbody><caption>${statement.truncated ? "Result truncated at the configured safety limit" : `${statement.rowCount} rows returned`} · ${transactionState}</caption></table>`;
 }
 
 function uniqueStandaloneSqlTabLabel(viewState, requested, excludedId = null, reserved = []) {
@@ -1066,11 +1206,10 @@ function renderStandaloneSqlResultTabs() {
   }
 }
 
-function replaceStandaloneSqlUnpinnedTabs(newTabs) {
-  const viewState = currentStandaloneSqlView();
+function replaceStandaloneSqlUnpinnedTabs(newTabs, viewState = currentStandaloneSqlView()) {
   viewState.resultTabs = [...viewState.resultTabs.filter(tab => tab.pinned), ...newTabs];
   viewState.activeResultTabId = newTabs[0]?.id ?? viewState.resultTabs.at(-1)?.id ?? null;
-  renderStandaloneSqlResultTabs();
+  if (viewState.id === standaloneSqlState.activeViewId) renderStandaloneSqlResultTabs();
 }
 
 function finishStandaloneSqlRun(executionId) {
@@ -1085,16 +1224,17 @@ function finishStandaloneSqlRun(executionId) {
 }
 
 async function runStandaloneSql(runAll = false) {
+  const viewState = currentStandaloneSqlView();
   const editorSql = elements.standaloneSqlInput.value;
   const sql = standaloneSqlForRun(editorSql, elements.standaloneSqlInput.selectionStart, elements.standaloneSqlInput.selectionEnd, runAll);
   const target = standaloneSqlTarget();
   if (!target.profileId || target.database === "Not selected" || target.namespace === "Not selected") {
-    replaceStandaloneSqlUnpinnedTabs([{ id: crypto.randomUUID(), label: "Target required", meta: "Not run", kind: "error", pinned: false, message: "Select a PostgreSQL target", detail: "Choose a saved connection and namespace, or open a design linked to an exact PostgreSQL source." }]);
+    replaceStandaloneSqlUnpinnedTabs([{ id: crypto.randomUUID(), label: "Target required", meta: "Not run", kind: "error", pinned: false, message: "Select a PostgreSQL target", detail: "Choose a saved connection and namespace, or open a design linked to an exact PostgreSQL source." }], viewState);
     setStandaloneSqlActivePane("result");
     return;
   }
   if (!sql) {
-    replaceStandaloneSqlUnpinnedTabs([{ id: crypto.randomUUID(), label: "Empty query", meta: "Not run", kind: "error", pinned: false, message: "Nothing to run", detail: "Select text or place the cursor inside a PostgreSQL statement." }]);
+    replaceStandaloneSqlUnpinnedTabs([{ id: crypto.randomUUID(), label: "Empty query", meta: "Not run", kind: "error", pinned: false, message: "Nothing to run", detail: "Select text or place the cursor inside a PostgreSQL statement." }], viewState);
     setStandaloneSqlActivePane("result");
     return;
   }
@@ -1107,37 +1247,46 @@ async function runStandaloneSql(runAll = false) {
   elements.standaloneSqlRunAll.disabled = true;
   elements.standaloneSqlCancel.disabled = false;
   elements.standaloneSqlCancel.hidden = false;
-  replaceStandaloneSqlUnpinnedTabs([{ id: `running-${executionId}`, label: runAll ? "Run all" : "Run", meta: "Running", kind: "loading", pinned: false, message: "Executing a read-only PostgreSQL transaction..." }]);
+  const writeMode = Boolean(viewState.writeMode && viewState.writeGrantId);
+  const writeGrantId = writeMode ? viewState.writeGrantId : null;
+  replaceStandaloneSqlUnpinnedTabs([{ id: `running-${executionId}`, label: runAll ? "Run all" : "Run", meta: "Running", kind: "loading", pinned: false, message: `Executing a ${writeMode ? "write" : "read-only"} PostgreSQL transaction...` }], viewState);
   setStandaloneSqlActivePane("result");
   try {
     const result = await postgresRequest(`/api/postgres/profiles/${encodeURIComponent(target.profileId)}/console/executions`, {
       method: "POST",
       body: JSON.stringify({
         executionId,
-        consoleId: currentStandaloneSqlView().consoleId,
+        consoleId: viewState.consoleId,
         database: target.database,
         namespace: target.namespace,
         sql,
-        mode: "read",
-        writeGrantId: null,
+        mode: writeMode ? "write" : "read",
+        writeGrantId,
       }),
     });
     if (standaloneSqlState.executionId !== executionId) return;
     const totalRows = result.statements.reduce((count, statement) => count + statement.rowCount, 0);
-    const viewState = currentStandaloneSqlView();
     const labels = standaloneSqlResultLabels(viewState, result.statements.length);
     replaceStandaloneSqlUnpinnedTabs(result.statements.map((statement, index) => ({
-      id: crypto.randomUUID(), label: labels[index], meta: `${statement.command} · ${statement.rowCount}${statement.truncated ? "+" : ""} rows`, kind: "result", pinned: false, statement,
-    })));
-    standaloneSqlState.history.unshift({ kind: "Read", label: result.statements.map(statement => statement.command).join(" · "), meta: `${totalRows} rows · rolled back`, sql });
+      id: crypto.randomUUID(), label: labels[index], meta: `${statement.command} · ${statement.rowCount}${statement.truncated ? "+" : ""} rows · ${result.committed ? "committed" : "rolled back"}`, kind: "result", pinned: false, statement, committed: result.committed === true,
+    })), viewState);
+    standaloneSqlState.history.unshift({ kind: result.committed ? "Write" : "Read", label: result.statements.map(statement => statement.command).join(" · "), meta: `${totalRows} rows · ${result.committed ? "committed" : "rolled back"}`, sql });
     standaloneSqlState.history = standaloneSqlState.history.slice(0, 3);
     renderStandaloneSqlHistory();
+    if (result.committed) void checkPostgresDrift();
   } catch (error) {
     if (standaloneSqlState.executionId !== executionId) return;
+    const grantInvalid = ["write_grant_required", "write_grant_expired", "write_grant_target_changed"].includes(error.code);
+    if (grantInvalid) {
+      clearStandaloneSqlWriteGrant(viewState);
+      if (viewState.id === standaloneSqlState.activeViewId) setStandaloneSqlWriteMode();
+    }
     const details = error.payload?.error?.details;
     const suffix = [details?.sqlstate, Number.isInteger(details?.statementIndex) ? `statement ${details.statementIndex + 1}` : ""].filter(Boolean).join(" · ");
-    replaceStandaloneSqlUnpinnedTabs([{ id: crypto.randomUUID(), label: error.code === "execution_cancelled" ? "Cancelled" : "Error", meta: suffix || "Rolled back", kind: "error", pinned: false, message: error.message, detail: suffix || "The read-only transaction was rolled back." }]);
-    standaloneSqlState.history.unshift({ kind: error.code === "execution_cancelled" ? "Cancelled" : "Error", label: error.message, meta: suffix || "Rolled back", sql });
+    const errorMeta = `${suffix ? `${suffix} · ` : ""}Rolled back`;
+    const grantDetail = grantInvalid ? "Write authorization is no longer current. Re-enable writes for this query before running it again." : "The transaction was rolled back.";
+    replaceStandaloneSqlUnpinnedTabs([{ id: crypto.randomUUID(), label: error.code === "execution_cancelled" ? "Cancelled" : "Error", meta: errorMeta, kind: "error", pinned: false, message: error.message, detail: suffix ? `${suffix}\n${grantDetail}` : grantDetail }], viewState);
+    standaloneSqlState.history.unshift({ kind: error.code === "execution_cancelled" ? "Cancelled" : "Error", label: error.message, meta: errorMeta, sql });
     standaloneSqlState.history = standaloneSqlState.history.slice(0, 3);
     renderStandaloneSqlHistory();
   } finally {
@@ -1193,10 +1342,21 @@ function openStandaloneSqlWorkspace() {
   elements.standaloneSqlInput.focus();
 }
 
-function closeStandaloneSqlWorkspace() {
+async function closeStandaloneSqlWorkspace() {
+  if (standaloneSqlState.closing) return;
+  standaloneSqlState.closing = true;
   abandonStandaloneSqlRun();
-  setStandaloneSqlWriteMode(false);
+  try {
+    await revokeAllStandaloneSqlWriteGrants();
+  } catch (error) {
+    standaloneSqlState.closing = false;
+    showToast(`${error.message}. The SQL Console remains open so write authorization can be revoked safely.`);
+    return;
+  }
+  standaloneSqlState.views.forEach(clearStandaloneSqlWriteGrant);
+  setStandaloneSqlWriteMode();
   standaloneSqlState.open = false;
+  standaloneSqlState.closing = false;
   updateHistoryControls();
   elements.standaloneSqlWorkspace.classList.remove("open");
   elements.mainLayout.classList.remove("sql-workspace-open");
@@ -6505,13 +6665,13 @@ elements.standaloneSqlResultTabs.addEventListener("focusout", event => {
   const input = event.target.closest("[data-result-tab-name]");
   if (input && currentStandaloneSqlView().renamingResultTabId === input.dataset.resultTabName) finishStandaloneSqlTabRename(input);
 });
-elements.standaloneSqlViewList.addEventListener("click", event => {
+elements.standaloneSqlViewList.addEventListener("click", async event => {
   const select = event.target.closest("[data-select-sql-view]");
   const rename = event.target.closest("[data-rename-sql-view]");
   const remove = event.target.closest("[data-remove-sql-view]");
   if (select) { elements.standaloneSqlViewMenu.open = false; switchStandaloneSqlView(select.dataset.selectSqlView); }
   if (rename) { standaloneSqlState.renamingViewId = rename.dataset.renameSqlView; renderStandaloneSqlViewOptions(); }
-  if (remove) removeStandaloneSqlView(remove.dataset.removeSqlView);
+  if (remove) await removeStandaloneSqlView(remove.dataset.removeSqlView);
   if (event.target.closest("[data-add-sql-view]")) addStandaloneSqlView();
 });
 function finishStandaloneSqlViewRename(input, cancel = false) {
@@ -6534,17 +6694,14 @@ elements.standaloneSqlWorkspace.querySelector(".standalone-sql-head").addEventLi
   if (event.target.closest("button, label, summary, details, input")) return;
   toggleStandaloneSqlActivePane("editor");
 });
-elements.standaloneSqlWriteMode.addEventListener("click", () => showToast("Write mode will be enabled with ephemeral write grants in the next Console slice"));
+elements.standaloneSqlWriteMode.addEventListener("click", toggleStandaloneSqlWriteMode);
 elements.standaloneSqlWriteAck.addEventListener("change", () => {
   elements.standaloneSqlWriteConfirm.disabled = !elements.standaloneSqlWriteAck.checked;
 });
 document.querySelector("#cancel-standalone-sql-write").addEventListener("click", () => elements.standaloneSqlWriteDialog.close());
-elements.standaloneSqlWriteConfirm.addEventListener("click", () => {
-  if (!elements.standaloneSqlWriteAck.checked) return;
-  setStandaloneSqlWriteMode(true);
-  elements.standaloneSqlWriteDialog.close();
-});
+elements.standaloneSqlWriteConfirm.addEventListener("click", enableStandaloneSqlWriteMode);
 elements.standaloneSqlWriteDialog.addEventListener("close", () => {
+  standaloneSqlState.pendingWriteConfirmation = null;
   elements.standaloneSqlWriteAck.checked = false;
   elements.standaloneSqlWriteConfirm.disabled = true;
 });
@@ -6786,6 +6943,16 @@ window.addEventListener("keydown", event => {
   }
 });
 window.addEventListener("keyup", event => { if (event.code === "Space") spacePressed = false; });
+window.addEventListener("pagehide", () => {
+  if (!postgresState.token) return;
+  standaloneSqlState.views.filter(viewState => viewState.writeGrantId && viewState.writeGrantProfileId).forEach(viewState => {
+    fetch(`/api/postgres/profiles/${encodeURIComponent(viewState.writeGrantProfileId)}/console/write-grants/${encodeURIComponent(viewState.writeGrantId)}`, {
+      method: "DELETE",
+      headers: { "X-Schemii-Token": postgresState.token },
+      keepalive: true,
+    }).catch(() => {});
+  });
+});
 window.addEventListener("resize", () => {
   hideTooltip();
   closeObjectIconMenu();

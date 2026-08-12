@@ -5,7 +5,7 @@ import re
 import threading
 from dataclasses import dataclass
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from .postgres_common import NotFoundError, PostgresServiceError, ValidationError, quote_identifier
 
@@ -18,6 +18,8 @@ MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_NOTICES = 50
 MAX_NOTICE_BYTES = 8 * 1024
 MAX_ACTIVE_EXECUTIONS = 4
+WRITE_GRANT_IDLE_SECONDS = 5 * 60
+WRITE_GRANT_ABSOLUTE_SECONDS = 15 * 60
 
 
 @dataclass(frozen=True)
@@ -224,10 +226,71 @@ class ConsoleExecutionRegistry:
                     pass
 
 
+class ConsoleWriteGrantRegistry:
+    def __init__(self, clock: Any):
+        self._clock = clock
+        self._lock = threading.RLock()
+        self._entries: dict[str, dict[str, Any]] = {}
+
+    def create(
+        self, console_id: str, profile_id: str, database: str, namespace: str,
+        profile_fingerprint: str, binding: str, server_id: str,
+    ) -> dict[str, Any]:
+        now = self._clock()
+        grant_id = str(uuid4())
+        with self._lock:
+            self._entries[grant_id] = {
+                "consoleId": console_id, "profileId": profile_id, "database": database,
+                "namespace": namespace, "profileFingerprint": profile_fingerprint,
+                "binding": binding, "serverId": server_id, "createdAt": now, "idleAt": now,
+            }
+        return {"writeGrantId": grant_id}
+
+    @staticmethod
+    def _visible(entry: dict[str, Any], profile_id: str, binding: str, server_id: str) -> bool:
+        return (entry["profileId"], entry["binding"], entry["serverId"]) == (profile_id, binding, server_id)
+
+    def require(
+        self, grant_id: str, console_id: str, profile_id: str, database: str, namespace: str,
+        profile_fingerprint: str, binding: str, server_id: str,
+    ) -> None:
+        now = self._clock()
+        with self._lock:
+            entry = self._entries.get(grant_id)
+            if entry is None or not self._visible(entry, profile_id, binding, server_id):
+                raise PostgresServiceError(403, "write_grant_required", "A current write grant is required")
+            if now - entry["idleAt"] >= WRITE_GRANT_IDLE_SECONDS or now - entry["createdAt"] >= WRITE_GRANT_ABSOLUTE_SECONDS:
+                self._entries.pop(grant_id, None)
+                raise PostgresServiceError(403, "write_grant_expired", "The write grant has expired")
+            target = (entry["consoleId"], entry["database"], entry["namespace"], entry["profileFingerprint"])
+            requested = (console_id, database, namespace, profile_fingerprint)
+            if target != requested:
+                raise PostgresServiceError(409, "write_grant_target_changed", "The write grant target has changed")
+
+    def touch(self, grant_id: str) -> None:
+        with self._lock:
+            entry = self._entries.get(grant_id)
+            if entry is not None:
+                entry["idleAt"] = self._clock()
+
+    def revoke(self, grant_id: str, profile_id: str, binding: str, server_id: str) -> dict[str, bool]:
+        with self._lock:
+            entry = self._entries.get(grant_id)
+            if entry is None or not self._visible(entry, profile_id, binding, server_id):
+                raise PostgresServiceError(404, "write_grant_not_found", "Console write grant was not found")
+            self._entries.pop(grant_id, None)
+        return {"revoked": True}
+
+    def close(self) -> None:
+        with self._lock:
+            self._entries.clear()
+
+
 class PostgresConsole:
     def __init__(self, service: Any):
         self.service = service
         self.registry = ConsoleExecutionRegistry()
+        self.write_grants = ConsoleWriteGrantRegistry(service._clock)
 
     @staticmethod
     def _encoded_size(value: Any) -> int:
@@ -304,8 +367,16 @@ class PostgresConsole:
             raise ValidationError("Console execution request fields are invalid")
         execution_id = _canonical_uuid(payload["executionId"], "executionId")
         console_id = _canonical_uuid(payload["consoleId"], "consoleId")
-        if payload["mode"] != "read" or payload["writeGrantId"] is not None:
-            raise ValidationError("Only read mode with a null writeGrantId is supported")
+        mode = payload["mode"]
+        if mode not in {"read", "write"}:
+            raise ValidationError("mode must be read or write")
+        if mode == "read" and payload["writeGrantId"] is not None:
+            raise ValidationError("writeGrantId must be null in read mode")
+        if mode == "write" and not policy.allow_write:
+            raise PostgresServiceError(403, "write_grant_required", "Write mode is not available")
+        if mode == "write" and payload["writeGrantId"] is None:
+            raise PostgresServiceError(403, "write_grant_required", "A current write grant is required")
+        write_grant_id = _canonical_uuid(payload["writeGrantId"], "writeGrantId") if mode == "write" else None
         statements = split_console_statements(payload["sql"])
         database = self.service._validate_database(payload["database"])
         namespace = self.service._validate_namespace(payload["namespace"])
@@ -313,19 +384,27 @@ class PostgresConsole:
         profile = self.service._profile(profile_id)
         if profile["dbname"] != database:
             raise PostgresServiceError(409, "database_changed", "The saved profile database does not match the requested database")
+        profile_fingerprint = self.service._profile_fingerprint(profile)
+        if write_grant_id is not None:
+            self.write_grants.require(
+                write_grant_id, console_id, profile_id, database, namespace,
+                profile_fingerprint, binding, server_id,
+            )
 
         self.registry.reserve(execution_id, console_id, profile_id, binding, server_id)
         connection = None
         cursor = None
         notice_handler = None
         statement_index = 0
+        committed = False
         try:
             connection = self.service._connect_profile(profile)
             if self.registry.attach(execution_id, connection):
                 raise PostgresServiceError(409, "execution_cancelled", "Console execution was cancelled")
             pending_notices, notice_handler = self._notice_collector(connection)
             cursor = connection.cursor()
-            cursor.execute("SET TRANSACTION READ ONLY")
+            if mode == "read":
+                cursor.execute("SET TRANSACTION READ ONLY")
             cursor.execute(f"SET LOCAL statement_timeout = '{policy.statement_timeout_ms}ms'")
             cursor.execute("SELECT current_database() AS database")
             rows = cursor.fetchall()
@@ -337,7 +416,9 @@ class PostgresConsole:
             exists = rows[0]["exists"] if rows and isinstance(rows[0], dict) else rows[0][0]
             if not exists:
                 raise NotFoundError("Namespace was not found")
-            cursor.execute("SELECT pg_catalog.set_config('search_path', %s, true)", (f"pg_catalog, {quote_identifier(namespace)}",))
+            if mode == "write" and self.service._profile_fingerprint(self.service._profile(profile_id)) != profile_fingerprint:
+                raise PostgresServiceError(409, "write_grant_target_changed", "The write grant target has changed")
+            cursor.execute("SELECT pg_catalog.set_config('search_path', %s, true)", (quote_identifier(namespace),))
 
             limits = {
                 "maxStatements": MAX_STATEMENTS, "maxRowsPerResult": MAX_ROWS_PER_RESULT,
@@ -347,13 +428,13 @@ class PostgresConsole:
             result = {
                 "executionId": execution_id,
                 "target": {"profileId": profile_id, "database": database, "namespace": namespace},
-                "mode": "read", "committed": False, "statements": [], "limits": limits,
+                "mode": mode, "committed": False, "statements": [], "limits": limits,
             }
             remaining_notice_count = MAX_NOTICES
             remaining_notice_bytes = MAX_NOTICE_BYTES
             for statement_index, statement in enumerate(statements):
                 cursor.execute(f"SET LOCAL statement_timeout = '{policy.statement_timeout_ms}ms'")
-                cursor.execute("SELECT pg_catalog.set_config('search_path', %s, true)", (f"pg_catalog, {quote_identifier(namespace)}",))
+                cursor.execute("SELECT pg_catalog.set_config('search_path', %s, true)", (quote_identifier(namespace),))
                 pending_notices.clear()
                 cursor.execute(statement)
                 notices, remaining_notice_count, remaining_notice_bytes = self._take_notices(
@@ -391,6 +472,11 @@ class PostgresConsole:
                 result["statements"].append(entry)
                 if self._encoded_size(result) > MAX_RESPONSE_BYTES:
                     raise PostgresServiceError(422, "sql_result_too_large", "Console result metadata exceeds the byte limit", {"statementIndex": statement_index})
+            if mode == "write":
+                connection.commit()
+                result["committed"] = True
+                committed = True
+                self.write_grants.touch(write_grant_id)
             return result
         except PostgresServiceError:
             raise
@@ -412,10 +498,11 @@ class PostgresConsole:
                     except Exception:
                         pass
             if connection is not None:
-                try:
-                    connection.rollback()
-                except Exception:
-                    pass
+                if not committed:
+                    try:
+                        connection.rollback()
+                    except Exception:
+                        pass
                 try:
                     self.service._close(connection)
                 finally:
@@ -428,5 +515,60 @@ class PostgresConsole:
         execution_id = _canonical_uuid(execution_id, "executionId")
         return self.registry.cancel(execution_id, profile_id, binding, server_id)
 
+    def create_write_grant(self, profile_id: str, payload: Any, binding: str, server_id: str) -> dict[str, Any]:
+        required = {"consoleId", "database", "namespace", "confirmed"}
+        if not isinstance(payload, dict) or set(payload) != required:
+            raise ValidationError("Console write grant request fields are invalid")
+        if payload["confirmed"] is not True:
+            raise ValidationError("confirmed must be true")
+        console_id = _canonical_uuid(payload["consoleId"], "consoleId")
+        database = self.service._validate_database(payload["database"])
+        namespace = self.service._validate_namespace(payload["namespace"])
+        profile_id = self.service._validate_profile_id(profile_id)
+        profile = self.service._profile(profile_id)
+        if profile["dbname"] != database:
+            raise PostgresServiceError(409, "database_changed", "The saved profile database does not match the requested database")
+        profile_fingerprint = self.service._profile_fingerprint(profile)
+        connection = None
+        cursor = None
+        try:
+            connection = self.service._connect_profile(profile)
+            cursor = connection.cursor()
+            cursor.execute("SET TRANSACTION READ ONLY")
+            cursor.execute("SELECT current_database() AS database")
+            rows = cursor.fetchall()
+            current_database = rows[0]["database"] if rows and isinstance(rows[0], dict) else rows[0][0]
+            if current_database != database:
+                raise PostgresServiceError(409, "database_changed", "The connected PostgreSQL database does not match the requested database")
+            cursor.execute("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = %s) AS exists", (namespace,))
+            rows = cursor.fetchall()
+            exists = rows[0]["exists"] if rows and isinstance(rows[0], dict) else rows[0][0]
+            if not exists:
+                raise NotFoundError("Namespace was not found")
+            if self.service._profile_fingerprint(self.service._profile(profile_id)) != profile_fingerprint:
+                raise PostgresServiceError(409, "write_grant_target_changed", "The write grant target has changed")
+            return self.write_grants.create(
+                console_id, profile_id, database, namespace, profile_fingerprint, binding, server_id,
+            )
+        finally:
+            if cursor is not None:
+                close = getattr(cursor, "close", None)
+                if close:
+                    try:
+                        close()
+                    except Exception:
+                        pass
+            if connection is not None:
+                try:
+                    connection.rollback()
+                finally:
+                    self.service._close(connection)
+
+    def revoke_write_grant(self, profile_id: str, grant_id: Any, binding: str, server_id: str) -> dict[str, bool]:
+        profile_id = self.service._validate_profile_id(profile_id)
+        grant_id = _canonical_uuid(grant_id, "writeGrantId")
+        return self.write_grants.revoke(grant_id, profile_id, binding, server_id)
+
     def close(self) -> None:
         self.registry.close()
+        self.write_grants.close()

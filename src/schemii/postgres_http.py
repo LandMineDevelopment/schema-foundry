@@ -3,12 +3,16 @@ from __future__ import annotations
 import re
 from urllib.parse import parse_qs
 
+from .postgres_console import ConsolePolicy
+
 
 PROFILE_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})(?:/(namespaces|relations|relation|fingerprint|test|introspect|preview))?$")
 DATA_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/data$")
 SQL_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/sql$")
 CONSOLE_EXECUTIONS_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/console/executions$")
 CONSOLE_EXECUTION_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/console/executions/([^/]+)$")
+CONSOLE_WRITE_GRANTS_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/console/write-grants$")
+CONSOLE_WRITE_GRANT_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/console/write-grants/([^/]+)$")
 RELATION_PREVIEW_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/relation/preview$")
 RELATION_VERIFY_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/relation/verify$")
 RELATION_QUERY_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/relation/query$")
@@ -20,6 +24,7 @@ POSTGRES_SCHEMA_CAPABILITY = "schema"
 POSTGRES_RELATION_QUERY_CAPABILITY = "relation_query"
 POSTGRES_READ_SQL_CAPABILITY = "read_sql"
 POSTGRES_CONSOLE_CAPABILITY = "console"
+POSTGRES_CONSOLE_WRITE_CAPABILITY = "console_write"
 
 
 class PostgresHttpMixin:
@@ -46,6 +51,7 @@ class PostgresHttpMixin:
     postgres_relation_query_context_fields = frozenset()
     postgres_temporal_series_context_fields = frozenset()
     postgres_relation_detail_context_fields = frozenset()
+    postgres_console_policy = ConsolePolicy()
 
     def _has_postgres_capability(self, capability: str) -> bool:
         return capability in self.postgres_capabilities
@@ -111,6 +117,7 @@ class PostgresHttpMixin:
             return True
         sql_match = SQL_PATH.fullmatch(path)
         console_match = CONSOLE_EXECUTIONS_PATH.fullmatch(path)
+        write_grants_match = CONSOLE_WRITE_GRANTS_PATH.fullmatch(path)
         relation_preview_match = RELATION_PREVIEW_PATH.fullmatch(path)
         relation_verify_match = RELATION_VERIFY_PATH.fullmatch(path)
         relation_query_match = RELATION_QUERY_PATH.fullmatch(path)
@@ -121,26 +128,37 @@ class PostgresHttpMixin:
             return False
         if console_match and not self._has_postgres_capability(POSTGRES_CONSOLE_CAPABILITY):
             return False
+        if write_grants_match and not self._has_postgres_capability(POSTGRES_CONSOLE_WRITE_CAPABILITY):
+            return False
         if any((relation_preview_match, relation_verify_match, relation_query_match, relation_temporal_series_match, relation_detail_match)) and not self._has_postgres_capability(POSTGRES_RELATION_QUERY_CAPABILITY):
             return False
         if profile_match and profile_match.group(2) == "test" and not self._has_postgres_capability(POSTGRES_PROFILE_CAPABILITY):
             return False
         if profile_match and profile_match.group(2) == "introspect" and not self._has_postgres_capability(POSTGRES_SCHEMA_CAPABILITY):
             return False
-        if not sql_match and not console_match and not relation_preview_match and not relation_verify_match and not relation_query_match and not relation_temporal_series_match and not relation_detail_match and not (profile_match and profile_match.group(2) in {"test", "introspect"}):
+        if not sql_match and not console_match and not write_grants_match and not relation_preview_match and not relation_verify_match and not relation_query_match and not relation_temporal_series_match and not relation_detail_match and not (profile_match and profile_match.group(2) in {"test", "introspect"}):
             return False
         if not self._authorize_postgres():
             return True
         body = self._body_or_error()
         if body is None:
             return True
-        if console_match:
+        if write_grants_match:
+            grant_fields = {"consoleId", "database", "namespace", "confirmed"}
+            if not isinstance(body, dict) or set(body) != grant_fields:
+                self.send_json(400, {"error": {"code": "validation_error", "message": "Console write grant request fields are invalid"}})
+            else:
+                self._service_call(lambda: self.service.create_console_write_grant(
+                    write_grants_match.group(1), body, self.postgres_session_binding, self.postgres_server_id,
+                ), 201)
+        elif console_match:
             console_fields = {"executionId", "consoleId", "database", "namespace", "sql", "mode", "writeGrantId"}
             if not isinstance(body, dict) or set(body) != console_fields:
                 self.send_json(400, {"error": {"code": "validation_error", "message": "Console execution request fields are invalid"}})
             else:
                 self._service_call(lambda: self.service.execute_console(
                     console_match.group(1), body, self.postgres_session_binding, self.postgres_server_id,
+                    self.postgres_console_policy,
                 ))
         elif relation_detail_match:
             base_fields = {"source", "query", "selection", "detail", "offset", "limit", "sort", "searches"}
@@ -256,6 +274,14 @@ class PostgresHttpMixin:
         return True
 
     def _handle_postgres_delete(self, path: str) -> bool:
+        write_grant_match = CONSOLE_WRITE_GRANT_PATH.fullmatch(path)
+        if write_grant_match and self._has_postgres_capability(POSTGRES_CONSOLE_WRITE_CAPABILITY):
+            if self._authorize_postgres():
+                self._service_call(lambda: self.service.revoke_console_write_grant(
+                    write_grant_match.group(1), write_grant_match.group(2),
+                    self.postgres_session_binding, self.postgres_server_id,
+                ))
+            return True
         console_match = CONSOLE_EXECUTION_PATH.fullmatch(path)
         if console_match and self._has_postgres_capability(POSTGRES_CONSOLE_CAPABILITY):
             if self._authorize_postgres():

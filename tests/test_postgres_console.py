@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from schemii.postgres_common import PostgresServiceError, ValidationError
-from schemii.postgres_console import ConsoleExecutionRegistry, split_console_statements
+from schemii.postgres_console import ConsoleExecutionRegistry, ConsolePolicy, split_console_statements
 from schemii.postgres_service import PostgresService
 
 
@@ -86,7 +86,7 @@ class UnsupportedTransactionError(Exception):
 
 
 class Connection:
-    def __init__(self, results=None, *, database="demo", namespace_exists=True, block_on=None, notices=None):
+    def __init__(self, results=None, *, database="demo", namespace_exists=True, block_on=None, notices=None, commit_error=None):
         self.results = results or {}
         self.database = database
         self.namespace_exists = namespace_exists
@@ -95,6 +95,8 @@ class Connection:
         self.notice_handlers = []
         self.executed = []
         self.rollbacks = 0
+        self.commits = 0
+        self.commit_error = commit_error
         self.closed = False
         self.cancelled = False
         self.started = threading.Event()
@@ -115,6 +117,11 @@ class Connection:
 
     def rollback(self):
         self.rollbacks += 1
+
+    def commit(self):
+        self.commits += 1
+        if self.commit_error is not None:
+            raise self.commit_error
 
     def close(self):
         self.closed = True
@@ -138,6 +145,19 @@ class PostgresConsoleTests(unittest.TestCase):
         }
         request.update(changes)
         return request
+
+    def grant_request(self, console_id=None, **changes):
+        request = {
+            "consoleId": console_id or str(uuid4()), "database": "demo",
+            "namespace": "public", "confirmed": True,
+        }
+        request.update(changes)
+        return request
+
+    def create_grant(self, console_id=None, binding="binding", server_id="server"):
+        request = self.grant_request(console_id)
+        result = self.service.create_console_write_grant("local", request, binding, server_id)
+        return request, result["writeGrantId"]
 
     def test_scanner_splits_quotes_comments_and_dollar_quotes(self):
         statements = split_console_statements("SELECT ';'; -- ;\n SELECT $$;$$; /* ; */ SELECT 3")
@@ -165,7 +185,7 @@ class PostgresConsoleTests(unittest.TestCase):
         self.assertEqual(result["statements"][1]["rowCount"], 2)
         self.assertFalse(result["committed"])
         self.assertEqual(self.connection.executed[0][0], "SET TRANSACTION READ ONLY")
-        self.assertIn(("SELECT pg_catalog.set_config('search_path', %s, true)", ('pg_catalog, "public"',)), self.connection.executed)
+        self.assertIn(("SELECT pg_catalog.set_config('search_path', %s, true)", ('"public"',)), self.connection.executed)
         self.assertEqual(self.connection.rollbacks, 1)
         self.assertTrue(self.connection.closed)
 
@@ -175,6 +195,141 @@ class PostgresConsoleTests(unittest.TestCase):
             self.service.execute_console("local", self.request("SELECT secret"), "binding", "server")
         self.assertEqual(error.exception.code, "database_changed")
         self.assertFalse(any(sql == "SELECT secret" for sql, _ in self.connection.executed))
+
+    def test_write_grant_creation_verifies_exact_request_and_live_target(self):
+        request, grant_id = self.create_grant()
+        self.assertEqual(str(uuid4()).count("-"), grant_id.count("-"))
+        self.assertIn(("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = %s) AS exists", ("public",)), self.connection.executed)
+        self.assertEqual(self.connection.rollbacks, 1)
+        self.assertEqual(self.connection.commits, 0)
+        self.assertNotIn("password", self.service._console.write_grants._entries[grant_id])
+        with self.assertRaises(ValidationError):
+            self.service.create_console_write_grant("local", {**request, "confirmed": False}, "binding", "server")
+
+        self.connection.database = "other"
+        with self.assertRaises(PostgresServiceError) as error:
+            self.service.create_console_write_grant("local", self.grant_request(), "binding", "server")
+        self.assertEqual(error.exception.code, "database_changed")
+
+    def test_write_grant_requires_exact_binding_and_target(self):
+        console_id = str(uuid4())
+        _, grant_id = self.create_grant(console_id)
+        for changes in (
+            {"consoleId": str(uuid4())}, {"namespace": "other"},
+        ):
+            request = self.request(
+                "UPDATE example SET value = 1", consoleId=console_id, mode="write", writeGrantId=grant_id,
+            )
+            request.update(changes)
+            with self.subTest(changes=changes), self.assertRaises(PostgresServiceError) as error:
+                self.service.execute_console(
+                    "local", request,
+                    "binding", "server", ConsolePolicy(allow_write=True),
+                )
+            self.assertEqual(error.exception.code, "write_grant_target_changed")
+        with self.assertRaises(PostgresServiceError) as error:
+            self.service.execute_console(
+                "local", self.request("UPDATE example SET value = 1", consoleId=console_id, mode="write", writeGrantId=grant_id),
+                "wrong-binding", "server", ConsolePolicy(allow_write=True),
+            )
+        self.assertEqual(error.exception.code, "write_grant_required")
+        with self.assertRaises(PostgresServiceError) as error:
+            self.service.revoke_console_write_grant("local", grant_id, "wrong-binding", "server")
+        self.assertEqual((error.exception.status, error.exception.code), (404, "write_grant_not_found"))
+
+    def test_write_grant_expiry_and_profile_fingerprint(self):
+        now = [1000.0]
+        service = PostgresService(self.directory.name, connect_factory=lambda **kwargs: self.connection, clock=lambda: now[0])
+        console_id = str(uuid4())
+        grant_id = service.create_console_write_grant("local", self.grant_request(console_id), "binding", "server")["writeGrantId"]
+        now[0] += 300
+        with self.assertRaises(PostgresServiceError) as error:
+            service.execute_console(
+                "local", self.request("UPDATE x SET y = 1", consoleId=console_id, mode="write", writeGrantId=grant_id),
+                "binding", "server", ConsolePolicy(allow_write=True),
+            )
+        self.assertEqual(error.exception.code, "write_grant_expired")
+
+        now[0] = 2000
+        grant_id = service.create_console_write_grant("local", self.grant_request(console_id), "binding", "server")["writeGrantId"]
+        service.save_profile("local", {**PROFILE, "user": "changed"})
+        with self.assertRaises(PostgresServiceError) as error:
+            service.execute_console(
+                "local", self.request("UPDATE x SET y = 1", consoleId=console_id, mode="write", writeGrantId=grant_id),
+                "binding", "server", ConsolePolicy(allow_write=True),
+            )
+        self.assertEqual(error.exception.code, "write_grant_target_changed")
+        service.close()
+
+    def test_write_grant_absolute_expiry_is_not_extended_by_commits(self):
+        now = [1000.0]
+        service = PostgresService(self.directory.name, connect_factory=lambda **kwargs: self.connection, clock=lambda: now[0])
+        console_id = str(uuid4())
+        grant_id = service.create_console_write_grant("local", self.grant_request(console_id), "binding", "server")["writeGrantId"]
+        for elapsed in (299, 598, 897):
+            now[0] = 1000 + elapsed
+            service.execute_console(
+                "local", self.request("UPDATE x SET y = 1", consoleId=console_id, mode="write", writeGrantId=grant_id),
+                "binding", "server", ConsolePolicy(allow_write=True),
+            )
+        now[0] = 1900
+        with self.assertRaises(PostgresServiceError) as error:
+            service.execute_console(
+                "local", self.request("UPDATE x SET y = 2", consoleId=console_id, mode="write", writeGrantId=grant_id),
+                "binding", "server", ConsolePolicy(allow_write=True),
+            )
+        self.assertEqual(error.exception.code, "write_grant_expired")
+        service.close()
+
+    def test_write_commits_once_without_read_only_and_touches_grant(self):
+        now = [1000.0]
+        service = PostgresService(self.directory.name, connect_factory=lambda **kwargs: self.connection, clock=lambda: now[0])
+        console_id = str(uuid4())
+        grant_id = service.create_console_write_grant("local", self.grant_request(console_id), "binding", "server")["writeGrantId"]
+        self.connection.executed.clear()
+        self.connection.rollbacks = 0
+        now[0] = 1299
+        result = service.execute_console(
+            "local", self.request("UPDATE example SET value = 1", consoleId=console_id, mode="write", writeGrantId=grant_id),
+            "binding", "server", ConsolePolicy(allow_write=True),
+        )
+        self.assertTrue(result["committed"])
+        self.assertEqual(result["mode"], "write")
+        self.assertEqual((self.connection.commits, self.connection.rollbacks), (1, 0))
+        self.assertNotIn("SET TRANSACTION READ ONLY", [sql for sql, _ in self.connection.executed])
+        now[0] = 1598
+        service.execute_console(
+            "local", self.request("UPDATE example SET value = 2", consoleId=console_id, mode="write", writeGrantId=grant_id),
+            "binding", "server", ConsolePolicy(allow_write=True),
+        )
+        self.assertEqual(self.connection.commits, 2)
+        service.close()
+
+    def test_failed_write_rolls_back_and_does_not_extend_idle(self):
+        now = [1000.0]
+        failure = RuntimeError("commit failed")
+        connection = Connection(commit_error=failure)
+        service = PostgresService(self.directory.name, connect_factory=lambda **kwargs: connection, clock=lambda: now[0])
+        console_id = str(uuid4())
+        grant_id = service.create_console_write_grant("local", self.grant_request(console_id), "binding", "server")["writeGrantId"]
+        connection.rollbacks = 0
+        now[0] = 1200
+        with self.assertRaises(PostgresServiceError) as error:
+            service.execute_console(
+                "local", self.request("UPDATE example SET value = 1", consoleId=console_id, mode="write", writeGrantId=grant_id),
+                "binding", "server", ConsolePolicy(allow_write=True),
+            )
+        self.assertEqual(error.exception.code, "sql_query_failed")
+        self.assertEqual((connection.commits, connection.rollbacks), (1, 1))
+        connection.commit_error = None
+        now[0] = 1300
+        with self.assertRaises(PostgresServiceError) as error:
+            service.execute_console(
+                "local", self.request("UPDATE example SET value = 2", consoleId=console_id, mode="write", writeGrantId=grant_id),
+                "binding", "server", ConsolePolicy(allow_write=True),
+            )
+        self.assertEqual(error.exception.code, "write_grant_expired")
+        service.close()
 
     def test_limits_rows_columns_and_aggregate_bytes(self):
         self.connection.results = {"SELECT rows": (["value"], [(index,) for index in range(501)], "SELECT 501", 501)}

@@ -72,6 +72,7 @@ class PostgresHttpContractTests(unittest.TestCase):
                         self.assertEqual(call[:3], ("execute_console", "shared", request))
                         self.assertNotEqual(call[3], "session-token")
                         self.assertEqual(call[4], f"{name}-contract")
+                        self.assertEqual(call[5].allow_write, name == "schemii")
                         self.assertEqual(running.request(
                             f"/api/postgres/profiles/shared/console/executions/{execution_id}",
                             "DELETE", authorized=True,
@@ -84,6 +85,25 @@ class PostgresHttpContractTests(unittest.TestCase):
                         self.assertEqual(running.request(
                             "/api/postgres/profiles/shared/console/executions", "POST", [], authorized=True,
                         )[0], 400)
+                        grant_request = {
+                            "consoleId": console_id, "database": "demo", "namespace": "public", "confirmed": True,
+                        }
+                        status, body, _ = running.request(
+                            "/api/postgres/profiles/shared/console/write-grants", "POST", grant_request, authorized=True,
+                        )
+                        if name == "schemii":
+                            self.assertEqual(status, 201)
+                            grant_id = json.loads(body)["writeGrantId"]
+                            self.assertEqual(service.calls[-1][:3], ("create_console_write_grant", "shared", grant_request))
+                            self.assertEqual(running.request(
+                                f"/api/postgres/profiles/shared/console/write-grants/{grant_id}", "DELETE", authorized=True,
+                            )[0], 200)
+                            self.assertEqual(service.calls[-1][0], "revoke_console_write_grant")
+                        else:
+                            self.assertEqual(status, 404)
+                            self.assertEqual(running.request(
+                                f"/api/postgres/profiles/shared/console/write-grants/{uuid4()}", "DELETE", authorized=True,
+                            )[0], 404)
                     finally:
                         running.close()
 
