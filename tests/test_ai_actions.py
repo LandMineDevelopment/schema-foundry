@@ -69,6 +69,11 @@ class AiActionTests(unittest.TestCase):
         self.assertTrue(preview["readOnly"])
         with self.assertRaises(ValueError):
             normalize_schemii_action({**preview, "readOnly": False}, "schema")
+        with self.assertRaises(ValueError):
+            normalize_schemii_action({
+                "type": "migration_apply", "profileId": "local", "database": "demo", "namespace": "public",
+                "planId": "ai_plan_one", "destructive": False, "requiresConfirmation": True,
+            }, "schema")
 
     def test_schemer_actions_are_exact_and_revision_bound(self):
         action = {

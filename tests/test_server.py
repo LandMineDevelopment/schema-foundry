@@ -678,7 +678,13 @@ class ServerTests(unittest.TestCase):
         path = f"/api/ai/sessions/ses_1/proposals/{proposal['proposalId']}/execute"
         operation = json.loads(self.request(path, "POST", execute, authorized=True)[1])["operation"]
         self.assertEqual(operation["result"]["kind"], "migration_plan")
-        self.assertIn(("preview", "local", "public", unittest.mock.ANY, False, False), self.service.calls)
+        self.assertEqual(operation["result"]["schemaBinding"]["schemaId"], "schema_one")
+        apply_proposal = operation["result"]["applyProposal"]
+        apply_path = f"/api/ai/sessions/ses_1/proposals/{apply_proposal['proposalId']}/execute"
+        applied = json.loads(self.request(apply_path, "POST", execute, authorized=True)[1])["operation"]
+        self.assertEqual(applied["result"]["kind"], "migration_applied")
+        self.assertTrue(any(call[0] == "apply_ai_migration" and call[-1] is True for call in self.service.calls))
+        self.assertTrue(any(call[0] == "preview_ai_migration" and call[2:5] == ("local", "demo", "public") for call in self.service.calls))
 
     def test_ai_message_metadata_omits_schema_and_rejects_unknown_schema(self):
         record = {"id": "schema_one", "schema": {"projectName": "Demo", "tables": [{"id": "t", "name": "secret_table", "columns": []}], "relationships": [], "functions": []}}

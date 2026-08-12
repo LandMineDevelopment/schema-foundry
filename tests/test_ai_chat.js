@@ -128,6 +128,10 @@ assert.match(source, /context\.accessLevel !== "data" \|\| elements\.aiAccessSel
 assert.match(source, /postgresProfileForm\.clearPassword\(\)|postgresProfileForm\.fill\(profile\)/, "connection workflows must clear the password field through the shared form contract");
 assert.match(shared, /proposalRequest\(proposal, "execute", body\)/, "confirmed proposals must execute through the server-owned operation boundary");
 assert.match(shared, /proposalRequest\(proposal, "reconcile", context\)/, "lost execute responses must reconcile by proposal ID");
+assert.match(shared, /response\.operation\?\.state === "uncertain"[\s\S]*proposalRequest\(proposal, "reconcile", context\)/, "an existing uncertain operation must reconcile even when execute returns HTTP 200");
+assert.match(shared, /history\.pendingProposals[\s\S]*renderAction/, "history restoration must expose only server-returned pending recovery proposals");
+assert.match(source, /renderServerAiProposal\(result\.applyProposal, \{ \.\.\.context, schemaSnapshot: postgresState\.schemaSnapshot \}\)/, "server-issued apply proposals must bind to the exact preview-time schema snapshot");
+assert.match(source, /result\.schemaSync\?\.revision/, "post-apply browser refresh must require the server-owned schema synchronization revision");
 assert.doesNotMatch(shared, /claimProposal|completeProposal|"finalize"|"release"/, "browser proposal execution must not coordinate claims or completion");
 const authUi = shared.slice(shared.indexOf("function buildAuthForm"), shared.indexOf("function renderProviders"));
 assert.doesNotMatch(authUi, /localStorage|sessionStorage/, "provider credentials must not use browser storage");

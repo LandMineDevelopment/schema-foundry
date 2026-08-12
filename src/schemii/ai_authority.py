@@ -113,6 +113,18 @@ class AiAuthority:
                 if self._proposal_matches(record, context)
             ]
 
+    def list_resource_proposals(
+        self, *, application: str, session_id: str, resource: str, access: str,
+    ) -> list[dict[str, Any]]:
+        self._require_application(application)
+        expected = (_identity(session_id, "session_id"), _identity(resource, "resource"), _identity(access, "access"))
+        with self._store_lock():
+            self._prepare(self._now_ms())
+            return [
+                self._public_proposal(record) for record in self._records(self.proposal_dir, "proposal")
+                if (record["sessionId"], record["resource"], record["access"]) == expected
+            ]
+
     def claim_proposal(
         self, proposal_id: str, *, application: str, session_id: str, resource: str,
         access: str, binding: dict[str, Any] | None = None,
@@ -242,6 +254,33 @@ class AiAuthority:
             if state == "succeeded":
                 proposal.update({"state": "consumed", "consumedAtMs": now})
             elif state == "failed":
+                proposal.update({"state": "consumed", "consumedAtMs": now})
+            else:
+                proposal.update({"state": "uncertain", "uncertainAtMs": now})
+            self._write(self.operation_dir, operation)
+            self._write(self.proposal_dir, proposal)
+            return self._public_operation(operation)
+
+    def resolve_operation(
+        self, operation_id: str, *, application: str, session_id: str, state: str,
+        result: Any = None, error: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Resolve an interrupted operation from an application-owned durable receipt."""
+        self._require_application(application)
+        if state not in {"succeeded", "failed", "uncertain"}:
+            raise AiAuthorityError(400, "invalid_authority_input", "Operation terminal state is invalid")
+        result = self._payload(result, "result") if result is not None else None
+        error = self._payload(error, "error", require_dict=True) if error is not None else None
+        with self._store_lock():
+            now = self._now_ms()
+            operation = self._read(self.operation_dir, _record_id(operation_id, "operation"), "operation")
+            self._require_operation_owner(operation, session_id)
+            if operation["state"] not in {"running", "uncertain"}:
+                return self._public_operation(operation)
+            operation.update({"state": state, "result": result, "error": error, "updatedAtMs": now, "leaseExpiresAtMs": None})
+            proposal = self._read(self.proposal_dir, operation["proposalId"], "proposal")
+            proposal["claim"] = None
+            if state in {"succeeded", "failed"}:
                 proposal.update({"state": "consumed", "consumedAtMs": now})
             else:
                 proposal.update({"state": "uncertain", "uncertainAtMs": now})

@@ -366,6 +366,48 @@ class SchemaStoreTests(unittest.TestCase):
         self.assertEqual(error.exception.payload["error"]["code"], "schema_conflict")
         self.assertEqual(len(outcomes), 1)
 
+    def test_ai_migration_sync_preserves_complete_layout_and_is_idempotent(self):
+        original = record("schema_one", "Approved")
+        original["schema"]["tables"] = [{"id": "table_one", "name": "events", "x": 12, "y": 34, "color": "gold", "columns": []}]
+        original["schema"]["layout"] = {"version": 2, "custom": {"keep": True}, "layers": {
+            "tables": {"objects": {"table_one": {"x": 12, "y": 34, "color": "gold"}}, "viewport": {"x": 1, "y": 2, "zoom": .8}},
+            "views": {"objects": {"view_one": {"x": 50, "y": 60, "color": "blue"}}, "viewport": {"x": 3, "y": 4, "zoom": 1}},
+        }}
+        saved = self.store.save("schema_one", original, expected_layout_token=None, layout_protocol=None)
+        refreshed = {"projectName": "database", "tables": [{"id": "table_one", "name": "events", "columns": []}], "relationships": [], "functions": [], "postgres": {"database": "demo", "namespace": "public"}}
+
+        result = self.store.sync_ai_migration_result("schema_one", 1, saved["layoutToken"], refreshed)
+        duplicate = SchemaStore(self.schema_dir).sync_ai_migration_result("schema_one", 1, saved["layoutToken"], refreshed)
+        current = self.store.get("schema_one")
+
+        self.assertEqual(result, duplicate)
+        self.assertEqual(current["revision"], 2)
+        self.assertEqual(current["schema"]["projectName"], "Approved")
+        self.assertEqual(current["schema"]["layout"], original["schema"]["layout"])
+        self.assertEqual((current["schema"]["tables"][0]["x"], current["schema"]["tables"][0]["y"], current["schema"]["tables"][0]["color"]), (12, 34, "gold"))
+
+    def test_ai_migration_sync_preserves_ids_by_live_oid(self):
+        original = record("schema_one", "Approved")
+        original["schema"]["tables"] = [{
+            "id": "local_table", "name": "old_events", "x": 12, "y": 34, "color": "gold",
+            "postgres": {"liveOid": 42}, "columns": [{"id": "local_column", "name": "id", "type": "integer"}],
+        }]
+        original["schema"]["layout"] = {"version": 1, "tables": {"local_table": {"x": 12, "y": 34, "color": "gold"}}, "view": {"x": 1, "y": 2, "zoom": 1}}
+        original["schema"]["views"] = [{"id": "local_view", "name": "summary", "namespace": "public"}]
+        saved = self.store.save("schema_one", original, expected_layout_token=None, layout_protocol=None)
+        refreshed = {
+            "projectName": "database", "tables": [{"id": "pg_table", "name": "new_events", "postgres": {"liveOid": 42}, "columns": [{"id": "pg_column", "name": "id", "type": "integer"}]}],
+            "relationships": [{"id": "rel", "fromTableId": "pg_table", "fromColumnId": "pg_column", "toTableId": "pg_table", "toColumnId": "pg_column"}], "functions": [],
+            "views": [{"id": "pg_view", "name": "summary", "namespace": "public"}],
+        }
+        self.store.sync_ai_migration_result("schema_one", 1, saved["layoutToken"], refreshed)
+        current = self.store.get("schema_one")["schema"]
+        self.assertEqual(current["tables"][0]["id"], "local_table")
+        self.assertEqual(current["tables"][0]["columns"][0]["id"], "local_column")
+        self.assertEqual(current["relationships"][0]["fromTableId"], "local_table")
+        self.assertEqual(current["relationships"][0]["fromColumnId"], "local_column")
+        self.assertEqual(current["views"][0]["id"], "local_view")
+
 
 if __name__ == "__main__":
     unittest.main()

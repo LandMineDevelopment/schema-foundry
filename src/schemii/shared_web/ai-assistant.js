@@ -457,7 +457,12 @@
       const body = { ...context, confirmation: { accepted: true, mode: "explicit" } };
       try {
         const response = await proposalRequest(proposal, "execute", body);
-        return response.operation?.state === "running" ? waitForOperation(proposal, response.operation) : response;
+        if (response.operation?.state === "running") return waitForOperation(proposal, response.operation);
+        if (response.operation?.state === "uncertain") {
+          const reconciled = await proposalRequest(proposal, "reconcile", context);
+          return reconciled.operation?.state === "running" ? waitForOperation(proposal, reconciled.operation) : reconciled;
+        }
+        return response;
       } catch (error) {
         try {
           const response = await proposalRequest(proposal, "reconcile", context);
@@ -588,6 +593,8 @@
           if (message.role === "user") appendMessage("user", message.text);
           if (message.role === "assistant") renderResponse({ parts: message.parts ?? [], text: message.text ?? "", actions: [], proposals: [] }, null, session.id);
         }
+        const restoredCapture = getContext(elements.access.value);
+        for (const proposal of history.pendingProposals ?? []) renderAction?.(proposal, restoredCapture, api);
         if (!elements.messages.children.length) appendMessage("assistant", "This saved conversation has no displayable messages.");
         const resumable = binding.key == null || binding.key === currentKey;
         state.sessionId = resumable ? session.id : null; state.contextKey = resumable ? currentKey : null;

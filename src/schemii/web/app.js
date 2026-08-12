@@ -5934,6 +5934,7 @@ function aiActionSummary(action) {
   if (type === "open_project") return "Open a local project";
   if (type === "open_connection") return "Open a saved PostgreSQL connection";
   if (type === "migration_preview") return "Preview migration";
+  if (type === "migration_apply") return "Apply the reviewed migration";
   return String(action.title ?? payload.title ?? type.replaceAll("_", " ") ?? "Proposed action");
 }
 
@@ -5977,6 +5978,11 @@ function renderAiAction(proposal, context) {
   elements.aiMessages.append(card);
 }
 
+function renderServerAiProposal(proposal, context) {
+  const capture = clone(context);
+  renderAiAction(proposal, capture);
+}
+
 async function confirmAiAction(proposal, context, card, button) {
   card.querySelectorAll(".ai-action-error").forEach(error => error.remove());
   const action = proposal.action;
@@ -5986,6 +5992,7 @@ async function confirmAiAction(proposal, context, card, button) {
     if (!confirm("Run this generated read-only SQL query? PostgreSQL functions can still have side effects outside the database.")) return;
     return executeAiReadQuery(proposal, context, card, button);
   }
+  if (type === "migration_apply" && aiActionPayload(action).destructive && !confirm("This migration contains destructive PostgreSQL changes and may lose data. Apply the exact reviewed plan?")) return;
   if (!confirm(`Confirm action: ${aiActionSummary(action)}?`)) return;
   if (activeSchemaId !== context.schemaId) return showToast("The active design changed. Ask the assistant for a fresh proposal");
   try {
@@ -6070,7 +6077,26 @@ async function handleSchemiiAiOperationResult(result, context) {
     postgresState.schemaSnapshot = JSON.stringify(schema);
     renderMigrationPreview();
     if (!elements.migrationDialog.open) elements.migrationDialog.showModal();
+    if (result.applyProposal) renderServerAiProposal(result.applyProposal, { ...context, schemaSnapshot: postgresState.schemaSnapshot });
     return "Previewed";
+  }
+  if (result?.kind === "migration_applied") {
+    const payload = await sharedSessionClient.json("/api/schemas", {}, { allowPath: path => path === "/api/schemas", defaultMessage: "The migrated design could not be reloaded" });
+    const records = Array.isArray(payload.schemas) ? payload.schemas : [];
+    const refreshed = records.find(item => item.id === result.schemaBinding?.schemaId);
+    if (!refreshed || refreshed.revision !== result.schemaSync?.revision) throw new Error("PostgreSQL was updated, but authoritative saved state must be reloaded");
+    schemaLibrary = { activeId: activeSchemaId, schemas: records };
+    if (activeSchemaId === refreshed.id) {
+      schema = migrateSchema(clone(refreshed.schema));
+      view = clone(schema.layout.layers.tables.viewport);
+      resetSchemaSession();
+      render();
+    }
+    postgresState.plan = null;
+    postgresState.schemaSnapshot = null;
+    postgresState.previewOnly = false;
+    if (elements.migrationDialog.open) elements.migrationDialog.close();
+    return "Applied";
   }
   if (result?.kind === "sql_result") return "Ran query";
   throw new Error("The server returned an unsupported operation result");
