@@ -12,13 +12,9 @@ from pathlib import Path
 from typing import Any
 
 from .atomic_json import write_json
+from .file_lock import exclusive_file_lock
 from .relation_source import RelationSourceValidationError, normalize_relation_source
 from .widget_query import QueryValidationError, normalize_number_format, normalize_query
-
-try:
-    import fcntl
-except ImportError:  # pragma: no cover
-    fcntl = None
 
 
 DASHBOARD_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
@@ -457,17 +453,13 @@ class DashboardStore:
             depth = depths.get(dashboard_id, 0)
             depths[dashboard_id] = depth + 1
             self._lock_state.depths = depths
-            handle = None
             try:
-                if depth == 0 and fcntl is not None:
-                    path = self.lock_dir / f"{dashboard_id}.lock"
-                    path.touch(mode=0o600, exist_ok=True)
-                    handle = path.open("a+b")
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-                yield
+                if depth:
+                    yield
+                else:
+                    with exclusive_file_lock(self.lock_dir / f"{dashboard_id}.lock"):
+                        yield
             finally:
-                if handle:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN); handle.close()
                 if depth: depths[dashboard_id] = depth
                 else: depths.pop(dashboard_id, None)
 

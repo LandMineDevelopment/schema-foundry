@@ -1,5 +1,6 @@
 import copy
 import json
+import os
 import stat
 import sys
 import tempfile
@@ -117,13 +118,15 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertNotIn("password", self.profile)
         self.assertNotIn("password", self.service.list_profiles()[0])
         store = Path(self.temporary_directory.name) / "postgres_profiles.json"
-        self.assertEqual(stat.S_IMODE(Path(self.temporary_directory.name).stat().st_mode), 0o700)
-        self.assertEqual(stat.S_IMODE(store.stat().st_mode), 0o600)
+        if os.name != "nt":
+            self.assertEqual(stat.S_IMODE(Path(self.temporary_directory.name).stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(store.stat().st_mode), 0o600)
         self.service.save_profile("local", {**PROFILE, "name": "Updated", "password": ""})
         self.assertEqual(json.loads(store.read_text())["profiles"]["local"]["password"], "secret")
         store.chmod(0o644)
         PostgresService(self.temporary_directory.name)
-        self.assertEqual(stat.S_IMODE(store.stat().st_mode), 0o600)
+        if os.name != "nt":
+            self.assertEqual(stat.S_IMODE(store.stat().st_mode), 0o600)
 
     def test_profile_validation_identifier_quoting_and_plan_invalidation(self):
         for change in ({"port": 0}, {"timeout": True}, {"sslmode": "maybe"}, {"host": "bad host"}):
@@ -1119,7 +1122,8 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertEqual(len(history), 1)
         self.assertEqual(history[0]["planId"], plan["id"])
         self.assertEqual(history[0]["steps"][0]["objectType"], "table")
-        self.assertEqual(stat.S_IMODE((Path(self.temporary_directory.name) / "migration_history.json").stat().st_mode), 0o600)
+        if os.name != "nt":
+            self.assertEqual(stat.S_IMODE((Path(self.temporary_directory.name) / "migration_history.json").stat().st_mode), 0o600)
 
 
 if __name__ == "__main__":

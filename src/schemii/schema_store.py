@@ -11,11 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .atomic_json import write_json
-
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - Windows uses the process lock only.
-    fcntl = None
+from .file_lock import exclusive_file_lock
 
 
 SCHEMA_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -110,19 +106,13 @@ class SchemaStore:
             depth = depths.get(schema_id, 0)
             depths[schema_id] = depth + 1
             self._lock_state.depths = depths
-            handle = None
             try:
-                if depth == 0 and fcntl is not None:
-                    path = self.lock_dir / f"{schema_id}.lock"
-                    path.touch(mode=0o600, exist_ok=True)
-                    os.chmod(path, 0o600)
-                    handle = path.open("a+b")
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-                yield
+                if depth:
+                    yield
+                else:
+                    with exclusive_file_lock(self.lock_dir / f"{schema_id}.lock"):
+                        yield
             finally:
-                if handle is not None:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-                    handle.close()
                 if depth:
                     depths[schema_id] = depth
                 else:

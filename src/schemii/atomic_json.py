@@ -6,6 +6,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from .file_lock import set_file_mode
+
 
 def _sync_directory(directory: Path) -> None:
     if os.name == "nt":  # pragma: no cover - directory handles are not fsync-compatible on Windows.
@@ -39,7 +41,7 @@ def write_json(
         descriptor, name = tempfile.mkstemp(prefix=f".{path.stem}.", suffix=".tmp", dir=path.parent)
         temporary = Path(name)
         if mode is not None:
-            os.fchmod(descriptor, mode)
+            set_file_mode(descriptor, temporary, mode)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             descriptor = None
             json.dump(payload, handle, indent=indent, sort_keys=sort_keys)

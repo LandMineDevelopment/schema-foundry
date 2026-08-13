@@ -1,4 +1,5 @@
 import json
+import os
 import stat
 import sys
 import tempfile
@@ -172,8 +173,9 @@ class DashboardStoreTests(unittest.TestCase):
         self.assertEqual(created["dashboard"]["widgets"], [])
         self.assertEqual(len(duplicate["dashboard"]["widgets"]), 6)
         self.assertNotEqual(duplicate["id"], "dashboard_mercury")
-        self.assertEqual(stat.S_IMODE(self.root.stat().st_mode), 0o700)
-        self.assertEqual(stat.S_IMODE((self.root / f"{created['id']}.json").stat().st_mode), 0o600)
+        if os.name != "nt":
+            self.assertEqual(stat.S_IMODE(self.root.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE((self.root / f"{created['id']}.json").stat().st_mode), 0o600)
 
     def test_ai_mutations_are_idempotent_and_preserve_unrelated_state(self):
         self.store.initialize_once()

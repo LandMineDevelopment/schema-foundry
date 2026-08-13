@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .atomic_json import write_json
+from .file_lock import exclusive_file_lock
 from .postgres_common import (
     ConflictError,
     NotFoundError,
@@ -45,12 +46,6 @@ from .widget_query import (
     normalize_query,
     normalize_temporal_series,
 )
-
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - direct Windows use has one process per profile store.
-    fcntl = None
-
 
 def _profile_context_fingerprint(profile_id: str, profile: dict[str, Any]) -> str:
     encoded = json.dumps(
@@ -337,14 +332,8 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
     @contextmanager
     def _ai_plan_store_lock(self):
         with self._lock:
-            with self.ai_plan_lock_path.open("a+b") as handle:
-                if fcntl is not None:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-                try:
-                    yield
-                finally:
-                    if fcntl is not None:
-                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            with exclusive_file_lock(self.ai_plan_lock_path):
+                yield
 
     def _ai_plan_path(self, plan_id: str) -> Path:
         if not isinstance(plan_id, str) or not PROFILE_ID_RE.fullmatch(plan_id) or not plan_id.startswith("ai_plan_"):
@@ -386,16 +375,8 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
 
     @contextmanager
     def _profile_store_lock(self):
-        descriptor = os.open(self.profile_lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-        try:
-            os.fchmod(descriptor, 0o600)
-            if fcntl is not None:
-                fcntl.flock(descriptor, fcntl.LOCK_EX)
+        with exclusive_file_lock(self.profile_lock_path):
             yield
-        finally:
-            if fcntl is not None:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
-            os.close(descriptor)
 
     def _write_profiles(self, profiles: dict[str, dict[str, Any]]) -> None:
         self._ensure_config_dir()

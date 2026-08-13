@@ -20,6 +20,8 @@ from schemii.server import _paths
 
 class StandaloneRuntimeTests(unittest.TestCase):
     def run_shell_launcher(self, mode="ui", docker_script=None, system_tools=False):
+        if os.name == "nt":
+            self.skipTest("POSIX shell launcher is tested on POSIX runners")
         with tempfile.TemporaryDirectory() as directory:
             if docker_script is not None:
                 docker = Path(directory) / "docker"
@@ -111,6 +113,7 @@ esac
         self.assertIn('! -f "$repo_dir/compose.yaml"', shell)
         self.assertIn("not a recognized Schemii repository", powershell)
 
+    @unittest.skipIf(os.name == "nt", "POSIX shell uninstaller is tested on POSIX runners")
     def test_shell_uninstaller_removes_only_discovered_resources_and_its_repo(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

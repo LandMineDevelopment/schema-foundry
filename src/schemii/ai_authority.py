@@ -14,11 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from .atomic_json import remove_file, write_json
-
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - production images are POSIX.
-    fcntl = None
+from .file_lock import exclusive_file_lock
 
 
 class AiAuthorityError(Exception):
@@ -55,8 +51,6 @@ class AiAuthority:
         max_payload_bytes: int = 1024 * 1024,
         clock: Callable[[], float] = time.time,
     ):
-        if fcntl is None:
-            raise RuntimeError("AI authority requires inter-process file locking")
         self.application = _identity(application, "application")
         self.max_entries = _positive_int(max_entries, "max_entries")
         self.proposal_ttl = _positive_number(proposal_ttl, "proposal_ttl")
@@ -386,12 +380,8 @@ class AiAuthority:
     @contextmanager
     def _store_lock(self) -> Iterator[None]:
         with self._lock:
-            with self.lock_path.open("a+b") as handle:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-                try:
-                    yield
-                finally:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            with exclusive_file_lock(self.lock_path):
+                yield
 
     def _now_ms(self) -> int:
         now = self._clock()
