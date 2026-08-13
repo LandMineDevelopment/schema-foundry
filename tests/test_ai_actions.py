@@ -84,6 +84,13 @@ class AiActionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             normalize_schemer_action({**action, "expectedRevision": True}, "dashboard")
 
+    def test_schemer_widget_mutations_are_exact(self):
+        rename = normalize_schemer_action({"type": "widget_rename", "dashboardId": "dashboard_one", "expectedRevision": 3, "widgetId": "widget_one", "currentTitle": "Old", "title": "New", "requiresConfirmation": True}, "dashboard")
+        self.assertEqual(rename["title"], "New")
+        with self.assertRaises(ValueError): normalize_schemer_action({**rename, "extra": True}, "dashboard")
+        created = normalize_schemer_action({"type": "dashboard_create", "title": "New dashboard", "requiresConfirmation": True}, "metadata")
+        self.assertEqual(created["type"], "dashboard_create")
+
 
 if __name__ == "__main__":
     unittest.main()

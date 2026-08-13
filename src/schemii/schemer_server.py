@@ -4,6 +4,8 @@ import json
 import os
 import re
 import secrets
+import hashlib
+import math
 from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -33,6 +35,58 @@ from .schemer_ai import (
     proposal_manifest_fallback,
     validated_query_result,
 )
+from .widget_query import QueryValidationError, normalize_query
+
+
+def _configured_ai_widget(service, action, operation_id, widget_count):
+    source = action["source"]
+    descriptor = service.inspect_relation(source["profileId"], source["database"], source["namespace"], source["relation"], source["kind"], source["fingerprint"])
+    columns = [{key: column[key] for key in ("name", "type", "nullable", "ordinal")} for column in descriptor["columns"]]
+    verified_source = {key: descriptor[key] for key in ("profileId", "database", "namespace", "relation", "kind", "fingerprint")} | {"columns": columns}
+    try:
+        query = normalize_query(action["query"], columns)
+    except QueryValidationError as error:
+        raise PostgresServiceError(400, "invalid_widget_query", str(error)) from error
+    dimensions, measures = query["dimensions"], query["measures"]
+    table = {"version": 1, "columns": [
+        {"targetId": item["id"], "width": 180 if kind == "dimension" else 120, "hidden": False, "pinned": kind == "dimension", "label": item["label"]}
+        for kind, values in (("dimension", dimensions), ("measure", measures)) for item in values
+    ], "pageSize": 25}
+    dimension_id = dimensions[0]["id"] if dimensions else None
+    measure_ids = [item["id"] for item in measures]
+    visualization = {"version": 1, "mode": action["visualizationMode"], "selections": {
+        "kpi": {"measureIds": measure_ids}, "bar": {"dimensionId": dimension_id, "measureIds": measure_ids},
+        "line": {"dimensionId": dimension_id, "measureIds": measure_ids}, "donut": {"dimensionId": dimension_id, "measureId": measure_ids[0]},
+    }}
+    detail = {"version": 1, "columns": [{"sourceColumn": item["name"], "label": item["name"], "width": 160, "hidden": False, "searchable": True, "numberFormat": {"style": "auto"}} for item in columns[:64]], "defaultSort": None, "rowIdentifier": None, "pageSize": 25}
+    widget_id = f"widget_{hashlib.sha256(operation_id.encode()).hexdigest()[:20]}"
+    if action["visualizationMode"] in {"bar", "line", "donut"} and not dimensions:
+        raise PostgresServiceError(400, "invalid_visualization", "Chart widgets require at least one dimension")
+    if action["visualizationMode"] == "kpi" and dimensions:
+        raise PostgresServiceError(400, "invalid_visualization", "KPI widgets cannot persist grouped dimensions")
+    selected_query = json.loads(json.dumps(query))
+    if action["visualizationMode"] == "kpi": selected_query["dimensions"] = []
+    elif action["visualizationMode"] in {"bar", "line", "donut"}:
+        selected_query["dimensions"] = [dimensions[0]]
+        selected_query["measures"] = [measures[0]] if action["visualizationMode"] == "donut" else measures
+    selected_ids = {item["id"] for item in selected_query["dimensions"]} | {item["id"] for item in selected_query["measures"]}
+    selected_query["sort"] = [item for item in selected_query["sort"] if item["targetId"] in selected_ids]
+    result = service.execute_widget_query(source["profileId"], verified_source, selected_query)
+    if action["visualizationMode"] in {"bar", "line", "donut"}:
+        values = [row[index] for row in result.get("rows", []) for index in range(1, len(row))]
+        try:
+            numeric = [float(value) for value in values if value is not None and not isinstance(value, bool)]
+        except (TypeError, ValueError, OverflowError):
+            raise PostgresServiceError(409, "invalid_visualization", "Query result is not numeric enough for the selected chart")
+        if len(numeric) != len([value for value in values if value is not None]) or any(not math.isfinite(value) for value in numeric):
+            raise PostgresServiceError(409, "invalid_visualization", "Query result is not finite numeric data")
+        if action["visualizationMode"] == "donut" and any(value is None for value in values):
+            raise PostgresServiceError(409, "invalid_visualization", "Donut chart results cannot contain null values")
+        if action["visualizationMode"] in {"bar", "donut"} and any(value < 0 for value in numeric) or action["visualizationMode"] == "donut" and not any(value > 0 for value in numeric):
+            raise PostgresServiceError(409, "invalid_visualization", "Query result cannot render the selected non-negative chart")
+        if action["visualizationMode"] == "line" and not numeric:
+            raise PostgresServiceError(409, "invalid_visualization", "Line chart results require at least one finite non-null point")
+    return {"id": widget_id, "kind": "aggregate_report", "title": action["title"], "layout": {"desktop": {"x": 0, "y": 0, "w": 4, "h": 3}, "mobile": {"order": widget_count, "h": 3}}, "configuration": {"source": verified_source, "query": query, "table": table, "visualization": visualization, **({"detail": detail} if columns else {})}}
 from .schemer_examples import mercury_dashboard_from_service
 from .server_runtime import begin_http_shutdown, parse_port, parse_proxy_setting, run_server, validate_static_directory
 
@@ -401,9 +455,16 @@ def make_handler(
 
         def _ai_proposal(self, current_ai_service, session_id: str, proposal_id: str, operation: str, body: dict):
             if operation == "reconcile":
-                return authority_call(self, lambda: {"operation": ai_authority.operation_for_proposal(
-                    proposal_id, application="schemer", session_id=session_id,
-                )})
+                def reconcile():
+                    current = ai_authority.operation_for_proposal(proposal_id, application="schemer", session_id=session_id)
+                    if current["state"] != "uncertain": return {"operation": current}
+                    action = ai_authority.operation_action(current["id"], application="schemer", session_id=session_id)
+                    if action.get("type") not in {"dashboard_create", "widget_create", "widget_rename", "widget_duplicate", "widget_delete"}: return {"operation": current}
+                    receipt = dashboard_store.operation_receipt(current["resource"], current["id"])
+                    if receipt is None:
+                        return {"operation": ai_authority.resolve_operation(current["id"], application="schemer", session_id=session_id, state="failed", error={"code": "operation_not_applied", "message": "No dashboard mutation receipt exists; request a fresh proposal"})}
+                    return {"operation": ai_authority.resolve_operation(current["id"], application="schemer", session_id=session_id, state="succeeded", result=receipt)}
+                return authority_call(self, reconcile)
             current_ai_service.verify_session(session_id)
             if operation == "execute":
                 return self._ai_execute_proposal(current_ai_service, session_id, proposal_id, body)
@@ -508,12 +569,29 @@ def make_handler(
                     if target["revision"] != action.get("expectedRevision") or target["dashboard"]["title"] != action.get("title"):
                         raise DashboardStoreError(409, "dashboard_changed", "Target dashboard changed; request a fresh proposal")
                     result = {"kind": "client_command", "command": {"type": "open_dashboard", "dashboardId": target["id"], "revision": target["revision"]}}
+                elif action_type == "dashboard_create":
+                    result = dashboard_store.create_ai(operation["id"], action["title"])
+                elif action_type in {"widget_create", "widget_rename", "widget_duplicate", "widget_delete"}:
+                    if action["dashboardId"] != dashboard_id or action["expectedRevision"] != binding["revision"]:
+                        raise DashboardStoreError(409, "dashboard_changed", "Dashboard binding no longer matches the proposal")
+                    prepared = None
+                    if action_type == "widget_create" and "source" in action:
+                        if access == "data" and any(action["source"].get(key) != binding["target"].get(key) for key in ("profileId", "database", "namespace")):
+                            raise PostgresServiceError(409, "action_target_changed", "Widget source no longer matches the confirmed data target")
+                        allowed_sources = _ai_catalog_sources(service, record, binding.get("target") if access == "data" else None)
+                        identity = tuple(action["source"].get(key) for key in ("profileId", "database", "namespace", "relation", "kind", "fingerprint"))
+                        if identity not in {tuple(item.get(key) for key in ("profileId", "database", "namespace", "relation", "kind", "fingerprint")) for item in allowed_sources}:
+                            raise PostgresServiceError(409, "action_target_changed", "Widget source is outside the bounded catalog context issued for this proposal")
+                        with dashboard_store.guard_revision(dashboard_id, binding["revision"]) as guarded:
+                            prepared = _configured_ai_widget(service, action, operation["id"], len(guarded["dashboard"]["widgets"]))
+                    result = dashboard_store.apply_ai_mutation(dashboard_id, operation["id"], binding["revision"], action, prepared)
                 else:
                     raise OpenCodeServiceError(409, "action_temporarily_unavailable", "This action is unavailable until its server execution adapter is installed")
             except (OpenCodeServiceError, DashboardStoreError, PostgresServiceError, AiAuthorityError) as error:
                 payload = error.payload if hasattr(error, "payload") else error.to_dict()
+                uncertain = isinstance(error, DashboardStoreError) and error.status >= 500
                 finished = ai_authority.finish_operation(
-                    operation["id"], application="schemer", session_id=session_id, state="failed", error=payload["error"],
+                    operation["id"], application="schemer", session_id=session_id, state="uncertain" if uncertain else "failed", error=payload["error"],
                 )
                 return self.send_json(getattr(error, "status", 400), {"operation": finished})
             except Exception:

@@ -5,6 +5,7 @@ import os
 import re
 import secrets
 import threading
+import hashlib
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,10 +15,16 @@ from .atomic_json import write_json
 from .relation_source import RelationSourceValidationError, normalize_relation_source
 from .widget_query import QueryValidationError, normalize_number_format, normalize_query
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None
+
 
 DASHBOARD_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 DASHBOARD_VERSION = 1
 MAX_WIDGETS = 100
+MAX_AI_RECEIPTS = 1024
 TABLE_PAGE_SIZES = {10, 25, 50, 100}
 VISUALIZATION_MODES = {"table", "kpi", "bar", "line", "donut"}
 
@@ -71,6 +78,31 @@ def _layout(value: Any, widget_id: str) -> dict[str, Any]:
             "h": _integer(mobile["h"], "mobile height", 1, 50),
         },
     }
+
+
+def _operation_id(prefix: str, operation_id: str) -> str:
+    return f"{prefix}_{hashlib.sha256(operation_id.encode()).hexdigest()[:20]}"
+
+
+def _append_receipt(record: dict[str, Any], operation_id: str, receipt: dict[str, Any]) -> None:
+    receipts = record.setdefault("aiOperationReceipts", {})
+    receipts[operation_id] = receipt
+    while len(receipts) > MAX_AI_RECEIPTS:
+        del receipts[next(iter(receipts))]
+
+
+def _ai_placement(width: int, height: int, widgets: list[dict[str, Any]]) -> dict[str, int]:
+    for y in range(1000):
+        for x in range(13 - width):
+            if all(x + width <= item["layout"]["desktop"]["x"] or item["layout"]["desktop"]["x"] + item["layout"]["desktop"]["w"] <= x or y + height <= item["layout"]["desktop"]["y"] or item["layout"]["desktop"]["y"] + item["layout"]["desktop"]["h"] <= y for item in widgets):
+                return {"x": x, "y": y}
+    raise DashboardStoreError(409, "dashboard_layout_full", "No non-overlapping widget space is available")
+
+
+def _ai_placeholder_widget(operation_id: str, title: str, widgets: list[dict[str, Any]]) -> dict[str, Any]:
+    placement = _ai_placement(4, 3, widgets)
+    mobile_order = max((item["layout"]["mobile"]["order"] for item in widgets), default=-1) + 1
+    return {"id": _operation_id("widget", operation_id), "kind": "placeholder", "title": title, "layout": {"desktop": {**placement, "w": 4, "h": 3}, "mobile": {"order": mobile_order, "h": 3}}, "configuration": {}}
 
 
 def _postgres_identifier(value: Any, field: str) -> str:
@@ -266,7 +298,7 @@ def _widget_configuration(value: Any, widget_id: str, widget_kind: str) -> dict[
 def validate_dashboard_record(record: Any, dashboard_id: str | None = None) -> dict[str, Any]:
     if not isinstance(record, dict):
         raise DashboardStoreError(400, "invalid_dashboard", "Dashboard record must be an object")
-    allowed_record = {"id", "version", "revision", "updatedAt", "dashboard"}
+    allowed_record = {"id", "version", "revision", "updatedAt", "dashboard", "aiOperationReceipts"}
     if set(record) - allowed_record:
         raise DashboardStoreError(400, "invalid_dashboard", "Dashboard record contains unknown fields")
     record_id = record.get("id")
@@ -334,6 +366,7 @@ def validate_dashboard_record(record: Any, dashboard_id: str | None = None) -> d
             "slicers": [],
             "viewport": normalized_viewport,
         },
+        **({"aiOperationReceipts": json.loads(json.dumps(record["aiOperationReceipts"]))} if isinstance(record.get("aiOperationReceipts"), dict) else {}),
     }
 
 
@@ -385,10 +418,13 @@ class DashboardStore:
         self.dashboard_dir = Path(dashboard_dir).expanduser()
         self.marker_path = self.dashboard_dir / ".examples_initialized"
         self._lock = threading.RLock()
+        self._lock_state = threading.local()
+        self.lock_dir = self.dashboard_dir / ".locks"
         self._ensure_directory()
 
     def _ensure_directory(self) -> None:
         self.dashboard_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.lock_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.dashboard_dir, 0o700)
         for path in self.dashboard_dir.glob("*.json"):
             os.chmod(path, 0o600)
@@ -401,6 +437,39 @@ class DashboardStore:
 
     def _path(self, dashboard_id: str) -> Path:
         return self.dashboard_dir / f"{dashboard_id}.json"
+
+    def operation_receipt(self, dashboard_id: str, operation_id: str) -> dict[str, Any] | None:
+        try:
+            receipt = self.get(dashboard_id).get("aiOperationReceipts", {}).get(operation_id)
+        except DashboardStoreError as error:
+            if error.status != 404: raise
+            receipt = None
+        if receipt: return receipt
+        for record in self.list():
+            receipt = record.get("aiOperationReceipts", {}).get(operation_id)
+            if receipt: return receipt
+        return None
+
+    @contextmanager
+    def _guard(self, dashboard_id: str):
+        with self._lock:
+            depths = getattr(self._lock_state, "depths", {})
+            depth = depths.get(dashboard_id, 0)
+            depths[dashboard_id] = depth + 1
+            self._lock_state.depths = depths
+            handle = None
+            try:
+                if depth == 0 and fcntl is not None:
+                    path = self.lock_dir / f"{dashboard_id}.lock"
+                    path.touch(mode=0o600, exist_ok=True)
+                    handle = path.open("a+b")
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                yield
+            finally:
+                if handle:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN); handle.close()
+                if depth: depths[dashboard_id] = depth
+                else: depths.pop(dashboard_id, None)
 
     def _read(self, path: Path) -> dict[str, Any]:
         try:
@@ -430,7 +499,7 @@ class DashboardStore:
 
     @contextmanager
     def guard_revision(self, dashboard_id: str, expected_revision: int):
-        with self._lock:
+        with self._guard(dashboard_id):
             record = self.get(dashboard_id)
             if record["revision"] != expected_revision:
                 raise DashboardStoreError(409, "dashboard_changed", "Dashboard changed before the operation could run")
@@ -446,7 +515,7 @@ class DashboardStore:
 
     def create(self, title: Any, source_id: Any = None) -> dict[str, Any]:
         title = _bounded_text(title, "title", 128)
-        with self._lock:
+        with self._guard("dashboard_create"):
             if source_id is None:
                 dashboard = {
                     "title": title,
@@ -470,10 +539,64 @@ class DashboardStore:
             record["updatedAt"] = _utc_now()
             return self._write(record)
 
+    def create_ai(self, operation_id: str, title: Any) -> dict[str, Any]:
+        title = _bounded_text(title, "title", 128)
+        dashboard_id = f"dashboard_{hashlib.sha256(f'dashboard:{operation_id}'.encode()).hexdigest()[:20]}"
+        with self._guard(dashboard_id):
+            path = self._path(dashboard_id)
+            if path.exists():
+                receipt = self.operation_receipt(dashboard_id, operation_id)
+                if receipt: return receipt
+                raise DashboardStoreError(409, "dashboard_conflict", "Generated dashboard identity is in use")
+            record = validate_dashboard_record({"id": dashboard_id, "version": 1, "revision": 0, "dashboard": {"title": title, "archived": False, "widgets": [], "slicers": [], "viewport": {"desktop": {"x": 0, "y": 0}, "mobile": {"x": 0, "y": 0}}}})
+            record.update(revision=1, updatedAt=_utc_now())
+            receipt = {"kind": "dashboard_saved", "dashboardId": dashboard_id, "revision": 1, "actionType": "dashboard_create"}
+            _append_receipt(record, operation_id, receipt)
+            self._write(validate_dashboard_record(record, dashboard_id))
+            return receipt
+
+    def apply_ai_mutation(self, dashboard_id: str, operation_id: str, expected_revision: int, action: dict[str, Any], prepared_widget: dict[str, Any] | None = None) -> dict[str, Any]:
+        dashboard_id = self.validate_id(dashboard_id)
+        with self._guard(dashboard_id):
+            current = self.get(dashboard_id)
+            receipt = current.get("aiOperationReceipts", {}).get(operation_id)
+            if receipt: return receipt
+            if current["revision"] != expected_revision:
+                raise DashboardStoreError(409, "dashboard_changed", "Dashboard changed before the operation could run")
+            stored = json.loads(json.dumps(current))
+            widgets = stored["dashboard"]["widgets"]
+            action_type = action["type"]
+            changed_id = None
+            if action_type == "widget_create":
+                if len(widgets) >= MAX_WIDGETS: raise DashboardStoreError(409, "dashboard_full", "Dashboard has the maximum number of widgets")
+                widget = json.loads(json.dumps(prepared_widget)) if prepared_widget else _ai_placeholder_widget(operation_id, action["title"], widgets)
+                if prepared_widget:
+                    widget["layout"]["desktop"].update(_ai_placement(widget["layout"]["desktop"]["w"], widget["layout"]["desktop"]["h"], widgets))
+                    widget["layout"]["mobile"]["order"] = max((item["layout"]["mobile"]["order"] for item in widgets), default=-1) + 1
+                widgets.append(widget); changed_id = widget["id"]
+            else:
+                matches = [item for item in widgets if item["id"] == action["widgetId"]]
+                if len(matches) != 1 or matches[0]["title"] != action["currentTitle"]:
+                    raise DashboardStoreError(409, "dashboard_changed", "Target widget changed")
+                widget = matches[0]
+                if action_type == "widget_rename": widget["title"] = action["title"]; changed_id = widget["id"]
+                elif action_type == "widget_duplicate":
+                    duplicate = json.loads(json.dumps(widget)); duplicate["id"] = _operation_id("widget", operation_id); duplicate["title"] = action["title"]
+                    duplicate["layout"]["desktop"].update(_ai_placement(duplicate["layout"]["desktop"]["w"], duplicate["layout"]["desktop"]["h"], widgets))
+                    duplicate["layout"]["mobile"]["order"] = max((item["layout"]["mobile"]["order"] for item in widgets), default=-1) + 1; widgets.append(duplicate); changed_id = duplicate["id"]
+                elif action_type == "widget_delete": widgets.remove(widget); changed_id = widget["id"]
+            if action_type == "widget_delete":
+                pass
+            stored["revision"] = expected_revision + 1; stored["updatedAt"] = _utc_now()
+            receipt = {"kind": "dashboard_saved", "dashboardId": dashboard_id, "revision": stored["revision"], "actionType": action_type, "widgetId": changed_id}
+            _append_receipt(stored, operation_id, receipt)
+            self._write(validate_dashboard_record(stored, dashboard_id))
+            return receipt
+
     def save(self, dashboard_id: str, incoming: Any) -> dict[str, Any]:
         dashboard_id = self.validate_id(dashboard_id)
         record = validate_dashboard_record(incoming, dashboard_id)
-        with self._lock:
+        with self._guard(dashboard_id):
             current = self.get(dashboard_id)
             if record["revision"] != current["revision"]:
                 raise DashboardStoreError(
@@ -484,11 +607,15 @@ class DashboardStore:
                 )
             record["revision"] = current["revision"] + 1
             record["updatedAt"] = _utc_now()
+            if current.get("aiOperationReceipts"):
+                record["aiOperationReceipts"] = json.loads(json.dumps(current["aiOperationReceipts"]))
+            else:
+                record.pop("aiOperationReceipts", None)
             return self._write(record)
 
     def restore_mercury(self, template: Any, expected_revision: Any) -> dict[str, Any]:
         template = validate_dashboard_record(template, "dashboard_mercury")
-        with self._lock:
+        with self._guard("dashboard_mercury"):
             path = self._path("dashboard_mercury")
             current = self._read(path) if path.is_file() else None
             if current is None:
@@ -540,12 +667,14 @@ class DashboardStore:
                 restored["dashboard"]["widgets"] = widgets
                 restored["dashboard"]["viewport"] = current["dashboard"]["viewport"]
                 restored["revision"] = current["revision"] + 1
+                if current.get("aiOperationReceipts"):
+                    restored["aiOperationReceipts"] = json.loads(json.dumps(current["aiOperationReceipts"]))
             restored["updatedAt"] = _utc_now()
             return self._write(validate_dashboard_record(restored, "dashboard_mercury"))
 
     def upgrade_mercury_example(self, template: Any) -> dict[str, Any] | None:
         template = validate_dashboard_record(template, "dashboard_mercury")
-        with self._lock:
+        with self._guard("dashboard_mercury"):
             path = self._path("dashboard_mercury")
             if not path.is_file():
                 return None
@@ -571,7 +700,7 @@ class DashboardStore:
 
     def delete(self, dashboard_id: str) -> dict[str, str]:
         dashboard_id = self.validate_id(dashboard_id)
-        with self._lock:
+        with self._guard(dashboard_id):
             try:
                 self._path(dashboard_id).unlink(missing_ok=True)
             except OSError as exc:
@@ -579,7 +708,7 @@ class DashboardStore:
         return {"deleted": dashboard_id}
 
     def initialize_once(self, template: Any = None) -> None:
-        with self._lock:
+        with self._guard("dashboard_initialize"):
             if self.marker_path.exists():
                 return
             if not self.list():

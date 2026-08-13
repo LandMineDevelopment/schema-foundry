@@ -40,6 +40,11 @@
       "schemer-query-safety": "allow"
     },
     "schemer_dashboard_open": "allow",
+    "schemer_dashboard_create": "allow",
+    "schemer_widget_create": "allow",
+    "schemer_widget_rename": "allow",
+    "schemer_widget_duplicate": "allow",
+    "schemer_widget_delete": "allow",
     "schemer_read_query": "allow"
   }
 }

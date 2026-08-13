@@ -151,6 +151,36 @@ def normalize_schemer_action(action: Any, access: str) -> dict[str, Any]:
             "expectedRevision": _revision(action.get("expectedRevision")), "title": _text(action.get("title"), 128),
             "requiresConfirmation": True,
         }
+    if action_type == "dashboard_create":
+        _exact(action, {"type", "title", "requiresConfirmation"}); _confirmation(action)
+        return {"type": action_type, "title": _text(action.get("title"), 128), "requiresConfirmation": True}
+    if action_type == "widget_create":
+        if access not in {"dashboard", "data"}: raise ValueError("widget mutation requires dashboard access")
+        base = {"type", "dashboardId", "expectedRevision", "title", "requiresConfirmation"}
+        complete = base | {"source", "query", "visualizationMode"}
+        action_fields = frozenset(action)
+        if action_fields not in {frozenset(base), frozenset(complete)}: raise ValueError("action fields are invalid")
+        _confirmation(action)
+        result = {"type": action_type, "dashboardId": _id(action.get("dashboardId")), "expectedRevision": _revision(action.get("expectedRevision")), "title": _text(action.get("title"), 128), "requiresConfirmation": True}
+        if action_fields == frozenset(complete):
+            source = action.get("source")
+            if not isinstance(source, dict) or set(source) != {"profileId", "database", "namespace", "relation", "kind", "fingerprint"}: raise ValueError("source is invalid")
+            if source.get("kind") not in {"table", "view", "materialized_view"} or not isinstance(source.get("fingerprint"), str) or not re.fullmatch(r"[0-9a-f]{64}", source["fingerprint"]): raise ValueError("source is invalid")
+            result["source"] = {"profileId": _id(source["profileId"]), "database": _name(source["database"]), "namespace": _name(source["namespace"]), "relation": _name(source["relation"]), "kind": source["kind"], "fingerprint": source["fingerprint"]}
+            if not isinstance(action.get("query"), dict): raise ValueError("query is invalid")
+            result["query"] = copy.deepcopy(action["query"])
+            if action.get("visualizationMode") not in {"table", "kpi", "bar", "line", "donut"}: raise ValueError("visualization mode is invalid")
+            result["visualizationMode"] = action["visualizationMode"]
+        return result
+    if action_type in {"widget_rename", "widget_duplicate", "widget_delete"}:
+        if access not in {"dashboard", "data"}: raise ValueError("widget mutation requires dashboard access")
+        fields = {"type", "dashboardId", "expectedRevision", "widgetId", "currentTitle", "requiresConfirmation"} | ({"destructive"} if action_type == "widget_delete" else {"title"})
+        _exact(action, fields); _confirmation(action)
+        if action_type == "widget_delete" and action.get("destructive") is not True: raise ValueError("destructive confirmation is invalid")
+        result = {"type": action_type, "dashboardId": _id(action.get("dashboardId")), "expectedRevision": _revision(action.get("expectedRevision")), "widgetId": _id(action.get("widgetId")), "currentTitle": _text(action.get("currentTitle"), 128), "requiresConfirmation": True}
+        if action_type == "widget_delete": result["destructive"] = True
+        else: result["title"] = _text(action.get("title"), 128)
+        return result
     raise ValueError("unsupported action")
 
 

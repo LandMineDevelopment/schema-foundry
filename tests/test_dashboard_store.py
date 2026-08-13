@@ -2,6 +2,7 @@ import json
 import stat
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -173,6 +174,64 @@ class DashboardStoreTests(unittest.TestCase):
         self.assertNotEqual(duplicate["id"], "dashboard_mercury")
         self.assertEqual(stat.S_IMODE(self.root.stat().st_mode), 0o700)
         self.assertEqual(stat.S_IMODE((self.root / f"{created['id']}.json").stat().st_mode), 0o600)
+
+    def test_ai_mutations_are_idempotent_and_preserve_unrelated_state(self):
+        self.store.initialize_once()
+        before = self.store.get("dashboard_mercury")
+        viewport = json.loads(json.dumps(before["dashboard"]["viewport"]))
+        unrelated = json.loads(json.dumps(before["dashboard"]["widgets"][1:]))
+        action = {"type": "widget_rename", "dashboardId": "dashboard_mercury", "expectedRevision": 1, "widgetId": before["dashboard"]["widgets"][0]["id"], "currentTitle": before["dashboard"]["widgets"][0]["title"], "title": "Renamed", "requiresConfirmation": True}
+        first = self.store.apply_ai_mutation("dashboard_mercury", "operation_one", 1, action)
+        duplicate = DashboardStore(self.root).apply_ai_mutation("dashboard_mercury", "operation_one", 1, action)
+        current = self.store.get("dashboard_mercury")
+        self.assertEqual(first, duplicate)
+        self.assertEqual(current["revision"], 2)
+        self.assertEqual(current["dashboard"]["viewport"], viewport)
+        self.assertEqual(current["dashboard"]["widgets"][1:], unrelated)
+
+    def test_ai_duplicate_uses_deterministic_id_and_nonoverlapping_layout(self):
+        self.store.initialize_once(); current = self.store.get("dashboard_mercury"); source = current["dashboard"]["widgets"][0]
+        action = {"type": "widget_duplicate", "dashboardId": current["id"], "expectedRevision": current["revision"], "widgetId": source["id"], "currentTitle": source["title"], "title": "Copy", "requiresConfirmation": True}
+        result = self.store.apply_ai_mutation(current["id"], "operation_duplicate", current["revision"], action)
+        saved = self.store.get(current["id"]); duplicate = next(item for item in saved["dashboard"]["widgets"] if item["id"] == result["widgetId"])
+        self.assertEqual(duplicate["configuration"], source["configuration"])
+        for widget in saved["dashboard"]["widgets"]:
+            if widget["id"] == duplicate["id"]: continue
+            left, right = duplicate["layout"]["desktop"], widget["layout"]["desktop"]
+            self.assertTrue(left["x"] + left["w"] <= right["x"] or right["x"] + right["w"] <= left["x"] or left["y"] + left["h"] <= right["y"] or right["y"] + right["h"] <= left["y"])
+
+    def test_ai_mutations_serialize_across_store_instances(self):
+        self.store.initialize_once(); current = self.store.get("dashboard_mercury"); widget = current["dashboard"]["widgets"][0]
+        action = {"type": "widget_rename", "dashboardId": current["id"], "expectedRevision": 1, "widgetId": widget["id"], "currentTitle": widget["title"], "title": "First", "requiresConfirmation": True}
+        outcomes = []
+        errors = []
+        def mutate(store, operation):
+            try: outcomes.append(store.apply_ai_mutation(current["id"], operation, 1, action))
+            except DashboardStoreError as error: errors.append(error.payload["error"]["code"])
+        threads = [threading.Thread(target=mutate, args=(store, operation)) for store, operation in ((self.store, "operation_one"), (DashboardStore(self.root), "operation_two"))]
+        for thread in threads: thread.start()
+        for thread in threads: thread.join()
+        self.assertEqual(len(outcomes), 1)
+        self.assertEqual(errors, ["dashboard_changed"])
+        self.assertEqual(self.store.get(current["id"])["revision"], 2)
+
+    def test_client_save_cannot_remove_or_forge_ai_receipts(self):
+        self.store.initialize_once(); current = self.store.get("dashboard_mercury"); widget = current["dashboard"]["widgets"][0]
+        action = {"type": "widget_rename", "dashboardId": current["id"], "expectedRevision": 1, "widgetId": widget["id"], "currentTitle": widget["title"], "title": "Renamed", "requiresConfirmation": True}
+        receipt = self.store.apply_ai_mutation(current["id"], "operation_receipt", 1, action)
+        saved = self.store.get(current["id"]); saved["aiOperationReceipts"] = {"forged": {"kind": "fake"}}
+        self.store.save(saved["id"], saved)
+        self.assertEqual(self.store.operation_receipt(current["id"], "operation_receipt"), receipt)
+        self.assertIsNone(self.store.operation_receipt(current["id"], "forged"))
+
+    def test_ai_placeholder_uses_next_sparse_mobile_order(self):
+        self.store.initialize_once(); current = self.store.get("dashboard_mercury")
+        current["dashboard"]["widgets"][0]["layout"]["mobile"]["order"] = 50
+        current = self.store.save(current["id"], current)
+        action = {"type": "widget_create", "dashboardId": current["id"], "expectedRevision": current["revision"], "title": "New", "requiresConfirmation": True}
+        result = self.store.apply_ai_mutation(current["id"], "operation_create", current["revision"], action)
+        widget = next(item for item in self.store.get(current["id"])["dashboard"]["widgets"] if item["id"] == result["widgetId"])
+        self.assertEqual(widget["layout"]["mobile"]["order"], 51)
 
     def test_stale_revision_is_rejected_without_changing_layout(self):
         self.store.initialize_once()

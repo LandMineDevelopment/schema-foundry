@@ -2789,6 +2789,7 @@ async function loadDashboards(preferredId = activeDashboard?.id) {
     openDashboard((preferred ?? fallback)?.id ?? null);
   } catch (error) {
     setSaveStatus(error.message, "error");
+    throw error;
   }
 }
 
@@ -3890,12 +3891,6 @@ async function applySchemerAiAction(proposal, capture) {
   const action = proposal.action;
   if (action.type === "read_query") return executeSchemerAiReadQuery(action, capture);
   if (!confirm(`${proposal.summary}\n\nContinue?`)) throw new Error("Proposal was not confirmed");
-  if (action.type === "dashboard_create") {
-    await flushPendingSave();
-    const created = await dashboardRequest("/api/dashboards", { method: "POST", body: JSON.stringify({ title: action.title }) });
-    await loadDashboards(created.id);
-    return;
-  }
   if (action.type === "dashboard_open") {
     await flushPendingSave();
     const current = await dashboardRequest(`/api/dashboards/${encodeURIComponent(action.dashboardId)}`);
@@ -3903,6 +3898,14 @@ async function applySchemerAiAction(proposal, capture) {
     const index = dashboards.findIndex(item => item.id === current.id);
     if (index >= 0) dashboards[index] = current;
     openDashboard(current.id);
+    return;
+  }
+  if (["dashboard_create", "widget_create", "widget_rename", "widget_duplicate", "widget_delete"].includes(action.type)) {
+    await flushPendingSave();
+    const response = await aiAssistant.executeProposal(proposal, capture);
+    const operation = response.operation;
+    if (operation?.state !== "succeeded" || operation.result?.kind !== "dashboard_saved") throw new Error(operation?.error?.message || "The dashboard operation did not succeed");
+    await loadDashboards(operation.result.dashboardId);
     return;
   }
   if (!activeDashboard || activeDashboard.id !== capture.dashboardId || activeDashboard.revision !== capture.revision || JSON.stringify(activeDashboard) !== capture.snapshot) throw new Error("Dashboard changed; request a fresh proposal");
@@ -4110,6 +4113,10 @@ const aiAssistant = window.SchemiiShared.createAiAssistant({
   }),
   validateAction: validateSchemerAiAction,
   handleOperationResult: async (result, capture) => {
+    if (result?.kind === "dashboard_saved") {
+      await loadDashboards(result.dashboardId);
+      return result.actionType === "dashboard_create" ? "Created" : "Saved";
+    }
     if (result?.kind === "client_command" && result.command?.type === "open_dashboard") {
       await flushPendingSave();
       await loadDashboards(result.command.dashboardId);
