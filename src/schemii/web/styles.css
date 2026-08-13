@@ -1202,6 +1202,7 @@ dialog textarea { font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consola
 .views-prototype-workspace .prototype-view-catalog input:hover { border-color: #6553a0; background: #121022; }
 .prototype-view-editor-dialog :is(input,select,textarea):focus,.prototype-view-commit-dialog :is(input,select,textarea):focus { border-color: var(--accent); box-shadow: var(--focus-ring); }
 .prototype-view-editor-dialog .button-ghost:hover,.prototype-view-commit-dialog .button-ghost:hover { color: var(--accent-bright); border-color: #6553a0; background: #1d1930; }
+.postgres-diagnostic { margin: 0 18px 12px; padding: 10px 12px; border: 1px solid #70404a; border-radius: 5px; color: #e2a6b1; background: #211319; font: 9px/1.55 ui-monospace,monospace; white-space: pre-wrap; }
 
 .standalone-sql-workspace :is(.standalone-sql-head,.standalone-sql-pane-heading):hover,.standalone-sql-workspace :is(.standalone-sql-head,.standalone-sql-pane-heading):focus-within { background: #111f2b; }
 .standalone-sql-workspace .standalone-sql-heading-toggle:hover strong,.standalone-sql-workspace .standalone-sql-heading-toggle:focus-visible strong { color: var(--accent-bright); }

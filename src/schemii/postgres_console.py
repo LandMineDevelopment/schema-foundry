@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID, uuid4
 
-from .postgres_common import NotFoundError, PostgresServiceError, ValidationError, quote_identifier
+from .postgres_common import NotFoundError, PostgresServiceError, ValidationError, postgres_error_diagnostic, quote_identifier
 
 
 MAX_STATEMENTS = 20
@@ -281,6 +281,11 @@ class ConsoleWriteGrantRegistry:
             self._entries.pop(grant_id, None)
         return {"revoked": True}
 
+    def discard(self, grant_id: str) -> None:
+        """Idempotently remove a grant during internal uncertainty cleanup."""
+        with self._lock:
+            self._entries.pop(grant_id, None)
+
     def close(self) -> None:
         with self._lock:
             self._entries.clear()
@@ -340,11 +345,13 @@ class PostgresConsole:
     def _error(exc: Exception, statement_index: int, cancelled: bool) -> PostgresServiceError:
         if cancelled:
             return PostgresServiceError(409, "execution_cancelled", "Console execution was cancelled", {"statementIndex": statement_index})
-        sqlstate = getattr(exc, "sqlstate", None)
-        primary = getattr(getattr(exc, "diag", None), "message_primary", None)
+        postgres = postgres_error_diagnostic(exc)
+        sqlstate = postgres.get("sqlstate")
         details = {"statementIndex": statement_index}
-        if isinstance(sqlstate, str) and re.fullmatch(r"[0-9A-Z]{5}", sqlstate):
+        if sqlstate:
             details["sqlstate"] = sqlstate
+        if postgres:
+            details["postgres"] = postgres
         if sqlstate == "57014":
             return PostgresServiceError(422, "sql_timeout", "Console statement timed out", details)
         if sqlstate == "25001":
@@ -355,10 +362,8 @@ class PostgresConsole:
                 details,
             )
         message = "Console SQL statement failed"
-        if isinstance(primary, str):
-            safe_primary = " ".join(primary.split())[:500]
-            if safe_primary:
-                message += f": {safe_primary}"
+        if postgres.get("message"):
+            message += f": {postgres['message']}"
         return PostgresServiceError(422, "sql_query_failed", message, details)
 
     def execute(self, profile_id: str, payload: Any, binding: str, server_id: str, policy: ConsolePolicy) -> dict[str, Any]:
@@ -473,7 +478,16 @@ class PostgresConsole:
                 if self._encoded_size(result) > MAX_RESPONSE_BYTES:
                     raise PostgresServiceError(422, "sql_result_too_large", "Console result metadata exceeds the byte limit", {"statementIndex": statement_index})
             if mode == "write":
-                connection.commit()
+                try:
+                    connection.commit()
+                except Exception as exc:
+                    self.write_grants.discard(write_grant_id)
+                    postgres = postgres_error_diagnostic(exc)
+                    raise PostgresServiceError(
+                        500, "execution_outcome_unknown",
+                        "Console write commit outcome is uncertain; verify PostgreSQL before running another write",
+                        {"statementIndex": statement_index, **({"postgres": postgres} if postgres else {})},
+                    ) from exc
                 result["committed"] = True
                 committed = True
                 self.write_grants.touch(write_grant_id)

@@ -10,7 +10,7 @@ from uuid import uuid4
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from schemii.postgres_common import PostgresServiceError, ValidationError
+from schemii.postgres_common import PostgresServiceError, ValidationError, postgres_error_diagnostic
 from schemii.postgres_console import ConsoleExecutionRegistry, ConsolePolicy, split_console_statements
 from schemii.postgres_service import PostgresService
 
@@ -83,6 +83,18 @@ class CancelledError(Exception):
 class UnsupportedTransactionError(Exception):
     sqlstate = "25001"
     diag = None
+
+
+class SqlDiagnostic:
+    message_primary = "column missing_column does not exist"
+    message_detail = "The referenced output column is unavailable."
+    message_hint = "Check the selected relation alias."
+    statement_position = "18"
+
+
+class SqlError(Exception):
+    sqlstate = "42703"
+    diag = SqlDiagnostic()
 
 
 class Connection:
@@ -305,7 +317,7 @@ class PostgresConsoleTests(unittest.TestCase):
         self.assertEqual(self.connection.commits, 2)
         service.close()
 
-    def test_failed_write_rolls_back_and_does_not_extend_idle(self):
+    def test_failed_write_commit_is_uncertain_and_revokes_grant(self):
         now = [1000.0]
         failure = RuntimeError("commit failed")
         connection = Connection(commit_error=failure)
@@ -319,7 +331,7 @@ class PostgresConsoleTests(unittest.TestCase):
                 "local", self.request("UPDATE example SET value = 1", consoleId=console_id, mode="write", writeGrantId=grant_id),
                 "binding", "server", ConsolePolicy(allow_write=True),
             )
-        self.assertEqual(error.exception.code, "sql_query_failed")
+        self.assertEqual(error.exception.code, "execution_outcome_unknown")
         self.assertEqual((connection.commits, connection.rollbacks), (1, 1))
         connection.commit_error = None
         now[0] = 1300
@@ -328,7 +340,22 @@ class PostgresConsoleTests(unittest.TestCase):
                 "local", self.request("UPDATE example SET value = 2", consoleId=console_id, mode="write", writeGrantId=grant_id),
                 "binding", "server", ConsolePolicy(allow_write=True),
             )
-        self.assertEqual(error.exception.code, "write_grant_expired")
+        self.assertEqual(error.exception.code, "write_grant_required")
+        service.close()
+
+    def test_concurrent_grant_revocation_cannot_mask_uncertain_commit(self):
+        connection = Connection(commit_error=RuntimeError("commit connection lost"))
+        service = PostgresService(self.directory.name, connect_factory=lambda **kwargs: connection)
+        console_id = str(uuid4())
+        grant_id = service.create_console_write_grant("local", self.grant_request(console_id), "binding", "server")["writeGrantId"]
+        service._console.write_grants.revoke(grant_id, "local", "binding", "server")
+        service._console.write_grants.require = lambda *args: None
+        with self.assertRaises(PostgresServiceError) as caught:
+            service.execute_console(
+                "local", self.request("UPDATE example SET value = 1", consoleId=console_id, mode="write", writeGrantId=grant_id),
+                "binding", "server", ConsolePolicy(allow_write=True),
+            )
+        self.assertEqual(caught.exception.code, "execution_outcome_unknown")
         service.close()
 
     def test_limits_rows_columns_and_aggregate_bytes(self):
@@ -410,7 +437,44 @@ class PostgresConsoleTests(unittest.TestCase):
     def test_maps_commands_unsupported_in_transaction(self):
         error = self.service._console._error(UnsupportedTransactionError(), 2, False)
         self.assertEqual(error.code, "unsupported_in_transaction")
-        self.assertEqual(error.details, {"statementIndex": 2, "sqlstate": "25001"})
+        self.assertEqual(error.details, {"statementIndex": 2, "sqlstate": "25001", "postgres": {"sqlstate": "25001"}})
+
+    def test_returns_bounded_postgres_diagnostics_for_failed_sql(self):
+        error = self.service._console._error(SqlError(), 1, False)
+        self.assertEqual(error.message, "Console SQL statement failed: column missing_column does not exist")
+        self.assertEqual(error.details, {
+            "statementIndex": 1,
+            "sqlstate": "42703",
+            "postgres": {
+                "sqlstate": "42703",
+                "message": "column missing_column does not exist",
+                "detail": "The referenced output column is unavailable.",
+                "hint": "Check the selected relation alias.",
+                "position": 18,
+            },
+        })
+
+    def test_postgres_diagnostic_is_normalized_bounded_and_strict(self):
+        diagnostic = type("Diagnostic", (), {
+            "message_primary": "  primary\n" + "x" * 1200,
+            "message_detail": " detail\tvalue ",
+            "message_hint": " hint\nvalue ",
+            "statement_position": "100001",
+            "internal_query": "must not escape",
+        })()
+        error = type("DatabaseError", (Exception,), {"sqlstate": "invalid", "diag": diagnostic})()
+        result = postgres_error_diagnostic(error)
+        self.assertEqual(set(result), {"message", "detail", "hint"})
+        self.assertEqual(len(result["message"]), 1000)
+        self.assertEqual(result["detail"], "detail value")
+        self.assertEqual(result["hint"], "hint value")
+        self.assertNotIn("x" * 1001, result["message"])
+
+        malformed = type("DatabaseError", (Exception,), {
+            "sqlstate": "42P01",
+            "diag": type("Diagnostic", (), {"statement_position": True})(),
+        })()
+        self.assertEqual(postgres_error_diagnostic(malformed), {"sqlstate": "42P01"})
 
 
 if __name__ == "__main__":

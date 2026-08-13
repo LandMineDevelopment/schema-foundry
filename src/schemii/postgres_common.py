@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any
 
 
@@ -41,6 +42,27 @@ class NotFoundError(PostgresServiceError):
 class ConflictError(PostgresServiceError):
     def __init__(self, code: str, message: str):
         super().__init__(409, code, message)
+
+
+def postgres_error_diagnostic(exc: Exception) -> dict[str, Any]:
+    """Return a bounded PostgreSQL diagnostic safe for an HTTP response."""
+    diagnostic = getattr(exc, "diag", None)
+    result: dict[str, Any] = {}
+    sqlstate = getattr(exc, "sqlstate", None)
+    if isinstance(sqlstate, str) and re.fullmatch(r"[0-9A-Z]{5}", sqlstate):
+        result["sqlstate"] = sqlstate
+    for source, target in (("message_primary", "message"), ("message_detail", "detail"), ("message_hint", "hint")):
+        value = getattr(diagnostic, source, None)
+        if isinstance(value, str):
+            value = " ".join(value[:4000].split())[:1000]
+            if value:
+                result[target] = value
+    position = getattr(diagnostic, "statement_position", None)
+    if isinstance(position, str) and position.isdigit():
+        position = int(position)
+    if isinstance(position, int) and not isinstance(position, bool) and 1 <= position <= 100_000:
+        result["position"] = position
+    return result
 
 
 def quote_identifier(value: str) -> str:

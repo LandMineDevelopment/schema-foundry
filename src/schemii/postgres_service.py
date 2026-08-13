@@ -30,6 +30,7 @@ from .postgres_common import (
     PostgresServiceError,
     ValidationError,
     canonical_fingerprint,
+    postgres_error_diagnostic,
     quote_identifier,
 )
 from .postgres_catalog import PostgresCatalogMixin
@@ -2955,6 +2956,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         connection = None
         descriptor = None
         committed_at = None
+        commit_outcome_uncertain = False
         failed_step = None
         try:
             connection = self._connect_profile(profile)
@@ -3023,10 +3025,22 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                     descriptor = self._inspect_relation_connection(
                         connection, profile_id, plan["database"], plan["namespace"], plan["relation"], plan["desiredKind"], None,
                     )
-                connection.commit()
+                try:
+                    connection.commit()
+                except Exception as exc:
+                    commit_outcome_uncertain = True
+                    postgres = postgres_error_diagnostic(exc)
+                    raise PostgresServiceError(
+                        500, "execution_outcome_unknown",
+                        "View mutation commit outcome is uncertain; refresh PostgreSQL and the saved schema before continuing",
+                        {"postgres": postgres} if postgres else None,
+                    ) from exc
                 committed_at = _utc_now()
             except PostgresServiceError:
-                connection.rollback()
+                try:
+                    connection.rollback()
+                except Exception:
+                    pass
                 raise
             except Exception:
                 connection.rollback()
@@ -3039,10 +3053,19 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             raise
         except Exception as exc:
             message = "View mutation failed and was rolled back"
+            postgres = postgres_error_diagnostic(exc)
+            # Planned view SQL may be rewritten after preview, so a server position
+            # cannot be mapped reliably back to the user's definition text.
+            postgres.pop("position", None)
             if failed_step is not None:
                 index, step = failed_step
                 message = f"View mutation step {index + 1} failed: {step['action']} {step['objectType']} {step['name']}. All changes were rolled back"
-            raise PostgresServiceError(422, "apply_failed", message) from exc
+            if postgres.get("message"):
+                message += f": {postgres['message']}"
+            details = {"postgres": postgres} if postgres else None
+            if failed_step is not None:
+                details = {**(details or {}), "stepIndex": failed_step[0]}
+            raise PostgresServiceError(422, "apply_failed", message, details) from exc
         finally:
             if connection is not None:
                 self._close(connection)
@@ -3050,7 +3073,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                 with self._lock:
                     stored_plan = self._plans.get(plan_id)
                     if stored_plan and stored_plan.get("state") == "applying":
-                        stored_plan["state"] = "ready"
+                        stored_plan["state"] = "uncertain" if commit_outcome_uncertain else "ready"
         with self._lock:
             self._plans.pop(plan_id, None)
         try:

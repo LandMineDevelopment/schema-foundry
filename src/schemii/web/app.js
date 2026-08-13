@@ -62,6 +62,7 @@ const elements = {
   prototypeViewCommitDialog: document.querySelector("#prototype-view-commit-dialog"),
   prototypeViewEditorForm: document.querySelector("#prototype-view-editor-form"),
   prototypeViewEditorTitle: document.querySelector("#prototype-view-editor-title"),
+  prototypeViewError: document.querySelector("#prototype-view-error"),
   prototypeViewNamespace: document.querySelector("#prototype-view-namespace"),
   prototypeViewName: document.querySelector("#prototype-view-name"),
   prototypeViewSql: document.querySelector("#prototype-view-sql"),
@@ -1071,8 +1072,26 @@ function openPrototypeViewEditor(viewId = null, duplicate = false) {
   elements.prototypeViewName.readOnly = Boolean(existing && !duplicate);
   elements.prototypeViewEditorForm.elements["prototype-view-kind"].value = draft.kind === "materialized_view" ? "materialized_view" : "view";
   elements.prototypeViewSql.value = prototypeViewDefinition(draft);
+  elements.prototypeViewError.hidden = true;
+  elements.prototypeViewError.textContent = "";
   elements.prototypeViewEditorDialog.showModal();
   elements.prototypeViewSql.focus();
+}
+
+function postgresDiagnosticText(error) {
+  const postgres = error.payload?.error?.details?.postgres;
+  if (!postgres || typeof postgres !== "object") return error.message || "PostgreSQL rejected the SQL";
+  const lines = [postgres.message || error.message];
+  if (postgres.detail) lines.push(`Detail: ${postgres.detail}`);
+  if (postgres.hint) lines.push(`Hint: ${postgres.hint}`);
+  const location = [postgres.sqlstate ? `SQLSTATE ${postgres.sqlstate}` : "", Number.isInteger(postgres.position) ? `position ${postgres.position}` : ""].filter(Boolean).join(" · ");
+  if (location) lines.push(location);
+  return lines.filter(Boolean).join("\n");
+}
+
+function showPrototypeViewError(error) {
+  elements.prototypeViewError.textContent = postgresDiagnosticText(error);
+  elements.prototypeViewError.hidden = false;
 }
 
 function deleteSelectedPrototypeView() {
@@ -1143,6 +1162,7 @@ async function previewViewOperation(operation, definition = null, allowDestructi
       if (!confirm("This change requires a destructive recreation preview. Preview destructive steps?")) return;
       return previewViewOperation(operation, definition, true);
     }
+    showPrototypeViewError(error);
     const refresh = ["relation_changed", "profile_changed", "database_changed", "schema_conflict", "layout_conflict", "schema_target_changed", "schema_view_changed"].includes(error.code);
     showToast(`${error.message}${refresh ? ". Refresh the saved schema before continuing" : ""}`);
   }
@@ -1723,16 +1743,20 @@ async function runStandaloneSql(runAll = false) {
     if (result.committed) void checkPostgresDrift();
   } catch (error) {
     if (standaloneSqlState.executionId !== executionId) return;
-    const grantInvalid = ["write_grant_required", "write_grant_expired", "write_grant_target_changed"].includes(error.code);
+    const grantInvalid = ["write_grant_required", "write_grant_expired", "write_grant_target_changed", "execution_outcome_unknown"].includes(error.code);
     if (grantInvalid) {
       clearStandaloneSqlWriteGrant(viewState);
       if (viewState.id === standaloneSqlState.activeViewId) setStandaloneSqlWriteMode();
     }
     const details = error.payload?.error?.details;
     const suffix = [details?.sqlstate, Number.isInteger(details?.statementIndex) ? `statement ${details.statementIndex + 1}` : ""].filter(Boolean).join(" · ");
-    const errorMeta = `${suffix ? `${suffix} · ` : ""}Rolled back`;
-    const grantDetail = grantInvalid ? "Write authorization is no longer current. Re-enable writes for this query before running it again." : "The transaction was rolled back.";
-    replaceStandaloneSqlUnpinnedTabs([{ id: crypto.randomUUID(), label: error.code === "execution_cancelled" ? "Cancelled" : "Error", meta: errorMeta, kind: "error", pinned: false, message: error.message, detail: suffix ? `${suffix}\n${grantDetail}` : grantDetail }], viewState);
+    const uncertain = error.code === "execution_outcome_unknown";
+    const errorMeta = `${suffix ? `${suffix} · ` : ""}${uncertain ? "Outcome unknown" : "Rolled back"}`;
+    const grantDetail = uncertain
+      ? "Do not retry this write until you verify PostgreSQL. Write authorization was cleared."
+      : grantInvalid ? "Write authorization is no longer current. Re-enable writes for this query before running it again." : "The transaction was rolled back.";
+    const diagnostic = postgresDiagnosticText(error);
+    replaceStandaloneSqlUnpinnedTabs([{ id: crypto.randomUUID(), label: error.code === "execution_cancelled" ? "Cancelled" : "Error", meta: errorMeta, kind: "error", pinned: false, message: diagnostic, detail: suffix ? `${suffix}\n${grantDetail}` : grantDetail }], viewState);
     standaloneSqlState.history.unshift({ kind: error.code === "execution_cancelled" ? "Cancelled" : "Error", label: error.message, meta: errorMeta, sql });
     standaloneSqlState.history = standaloneSqlState.history.slice(0, 3);
     renderStandaloneSqlHistory();
@@ -7127,6 +7151,8 @@ elements.prototypeViewEditorForm.addEventListener("submit", event => {
   event.preventDefault();
   const definition = elements.prototypeViewSql.value.trim();
   if (!definition) return showToast("Enter a complete view definition");
+  elements.prototypeViewError.hidden = true;
+  elements.prototypeViewError.textContent = "";
   previewViewDefinition(definition);
 });
 document.querySelector("#close-prototype-view-commit").addEventListener("click", () => elements.prototypeViewCommitDialog.close());
@@ -7141,12 +7167,14 @@ elements.prototypeViewCommitForm.addEventListener("submit", async event => {
   const confirmDestructive = Boolean(pending.plan.destructive && elements.prototypeViewCommitReview.querySelector("[data-confirm-destructive-view]")?.checked);
   if (pending.plan.destructive && !confirmDestructive) return;
   elements.confirmPrototypeViewCommit.disabled = true;
+  let databaseApplied = false;
   try {
     const binding = activeViewsBinding();
     const result = await postgresRequest(`/api/postgres/profiles/${encodeURIComponent(binding.profileId)}/view-plans/${encodeURIComponent(pending.plan.id)}/apply`, { method: "POST", body: JSON.stringify({ confirmDestructive }) });
+    if (!result?.applied || !result.schemaSync || !["upsert", "delete"].includes(result.operation) || (result.operation === "upsert" ? !result.descriptor : !result.deleted)) throw new Error("PostgreSQL returned an invalid view apply result");
+    databaseApplied = true;
     elements.prototypeViewCommitDialog.close();
     viewsPrototypeState.pendingPlan = null;
-    if (!result?.applied || !result.schemaSync || !["upsert", "delete"].includes(result.operation) || (result.operation === "upsert" ? !result.descriptor : !result.deleted)) throw new Error("PostgreSQL returned an invalid view apply result");
     if (result.schemaSync.status === "conflict") {
       showToast("PostgreSQL committed, but the saved schema changed. Refreshing the schema; the plan will not be retried");
       await reloadActiveSchemaRecord();
@@ -7179,6 +7207,11 @@ elements.prototypeViewCommitForm.addEventListener("submit", async event => {
       showToast("View changes applied and saved schema synchronized");
     }
   } catch (error) {
+    if (!databaseApplied && error.code === "apply_failed") {
+      elements.prototypeViewCommitDialog.close();
+      elements.prototypeViewEditorDialog.showModal();
+      showPrototypeViewError(error);
+    }
     const refresh = ["relation_changed", "profile_changed", "database_changed", "schema_conflict", "layout_conflict"].includes(error.code);
     showToast(`${error.message}${refresh ? ". Refresh the saved schema before continuing" : ""}`);
   } finally {

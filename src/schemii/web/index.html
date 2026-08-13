@@ -724,6 +724,7 @@ ALTER TABLE "public"."books"
           <label><span>Name</span><input id="prototype-view-name" value="new_view" autocomplete="off"/></label>
         </div>
         <div class="prototype-view-sql-wrap"><header><span><span class="eyebrow">Raw PostgreSQL</span><strong>CREATE statement</strong></span><span>Template updates with kind and identity</span></header><textarea id="prototype-view-sql" spellcheck="false" aria-label="Raw CREATE view statement"></textarea></div>
+        <div class="postgres-diagnostic" id="prototype-view-error" role="alert" hidden></div>
         <footer><span>Preview validates the active saved schema and live PostgreSQL relation.</span><div class="dialog-actions"><button class="button button-ghost" id="cancel-prototype-view-editor" type="button">Cancel</button><button class="button button-primary" type="submit">Preview changes</button></div></footer>
       </form>
     </dialog>

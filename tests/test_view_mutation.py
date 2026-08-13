@@ -256,6 +256,60 @@ class ViewMutationServiceTests(unittest.TestCase):
         self.assertEqual(connection.commits, 0)
         self.assertEqual(connection.rollbacks, 1)
 
+    def test_apply_returns_postgres_diagnostic_and_failed_step(self):
+        from schemii.postgres_service import NotFoundError
+
+        class Diagnostic:
+            message_primary = "relation missing_source does not exist"
+            message_detail = "The view query references an unavailable relation."
+            message_hint = "Check the relation namespace."
+            statement_position = "48"
+
+        class DatabaseError(Exception):
+            sqlstate = "42P01"
+            diag = Diagnostic()
+
+        self.service._inspect_relation_connection = lambda *args: (_ for _ in ()).throw(NotFoundError("missing"))
+        plan = self.service.preview_view_mutation(
+            "local", "demo", "public", "summary", "upsert", {"absent": True},
+            {"kind": "view", "definition": 'CREATE VIEW "public"."summary" AS SELECT * FROM missing_source'},
+            False, self.binding(),
+        )
+        connection = Connection(fail_on="CREATE VIEW", failure=DatabaseError())
+        self.service._connect_factory = lambda **kwargs: connection
+        with self.assertRaises(PostgresServiceError) as caught:
+            self.service.apply_view_mutation("local", plan["id"], False)
+        self.assertEqual(caught.exception.code, "apply_failed")
+        self.assertIn("relation missing_source does not exist", caught.exception.message)
+        self.assertEqual(caught.exception.details, {
+            "stepIndex": 0,
+            "postgres": {
+                "sqlstate": "42P01",
+                "message": "relation missing_source does not exist",
+                "detail": "The view query references an unavailable relation.",
+                "hint": "Check the relation namespace.",
+            },
+        })
+        self.assertEqual(connection.rollbacks, 1)
+
+    def test_commit_failure_is_uncertain_and_plan_cannot_be_retried(self):
+        states = [descriptor(), descriptor(), descriptor(fingerprint="b" * 64)]
+        self.service._inspect_relation_connection = lambda *args: copy.deepcopy(states.pop(0))
+        plan = self.service.preview_view_mutation(
+            "local", "demo", "public", "summary", "upsert", {"kind": "view", "fingerprint": FINGERPRINT},
+            {"kind": "view", "definition": 'CREATE VIEW "public"."summary" AS SELECT 2'}, False, self.binding(),
+        )
+        connection = Connection()
+        connection.commit = lambda: (_ for _ in ()).throw(RuntimeError("connection lost during commit"))
+        self.service._connect_factory = lambda **kwargs: connection
+        with self.assertRaises(PostgresServiceError) as caught:
+            self.service.apply_view_mutation("local", plan["id"], False)
+        self.assertEqual(caught.exception.code, "execution_outcome_unknown")
+        self.assertEqual(self.service._plans[plan["id"]]["state"], "uncertain")
+        with self.assertRaises(ConflictError) as repeated:
+            self.service.apply_view_mutation("local", plan["id"], False)
+        self.assertEqual(repeated.exception.code, "plan_in_use")
+
     def test_successful_expected_absent_apply_reports_sync_intent_for_both_view_kinds(self):
         from schemii.postgres_service import NotFoundError
 
