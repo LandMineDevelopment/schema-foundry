@@ -1,4 +1,6 @@
+import copy
 import json
+import os
 import stat
 import sys
 import tempfile
@@ -116,13 +118,15 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertNotIn("password", self.profile)
         self.assertNotIn("password", self.service.list_profiles()[0])
         store = Path(self.temporary_directory.name) / "postgres_profiles.json"
-        self.assertEqual(stat.S_IMODE(Path(self.temporary_directory.name).stat().st_mode), 0o700)
-        self.assertEqual(stat.S_IMODE(store.stat().st_mode), 0o600)
+        if os.name != "nt":
+            self.assertEqual(stat.S_IMODE(Path(self.temporary_directory.name).stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(store.stat().st_mode), 0o600)
         self.service.save_profile("local", {**PROFILE, "name": "Updated", "password": ""})
         self.assertEqual(json.loads(store.read_text())["profiles"]["local"]["password"], "secret")
         store.chmod(0o644)
         PostgresService(self.temporary_directory.name)
-        self.assertEqual(stat.S_IMODE(store.stat().st_mode), 0o600)
+        if os.name != "nt":
+            self.assertEqual(stat.S_IMODE(store.stat().st_mode), 0o600)
 
     def test_profile_validation_identifier_quoting_and_plan_invalidation(self):
         for change in ({"port": 0}, {"timeout": True}, {"sslmode": "maybe"}, {"host": "bad host"}):
@@ -136,6 +140,121 @@ class PostgresServiceTests(unittest.TestCase):
         plan = self.service.preview("local", "public", empty_schema())
         self.service.save_profile("local", {**PROFILE, "dbname": "other"})
         self.assertNotIn(plan["id"], self.service._plans)
+
+    def test_preview_only_plan_is_not_apply_capable(self):
+        self.service.introspect = lambda profile_id, namespace: empty_schema()
+        plan = self.service.preview("local", "public", empty_schema(), persist=False)
+        self.assertIsNone(plan["id"])
+        self.assertTrue(plan["previewOnly"])
+        self.assertEqual(self.service._plans, {})
+
+    def test_ai_migration_plan_survives_restart_and_applies_once(self):
+        desired = empty_schema()
+        preview = {"id": None, "previewOnly": True, "database": "demo", "destructive": False, "steps": [], "warnings": [], "liveFingerprint": "before"}
+        self.service.preview = lambda *args, **kwargs: copy.deepcopy(preview)
+        plan = self.service.preview_ai_migration(
+            "operation_preview", "local", "demo", "public", desired, False,
+            {"revision": 1, "layoutToken": "0" * 64},
+        )
+        restarted = PostgresService(self.temporary_directory.name, connect_factory=self.service._connect_factory)
+        connection = Connection()
+        restarted._connect_factory = lambda **kwargs: connection
+        catalogs = iter([empty_schema("before"), empty_schema("after")])
+        restarted._introspect_connection = lambda *args: next(catalogs)
+
+        result = restarted.apply_ai_migration(
+            "operation_apply", plan["applyPlanId"], "local", "demo", "public", False, True,
+        )
+        duplicate = restarted.apply_ai_migration(
+            "operation_apply", plan["applyPlanId"], "local", "demo", "public", False, True,
+        )
+
+        self.assertEqual(result, duplicate)
+        self.assertEqual(result["resultFingerprint"], "after")
+        self.assertEqual(connection.commits, 1)
+
+    def test_ai_migration_requires_destructive_confirmation(self):
+        preview = {"id": None, "previewOnly": True, "database": "demo", "destructive": True, "steps": [], "warnings": [], "liveFingerprint": "before"}
+        self.service.preview = lambda *args, **kwargs: copy.deepcopy(preview)
+        plan = self.service.preview_ai_migration(
+            "operation_preview", "local", "demo", "public", empty_schema(), True,
+            {"revision": 1, "layoutToken": "0" * 64},
+        )
+        with self.assertRaises(ConflictError) as error:
+            self.service.apply_ai_migration(
+                "operation_apply", plan["applyPlanId"], "local", "demo", "public", True, False,
+            )
+        self.assertEqual(error.exception.code, "destructive_confirmation_required")
+
+    def test_ai_migration_rejects_stale_catalog_and_rolls_back(self):
+        preview = {"id": None, "previewOnly": True, "database": "demo", "destructive": False, "steps": [], "warnings": [], "liveFingerprint": "before"}
+        self.service.preview = lambda *args, **kwargs: copy.deepcopy(preview)
+        plan = self.service.preview_ai_migration(
+            "operation_preview", "local", "demo", "public", empty_schema(), False,
+            {"revision": 1, "layoutToken": "0" * 64},
+        )
+        connection = Connection()
+        self.service._connect_factory = lambda **kwargs: connection
+        self.service._introspect_connection = lambda *args: empty_schema("changed")
+        with self.assertRaises(ConflictError) as error:
+            self.service.apply_ai_migration(
+                "operation_apply", plan["applyPlanId"], "local", "demo", "public", False, True,
+            )
+        self.assertEqual(error.exception.code, "stale_plan")
+        self.assertEqual(connection.commits, 0)
+        self.assertEqual(connection.rollbacks, 1)
+
+    def test_ai_migration_failed_step_rolls_back_without_result_fingerprint(self):
+        step = {"action": "create_table", "objectType": "table", "name": "events", "sql": "CREATE TABLE events (id integer);", "destructive": False}
+        preview = {"id": None, "previewOnly": True, "database": "demo", "destructive": False, "steps": [step], "warnings": [], "liveFingerprint": "before"}
+        self.service.preview = lambda *args, **kwargs: copy.deepcopy(preview)
+        plan = self.service.preview_ai_migration(
+            "operation_preview", "local", "demo", "public", empty_schema(), False,
+            {"revision": 1, "layoutToken": "0" * 64},
+        )
+        connection = Connection(fail_on="CREATE TABLE")
+        self.service._connect_factory = lambda **kwargs: connection
+        self.service._introspect_connection = lambda *args: empty_schema("before")
+        with self.assertRaises(PostgresServiceError) as error:
+            self.service.apply_ai_migration(
+                "operation_apply", plan["applyPlanId"], "local", "demo", "public", False, True,
+            )
+        self.assertEqual(error.exception.code, "apply_failed")
+        self.assertEqual(connection.commits, 0)
+        self.assertEqual(connection.rollbacks, 1)
+        stored = self.service._read_ai_plan(plan["applyPlanId"])
+        self.assertIsNone(stored["resultFingerprint"])
+        self.assertEqual(stored["state"], "failed")
+
+    def test_ai_migration_rejects_connected_database_mismatch(self):
+        preview = {"id": None, "previewOnly": True, "database": "other", "destructive": False, "steps": [], "warnings": [], "liveFingerprint": "before"}
+        self.service.preview = lambda *args, **kwargs: copy.deepcopy(preview)
+        with self.assertRaises(ConflictError) as error:
+            self.service.preview_ai_migration(
+                "operation_preview", "local", "demo", "public", empty_schema(), False,
+                {"schemaId": "schema_one", "revision": 1, "layoutToken": "0" * 64},
+            )
+        self.assertEqual(error.exception.code, "database_changed")
+
+    def test_preview_reports_actual_connected_database(self):
+        self.service.introspect = lambda profile_id, namespace: empty_schema("live") | {"postgres": {**empty_schema("live")["postgres"], "database": "other"}}
+        plan = self.service.preview("local", "public", empty_schema(), persist=False)
+        self.assertEqual(plan["database"], "other")
+
+    def test_ai_migration_connection_failure_proves_no_commit(self):
+        preview = {"id": None, "previewOnly": True, "database": "demo", "destructive": False, "steps": [], "warnings": [], "liveFingerprint": "before"}
+        self.service.preview = lambda *args, **kwargs: copy.deepcopy(preview)
+        plan = self.service.preview_ai_migration(
+            "operation_preview", "local", "demo", "public", empty_schema(), False,
+            {"schemaId": "schema_one", "revision": 1, "layoutToken": "0" * 64},
+        )
+        self.service._connect_factory = lambda **kwargs: (_ for _ in ()).throw(RuntimeError("offline"))
+        with self.assertRaises(ConflictError) as error:
+            self.service.apply_ai_migration(
+                "operation_apply", plan["applyPlanId"], "local", "demo", "public", False, True,
+            )
+        self.assertEqual(error.exception.code, "apply_not_committed")
+        self.assertEqual(self.service._read_ai_plan(plan["applyPlanId"])["state"], "ready")
 
     def test_connection_uses_keyword_arguments_without_exposing_password(self):
         captured = {}
@@ -1003,7 +1122,8 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertEqual(len(history), 1)
         self.assertEqual(history[0]["planId"], plan["id"])
         self.assertEqual(history[0]["steps"][0]["objectType"], "table")
-        self.assertEqual(stat.S_IMODE((Path(self.temporary_directory.name) / "migration_history.json").stat().st_mode), 0o600)
+        if os.name != "nt":
+            self.assertEqual(stat.S_IMODE((Path(self.temporary_directory.name) / "migration_history.json").stat().st_mode), 0o600)
 
 
 if __name__ == "__main__":

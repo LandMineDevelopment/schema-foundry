@@ -65,7 +65,7 @@
     const {
       sessionClient, root, trigger, settingsDialog, historyDialog, storageKey, getContext,
       buildMessagePayload, createSessionTitle, contextKey = () => null, parseSession = session => ({ title: session.title || "Untitled chat", key: null }),
-      renderAction, validateAction, applyAction, toolLabels = {}, skillLabels = {}, labels = {},
+      buildProposalClaimPayload, buildHistoryQuery, renderAction, validateAction, handleOperationResult, toolLabels = {}, skillLabels = {}, labels = {},
       onOpenChange = () => {}, onAccessChange = () => {}, onNewChat = () => {}, state: suppliedState,
       canViewSession = () => true, extraBusyControls = [],
     } = options;
@@ -445,7 +445,49 @@
       card.append(marker, name, statusNode); elements.messages.append(card);
     }
 
-    function renderGenericAction(action, capture) {
+    async function proposalRequest(proposal, operation, body) {
+      if (!proposal?.proposalId || !proposal?.sessionId) throw new Error("The proposal authority is unavailable");
+      return request(`/api/ai/sessions/${encodeURIComponent(proposal.sessionId)}/proposals/${encodeURIComponent(proposal.proposalId)}/${operation}`, {
+        method: "POST", body: JSON.stringify(body),
+      });
+    }
+
+    async function executeProposal(proposal, capture) {
+      const context = buildProposalClaimPayload ? buildProposalClaimPayload(capture, elements.access.value) : {};
+      const body = { ...context, confirmation: { accepted: true, mode: "explicit" } };
+      try {
+        const response = await proposalRequest(proposal, "execute", body);
+        if (response.operation?.state === "running") return waitForOperation(proposal, response.operation);
+        if (response.operation?.state === "uncertain") {
+          const reconciled = await proposalRequest(proposal, "reconcile", context);
+          return reconciled.operation?.state === "running" ? waitForOperation(proposal, reconciled.operation) : reconciled;
+        }
+        return response;
+      } catch (error) {
+        try {
+          const response = await proposalRequest(proposal, "reconcile", context);
+          return response.operation?.state === "running" ? waitForOperation(proposal, response.operation) : response;
+        }
+        catch (reconcileError) {
+          if (reconcileError.code === "operation_not_started") throw error;
+          reconcileError.message = "Outcome unknown. Reconnect or reload to check this operation.";
+          throw reconcileError;
+        }
+      }
+    }
+
+    async function waitForOperation(proposal, operation) {
+      for (let attempt = 0; attempt < 360 && operation?.state === "running"; attempt += 1) {
+        await new Promise(resolve => setTimeout(resolve, document.hidden ? 2000 : 500));
+        const response = await request(`/api/ai/sessions/${encodeURIComponent(proposal.sessionId)}/operations/${encodeURIComponent(operation.id)}/status`, { method: "GET" });
+        operation = response.operation;
+      }
+      if (operation?.state === "running") throw new Error("Operation is still running. Reopen this conversation to check its status.");
+      return { operation };
+    }
+
+    function renderGenericAction(proposal, capture) {
+      const action = proposal.action;
       let normalized;
       try { normalized = validateAction?.(action, capture); } catch { return; }
       if (!normalized) return;
@@ -456,14 +498,22 @@
       if (normalized.review) { const review = document.createElement("pre"); review.textContent = normalized.review; card.append(review); }
       const button = document.createElement("button"); button.type = "button"; button.className = "button button-primary"; button.textContent = normalized.buttonLabel || (normalized.destructive ? "Review deletion" : "Review & confirm");
       button.addEventListener("click", async () => {
+        if (!confirm(`${normalized.summary}\n\nContinue?`)) return;
         card.querySelectorAll(".ai-action-error").forEach(error => error.remove()); button.disabled = true;
-        try { const appliedLabel = await applyAction(normalized, capture); button.textContent = appliedLabel || normalized.appliedLabel || "Applied"; card.classList.add("applied"); }
-        catch (error) { button.disabled = false; const detail = document.createElement("p"); detail.className = "ai-action-error"; detail.textContent = error.message; card.append(detail); }
+        try {
+          const response = await executeProposal(proposal, capture);
+          const operation = response.operation;
+          if (operation?.state !== "succeeded") throw new Error(operation?.error?.message || "The operation did not succeed");
+          const appliedLabel = await handleOperationResult?.(operation.result, capture);
+          button.textContent = appliedLabel || normalized.appliedLabel || "Applied"; card.classList.add("applied");
+        } catch (error) {
+          button.disabled = false; const detail = document.createElement("p"); detail.className = "ai-action-error"; detail.textContent = error.message; card.append(detail);
+        }
       });
       card.append(button); elements.messages.append(card);
     }
 
-    function renderResponse(response, capture) {
+    function renderResponse(response, capture, sessionId = state.sessionId) {
       let renderedText = false;
       for (const part of response.parts ?? []) {
         if (part?.type === "text" && part.text) { appendMessage("assistant", part.text); renderedText = true; }
@@ -471,9 +521,10 @@
         else if (part?.type === "tool" || part?.type === "skill") renderToolPart(part);
       }
       if (!renderedText && response.text) appendMessage("assistant", response.text);
-      for (const action of response.actions ?? []) {
-        if (renderAction) renderAction(action, capture, api);
-        else renderGenericAction(action, capture);
+      for (const item of response.proposals ?? []) {
+        const proposal = { ...item, sessionId };
+        if (renderAction) renderAction(proposal, capture, api);
+        else renderGenericAction(proposal, capture);
       }
       scrollToEnd();
     }
@@ -509,7 +560,7 @@
         const response = await request(`/api/ai/sessions/${encodeURIComponent(sessionId)}/messages`, { method: "POST", body: JSON.stringify(payload) });
         if (requestGeneration !== state.requestGeneration) return;
         await Promise.race([stream.done, new Promise(resolve => setTimeout(resolve, 750))]);
-        renderResponse(response, capture); activity.finish("completed");
+        renderResponse(response, capture, sessionId); activity.finish("completed");
       } catch (error) {
         if (requestGeneration === state.requestGeneration) {
           activity.finish("error"); appendMessage("assistant", `AI unavailable: ${error.message}`);
@@ -532,16 +583,18 @@
       const date = new Date(value); return Number.isNaN(date.getTime()) ? "Saved conversation" : date.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
     }
 
-    async function restoreSession(session, binding) {
+    async function restoreSession(session, binding, historyQuery, historyKey) {
       try {
         const currentKey = contextKey(getContext(elements.access.value), elements.access.value);
-        if (!canViewSession(binding, currentKey, elements.access.value)) throw new Error("Select the original data disclosure and PostgreSQL target before opening this conversation");
-        const history = await request(`/api/ai/sessions/${encodeURIComponent(session.id)}/messages`, { method: "GET" });
+        if (currentKey !== historyKey || !canViewSession(binding, currentKey, elements.access.value)) throw new Error("The application context changed; reopen history before continuing");
+        const history = await request(`/api/ai/sessions/${encodeURIComponent(session.id)}/messages?${historyQuery}`, { method: "GET" });
         state.requestGeneration += 1; elements.messages.replaceChildren();
         for (const message of history.messages ?? []) {
           if (message.role === "user") appendMessage("user", message.text);
-          if (message.role === "assistant") renderResponse({ parts: message.parts ?? [], text: message.text ?? "", actions: [] }, null);
+          if (message.role === "assistant") renderResponse({ parts: message.parts ?? [], text: message.text ?? "", actions: [], proposals: [] }, null, session.id);
         }
+        const restoredCapture = getContext(elements.access.value);
+        for (const proposal of history.pendingProposals ?? []) renderAction?.(proposal, restoredCapture, api);
         if (!elements.messages.children.length) appendMessage("assistant", "This saved conversation has no displayable messages.");
         const resumable = binding.key == null || binding.key === currentKey;
         state.sessionId = resumable ? session.id : null; state.contextKey = resumable ? currentKey : null;
@@ -556,7 +609,13 @@
       elements.historyList.replaceChildren();
       const loading = document.createElement("p"); loading.className = "ai-history-empty"; loading.textContent = "Loading conversations..."; elements.historyList.append(loading);
       try {
-        const history = await request("/api/ai/sessions", { method: "GET" }); elements.historyList.replaceChildren();
+        const accessLevel = elements.access.value;
+        const capture = getContext(accessLevel);
+        if (!capture) throw new Error("Select an application context before opening history");
+        const historyKey = contextKey(capture, accessLevel);
+        const historyQuery = new URLSearchParams(buildHistoryQuery ? buildHistoryQuery(capture, accessLevel) : {}).toString();
+        if (!historyQuery) throw new Error("AI history context is unavailable");
+        const history = await request(`/api/ai/sessions?${historyQuery}`, { method: "GET" }); elements.historyList.replaceChildren();
         if (!(history.sessions ?? []).length) { loading.textContent = "No saved conversations yet."; elements.historyList.append(loading); return; }
         for (const session of history.sessions) {
           const binding = parseSession(session);
@@ -564,7 +623,7 @@
           const copy = document.createElement("div"); copy.className = "ai-history-copy";
           const title = document.createElement("strong"); title.textContent = binding.title;
           const date = document.createElement("span"); date.textContent = `${formatHistoryDate(session.updatedAt ?? session.createdAt)}${session.id === state.sessionId ? " / Current" : ""}`;
-          const open = document.createElement("button"); open.type = "button"; open.className = "button button-ghost"; open.textContent = session.id === state.sessionId ? "Reopen" : "Open"; open.addEventListener("click", () => restoreSession(session, binding));
+          const open = document.createElement("button"); open.type = "button"; open.className = "button button-ghost"; open.textContent = session.id === state.sessionId ? "Reopen" : "Open"; open.addEventListener("click", () => restoreSession(session, binding, historyQuery, historyKey));
           const remove = document.createElement("button"); remove.type = "button"; remove.className = "button button-ghost ai-history-delete"; remove.textContent = "Delete";
           remove.addEventListener("click", async () => {
             if (!confirm(`Permanently delete chat “${binding.title}”?`)) return;
@@ -576,7 +635,11 @@
       } catch (error) { loading.textContent = `Could not load chat history: ${error.message}`; }
     }
 
-    const api = Object.freeze({ appendMessage, appendQueryResult, renderResponse, sendMessage, scrollToEnd, get accessLevel() { return elements.access.value; }, get state() { return state; } });
+    const api = Object.freeze({
+      appendMessage, appendQueryResult, renderResponse, sendMessage, scrollToEnd,
+      executeProposal,
+      get accessLevel() { return elements.access.value; }, get state() { return state; },
+    });
     trigger.addEventListener("click", () => setOpen(!root.classList.contains("open")));
     elements.close.addEventListener("click", () => setOpen(false));
     elements.newChat.addEventListener("click", () => resetConversation());

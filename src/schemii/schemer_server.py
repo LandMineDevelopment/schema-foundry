@@ -4,12 +4,16 @@ import json
 import os
 import re
 import secrets
+import hashlib
+import math
 from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
-from .ai_http import AiHttpRouter, ai_context_fingerprint, require_ai_session_binding
+from .ai_authority import AiAuthority, AiAuthorityError
+from .ai_actions import normalize_schemer_action
+from .ai_http import AiHttpRouter, ai_context_fingerprint, ai_session_prefix, authority_call, bounded_ai_query_result, issue_ai_proposals, list_bound_ai_sessions, require_ai_session_binding
 from .dashboard_store import DashboardStore, DashboardStoreError
 from .http_common import make_local_app_handler
 from .opencode_service import OpenCodeService, OpenCodeServiceError
@@ -31,6 +35,58 @@ from .schemer_ai import (
     proposal_manifest_fallback,
     validated_query_result,
 )
+from .widget_query import QueryValidationError, normalize_query
+
+
+def _configured_ai_widget(service, action, operation_id, widget_count):
+    source = action["source"]
+    descriptor = service.inspect_relation(source["profileId"], source["database"], source["namespace"], source["relation"], source["kind"], source["fingerprint"])
+    columns = [{key: column[key] for key in ("name", "type", "nullable", "ordinal")} for column in descriptor["columns"]]
+    verified_source = {key: descriptor[key] for key in ("profileId", "database", "namespace", "relation", "kind", "fingerprint")} | {"columns": columns}
+    try:
+        query = normalize_query(action["query"], columns)
+    except QueryValidationError as error:
+        raise PostgresServiceError(400, "invalid_widget_query", str(error)) from error
+    dimensions, measures = query["dimensions"], query["measures"]
+    table = {"version": 1, "columns": [
+        {"targetId": item["id"], "width": 180 if kind == "dimension" else 120, "hidden": False, "pinned": kind == "dimension", "label": item["label"]}
+        for kind, values in (("dimension", dimensions), ("measure", measures)) for item in values
+    ], "pageSize": 25}
+    dimension_id = dimensions[0]["id"] if dimensions else None
+    measure_ids = [item["id"] for item in measures]
+    visualization = {"version": 1, "mode": action["visualizationMode"], "selections": {
+        "kpi": {"measureIds": measure_ids}, "bar": {"dimensionId": dimension_id, "measureIds": measure_ids},
+        "line": {"dimensionId": dimension_id, "measureIds": measure_ids}, "donut": {"dimensionId": dimension_id, "measureId": measure_ids[0]},
+    }}
+    detail = {"version": 1, "columns": [{"sourceColumn": item["name"], "label": item["name"], "width": 160, "hidden": False, "searchable": True, "numberFormat": {"style": "auto"}} for item in columns[:64]], "defaultSort": None, "rowIdentifier": None, "pageSize": 25}
+    widget_id = f"widget_{hashlib.sha256(operation_id.encode()).hexdigest()[:20]}"
+    if action["visualizationMode"] in {"bar", "line", "donut"} and not dimensions:
+        raise PostgresServiceError(400, "invalid_visualization", "Chart widgets require at least one dimension")
+    if action["visualizationMode"] == "kpi" and dimensions:
+        raise PostgresServiceError(400, "invalid_visualization", "KPI widgets cannot persist grouped dimensions")
+    selected_query = json.loads(json.dumps(query))
+    if action["visualizationMode"] == "kpi": selected_query["dimensions"] = []
+    elif action["visualizationMode"] in {"bar", "line", "donut"}:
+        selected_query["dimensions"] = [dimensions[0]]
+        selected_query["measures"] = [measures[0]] if action["visualizationMode"] == "donut" else measures
+    selected_ids = {item["id"] for item in selected_query["dimensions"]} | {item["id"] for item in selected_query["measures"]}
+    selected_query["sort"] = [item for item in selected_query["sort"] if item["targetId"] in selected_ids]
+    result = service.execute_widget_query(source["profileId"], verified_source, selected_query)
+    if action["visualizationMode"] in {"bar", "line", "donut"}:
+        values = [row[index] for row in result.get("rows", []) for index in range(1, len(row))]
+        try:
+            numeric = [float(value) for value in values if value is not None and not isinstance(value, bool)]
+        except (TypeError, ValueError, OverflowError):
+            raise PostgresServiceError(409, "invalid_visualization", "Query result is not numeric enough for the selected chart")
+        if len(numeric) != len([value for value in values if value is not None]) or any(not math.isfinite(value) for value in numeric):
+            raise PostgresServiceError(409, "invalid_visualization", "Query result is not finite numeric data")
+        if action["visualizationMode"] == "donut" and any(value is None for value in values):
+            raise PostgresServiceError(409, "invalid_visualization", "Donut chart results cannot contain null values")
+        if action["visualizationMode"] in {"bar", "donut"} and any(value < 0 for value in numeric) or action["visualizationMode"] == "donut" and not any(value > 0 for value in numeric):
+            raise PostgresServiceError(409, "invalid_visualization", "Query result cannot render the selected non-negative chart")
+        if action["visualizationMode"] == "line" and not numeric:
+            raise PostgresServiceError(409, "invalid_visualization", "Line chart results require at least one finite non-null point")
+    return {"id": widget_id, "kind": "aggregate_report", "title": action["title"], "layout": {"desktop": {"x": 0, "y": 0, "w": 4, "h": 3}, "mobile": {"order": widget_count, "h": 3}}, "configuration": {"source": verified_source, "query": query, "table": table, "visualization": visualization, **({"detail": detail} if columns else {})}}
 from .schemer_examples import mercury_dashboard_from_service
 from .server_runtime import begin_http_shutdown, parse_port, parse_proxy_setting, run_server, validate_static_directory
 
@@ -93,13 +149,24 @@ def make_handler(
     session_token: str,
     *,
     server_id: str,
+    ai_authority: AiAuthority,
     ai_service: OpenCodeService | None = None,
     behind_loopback_proxy: bool = False,
 ):
     base_handler = make_local_app_handler(
         web_dir, service, session_token, server_id=server_id, behind_loopback_proxy=behind_loopback_proxy,
     )
-    ai_router = AiHttpRouter(ai_service, lambda handler, current_service, session_id, body: handler._ai_message(current_service, session_id, body))
+    ai_router = AiHttpRouter(
+        ai_service,
+        lambda handler, current_service, session_id, body: handler._ai_message(current_service, session_id, body),
+        lambda handler, current_service, session_id, proposal_id, operation, body: handler._ai_proposal(
+            current_service, session_id, proposal_id, operation, body,
+        ),
+        lambda handler, current_service, session_id: handler._ai_history(current_service, session_id),
+        lambda handler, current_service, session_id, operation_id: handler._ai_operation_status(
+            current_service, session_id, operation_id,
+        ),
+    )
 
     class SchemerHandler(PostgresHttpMixin, base_handler):
         postgres_capabilities = frozenset({
@@ -175,6 +242,8 @@ def make_handler(
                 self.send_json(status, callback())
             except DashboardStoreError as error:
                 self.send_json(error.status, error.payload)
+            except AiAuthorityError as error:
+                self.send_json(error.status, error.to_dict())
 
         def _ai_call(self, callback, status: int = 200):
             try:
@@ -183,6 +252,16 @@ def make_handler(
                 self.send_json(error.status, error.payload)
             except DashboardStoreError as error:
                 self.send_json(error.status, error.payload)
+
+        def _service_call(self, callback, status: int = 200):
+            try:
+                self.send_json(status, callback())
+            except PostgresServiceError as error:
+                self.send_json(error.status, error.to_dict())
+            except DashboardStoreError as error:
+                self.send_json(error.status, error.payload)
+            except AiAuthorityError as error:
+                self.send_json(error.status, error.to_dict())
 
         @staticmethod
         def _dashboard_id(path: str) -> str | None:
@@ -251,7 +330,7 @@ def make_handler(
             self.send_json(404, {"error": "Unknown API path"})
 
         def _ai_message(self, current_ai_service: OpenCodeService, session_id: str, body: dict):
-            allowed_fields = {"text", "model", "dashboardId", "accessLevel", "profileId", "database", "namespace", "queryResult"}
+            allowed_fields = {"text", "model", "dashboardId", "accessLevel", "profileId", "database", "namespace", "expectedRevision", "resultRef"}
             if not isinstance(body, dict) or set(body) - allowed_fields:
                 return self.send_json(400, {"error": {"code": "validation_error", "message": "Message fields are invalid"}})
             text = body.get("text")
@@ -267,10 +346,11 @@ def make_handler(
             data_fields = base_fields | {"profileId", "database", "namespace"}
             if access_level != "data" and set(body) != base_fields:
                 return self.send_json(400, {"error": {"code": "validation_error", "message": "Data fields require data access"}})
-            if access_level == "data" and set(body) not in (data_fields, data_fields | {"queryResult"}):
+            if access_level == "data" and set(body) not in (data_fields, data_fields | {"expectedRevision", "resultRef"}):
                 return self.send_json(400, {"error": {"code": "validation_error", "message": "Data mode requires an exact target"}})
             target = None
             query_result = None
+            reservation = None
             if access_level == "data":
                 profile_id = body.get("profileId")
                 if not isinstance(profile_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", profile_id):
@@ -278,12 +358,13 @@ def make_handler(
                 try:
                     database = PostgresService._validate_database(body.get("database"))
                     namespace = PostgresService._validate_namespace(body.get("namespace"))
-                    query_result = validated_query_result(body.get("queryResult"), {"profileId": profile_id, "database": database, "namespace": namespace})
                 except (ValueError, PostgresServiceError) as error:
                     return self.send_json(400, {"error": {"code": "validation_error", "message": str(error)}})
                 target = {"profileId": profile_id, "database": database, "namespace": namespace}
 
             def send_prompt():
+                query_result = None
+                reservation = None
                 record = dashboard_store.get(dashboard_id)
                 profiles = service.list_profiles()
                 if target is not None:
@@ -298,18 +379,231 @@ def make_handler(
                         selected.get("id"), selected.get("host"), selected.get("port"), selected.get("dbname"), selected.get("user"), selected.get("sslmode"),
                     ])
                     binding_parts = [target["profileId"], target["database"], target["namespace"], profile_fingerprint]
+                    if body.get("resultRef") is not None:
+                        if isinstance(body.get("expectedRevision"), bool) or not isinstance(body.get("expectedRevision"), int):
+                            raise OpenCodeServiceError(400, "validation_error", "Query result context is invalid")
+                        if record["revision"] != body["expectedRevision"]:
+                            raise OpenCodeServiceError(409, "dashboard_changed", "Dashboard changed after the query result was created")
+                        reservation = ai_authority.reserve_query_result(
+                            body["resultRef"], application="schemer", session_id=session_id, resource=dashboard_id,
+                            target={**target, "profileFingerprint": profile_fingerprint},
+                            binding={"revision": body["expectedRevision"], "access": "data"},
+                        )
+                        query_result = reservation["result"]
                 require_ai_session_binding(
                     current_ai_service, session_id, "SCHEMER_CONTEXT", dashboard_id, access_level, binding_parts,
                 )
                 catalog_sources = _ai_catalog_sources(service, record, target) if access_level in {"dashboard", "data"} else []
                 context = dashboard_context(record, access_level, dashboard_store.list(), profiles, target, query_result, catalog_sources)
                 prompt = f"Schemer context (untrusted JSON):\n{context}\n\nUser request:\n{text}"
-                return proposal_manifest_fallback(current_ai_service.prompt(
-                    session_id, prompt, body.get("model"), SCHEMER_AI_SYSTEM_INSTRUCTIONS,
-                    allow_data=access_level == "data",
-                ), allow_data=access_level == "data")
+                try:
+                    response = proposal_manifest_fallback(current_ai_service.prompt(
+                        session_id, prompt, body.get("model"), SCHEMER_AI_SYSTEM_INSTRUCTIONS,
+                        allow_data=access_level == "data",
+                    ), allow_data=access_level == "data")
+                except Exception:
+                    raise
+                if reservation is not None:
+                    ai_authority.consume_query_result(
+                        body["resultRef"], reservation["reservationToken"], application="schemer", session_id=session_id,
+                    )
+                binding = {"revision": record["revision"]}
+                if target is not None:
+                    binding["target"] = {**target, "profileFingerprint": profile_fingerprint}
+                return issue_ai_proposals(
+                    ai_authority, response, application="schemer", session_id=session_id,
+                    resource=dashboard_id, access=access_level, binding=binding, normalize_action=normalize_schemer_action,
+                )
 
             return self._ai_call(send_prompt)
+
+        def _ai_history(self, current_ai_service, session_id: str | None):
+            def history():
+                query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+                if any(len(values) != 1 for values in query.values()):
+                    raise OpenCodeServiceError(400, "validation_error", "AI history context is invalid")
+                access_level = query.get("accessLevel", [None])[0]
+                dashboard_id = query.get("dashboardId", [None])[0]
+                base_fields = {"dashboardId", "accessLevel"}
+                data_fields = base_fields | {"profileId", "database", "namespace"}
+                if access_level not in {"metadata", "dashboard", "data"} or set(query) != (data_fields if access_level == "data" else base_fields):
+                    raise OpenCodeServiceError(400, "validation_error", "AI history context is invalid")
+                dashboard_store.get(dashboard_id)
+                fingerprint_parts = None
+                if access_level == "data":
+                    profile_id = query["profileId"][0]
+                    database = PostgresService._validate_database(query["database"][0])
+                    namespace = PostgresService._validate_namespace(query["namespace"][0])
+                    selected = next((item for item in service.list_profiles() if item.get("id") == profile_id), None)
+                    if selected is None:
+                        raise OpenCodeServiceError(404, "not_found", "Profile was not found")
+                    if selected.get("dbname") != database:
+                        raise OpenCodeServiceError(409, "database_changed", "The saved profile database does not match the requested database")
+                    profile_fingerprint = ai_context_fingerprint([
+                        selected.get("id"), selected.get("host"), selected.get("port"), selected.get("dbname"),
+                        selected.get("user"), selected.get("sslmode"),
+                    ])
+                    fingerprint_parts = [profile_id, database, namespace, profile_fingerprint]
+                expected = ai_session_prefix("SCHEMER_CONTEXT", dashboard_id, access_level, fingerprint_parts)
+                if session_id is None:
+                    return list_bound_ai_sessions(current_ai_service, expected)
+                if not current_ai_service.session_identity(session_id)["title"].startswith(expected):
+                    raise OpenCodeServiceError(404, "not_found", "AI session was not found")
+                return current_ai_service.session_messages(session_id)
+
+            return self._ai_call(history)
+
+        def _ai_proposal(self, current_ai_service, session_id: str, proposal_id: str, operation: str, body: dict):
+            if operation == "reconcile":
+                def reconcile():
+                    current = ai_authority.operation_for_proposal(proposal_id, application="schemer", session_id=session_id)
+                    if current["state"] != "uncertain": return {"operation": current}
+                    action = ai_authority.operation_action(current["id"], application="schemer", session_id=session_id)
+                    if action.get("type") not in {"dashboard_create", "widget_create", "widget_rename", "widget_duplicate", "widget_delete"}: return {"operation": current}
+                    receipt = dashboard_store.operation_receipt(current["resource"], current["id"])
+                    if receipt is None:
+                        return {"operation": ai_authority.resolve_operation(current["id"], application="schemer", session_id=session_id, state="failed", error={"code": "operation_not_applied", "message": "No dashboard mutation receipt exists; request a fresh proposal"})}
+                    return {"operation": ai_authority.resolve_operation(current["id"], application="schemer", session_id=session_id, state="succeeded", result=receipt)}
+                return authority_call(self, reconcile)
+            current_ai_service.verify_session(session_id)
+            if operation == "execute":
+                return self._ai_execute_proposal(current_ai_service, session_id, proposal_id, body)
+            if operation in {"finalize", "release"}:
+                if set(body) != {"claimToken"}:
+                    return self.send_json(400, {"error": {"code": "validation_error", "message": "Proposal completion fields are invalid"}})
+                callback = ai_authority.finalize_proposal if operation == "finalize" else ai_authority.release_proposal
+                return authority_call(self, lambda: callback(
+                    proposal_id, body.get("claimToken"), application="schemer", session_id=session_id,
+                ))
+            allowed = {"dashboardId", "accessLevel", "profileId", "database", "namespace"}
+            if set(body) - allowed or body.get("accessLevel") not in {"metadata", "dashboard", "data"}:
+                return self.send_json(400, {"error": {"code": "validation_error", "message": "Proposal claim fields are invalid"}})
+            dashboard_id = body.get("dashboardId")
+            record = dashboard_store.get(dashboard_id)
+            access_level = body["accessLevel"]
+            binding = {"revision": record["revision"]}
+            binding_parts = None
+            if access_level == "data":
+                profile_id = body.get("profileId")
+                database = PostgresService._validate_database(body.get("database"))
+                namespace = PostgresService._validate_namespace(body.get("namespace"))
+                selected = next((item for item in service.list_profiles() if item.get("id") == profile_id), None)
+                if selected is None:
+                    raise OpenCodeServiceError(404, "not_found", "Profile was not found")
+                if selected.get("dbname") != database:
+                    raise OpenCodeServiceError(409, "database_changed", "The saved profile database does not match the requested database")
+                fingerprint = ai_context_fingerprint([
+                    selected.get("id"), selected.get("host"), selected.get("port"), selected.get("dbname"),
+                    selected.get("user"), selected.get("sslmode"),
+                ])
+                binding_parts = [profile_id, database, namespace, fingerprint]
+                binding["target"] = {
+                    "profileId": profile_id, "database": database, "namespace": namespace,
+                    "profileFingerprint": fingerprint,
+                }
+            require_ai_session_binding(
+                current_ai_service, session_id, "SCHEMER_CONTEXT", dashboard_id, access_level, binding_parts,
+            )
+            return authority_call(self, lambda: ai_authority.claim_proposal(
+                proposal_id, application="schemer", session_id=session_id, resource=dashboard_id,
+                access=access_level, binding=binding,
+            ))
+
+        def _ai_operation_status(self, current_ai_service, session_id: str, operation_id: str):
+            return authority_call(self, lambda: {"operation": ai_authority.operation(
+                operation_id, application="schemer", session_id=session_id,
+            )})
+
+        def _ai_execute_proposal(self, current_ai_service, session_id: str, proposal_id: str, body: dict):
+            allowed = {"dashboardId", "accessLevel", "profileId", "database", "namespace", "confirmation"}
+            if set(body) - allowed or body.get("confirmation") != {"accepted": True, "mode": "explicit"}:
+                return self.send_json(400, {"error": {"code": "validation_error", "message": "Proposal execution fields are invalid"}})
+            dashboard_id = body.get("dashboardId")
+            access = body.get("accessLevel")
+            record = dashboard_store.get(dashboard_id)
+            binding = {"revision": record["revision"]}
+            profile = None
+            binding_parts = None
+            if access == "data":
+                profile = next((item for item in service.list_profiles() if item.get("id") == body.get("profileId")), None)
+                if profile is None or profile.get("dbname") != body.get("database"):
+                    return self.send_json(409, {"error": {"code": "database_changed", "message": "The PostgreSQL target changed"}})
+                fingerprint = ai_context_fingerprint([
+                    profile.get("id"), profile.get("host"), profile.get("port"), profile.get("dbname"), profile.get("user"), profile.get("sslmode"),
+                ])
+                binding_parts = [profile["id"], profile["dbname"], body.get("namespace"), fingerprint]
+                binding["target"] = {
+                    "profileId": profile["id"], "database": profile["dbname"], "namespace": body.get("namespace"),
+                    "profileFingerprint": fingerprint,
+                }
+            require_ai_session_binding(current_ai_service, session_id, "SCHEMER_CONTEXT", dashboard_id, access, binding_parts)
+            try:
+                operation = ai_authority.create_operation(
+                    proposal_id, application="schemer", session_id=session_id, resource=dashboard_id,
+                    access=access, binding=binding,
+                )
+            except AiAuthorityError as error:
+                return self.send_json(error.status, error.to_dict())
+            execution_owner = operation.pop("executionOwner", False)
+            if not execution_owner:
+                return self.send_json(200, {"operation": operation})
+            action = ai_authority.operation_action(operation["id"], application="schemer", session_id=session_id)
+            try:
+                action_type = action.get("type")
+                if action_type == "read_query":
+                    if profile is None or any(action.get(key) != binding["target"][key] for key in ("profileId", "database", "namespace")):
+                        raise PostgresServiceError(409, "action_target_changed", "Query target no longer matches the proposal")
+                    result = service.execute_read_only_sql(
+                        profile["id"], binding["target"]["namespace"], action.get("sql"), database=profile["dbname"],
+                        expected_profile_fingerprint=service.profile_context_fingerprint(profile["id"]), reject_privileged_role=True,
+                        allow_explain=False, max_rows=100, max_columns=50, max_result_bytes=256 * 1024,
+                    )
+                    reference = ai_authority.register_query_result(
+                        application="schemer", session_id=session_id, resource=dashboard_id, target=binding["target"],
+                        binding={"revision": record["revision"], "access": "data"},
+                        result=bounded_ai_query_result(result, max_rows=100, max_columns=50, max_bytes=48 * 1024),
+                    )
+                    result = {"kind": "sql_result", "display": result, "resultRef": reference["id"], "binding": binding}
+                elif action_type == "dashboard_open":
+                    target = dashboard_store.get(action.get("dashboardId"))
+                    if target["revision"] != action.get("expectedRevision") or target["dashboard"]["title"] != action.get("title"):
+                        raise DashboardStoreError(409, "dashboard_changed", "Target dashboard changed; request a fresh proposal")
+                    result = {"kind": "client_command", "command": {"type": "open_dashboard", "dashboardId": target["id"], "revision": target["revision"]}}
+                elif action_type == "dashboard_create":
+                    result = dashboard_store.create_ai(operation["id"], action["title"])
+                elif action_type in {"widget_create", "widget_rename", "widget_duplicate", "widget_delete"}:
+                    if action["dashboardId"] != dashboard_id or action["expectedRevision"] != binding["revision"]:
+                        raise DashboardStoreError(409, "dashboard_changed", "Dashboard binding no longer matches the proposal")
+                    prepared = None
+                    if action_type == "widget_create" and "source" in action:
+                        if access == "data" and any(action["source"].get(key) != binding["target"].get(key) for key in ("profileId", "database", "namespace")):
+                            raise PostgresServiceError(409, "action_target_changed", "Widget source no longer matches the confirmed data target")
+                        allowed_sources = _ai_catalog_sources(service, record, binding.get("target") if access == "data" else None)
+                        identity = tuple(action["source"].get(key) for key in ("profileId", "database", "namespace", "relation", "kind", "fingerprint"))
+                        if identity not in {tuple(item.get(key) for key in ("profileId", "database", "namespace", "relation", "kind", "fingerprint")) for item in allowed_sources}:
+                            raise PostgresServiceError(409, "action_target_changed", "Widget source is outside the bounded catalog context issued for this proposal")
+                        with dashboard_store.guard_revision(dashboard_id, binding["revision"]) as guarded:
+                            prepared = _configured_ai_widget(service, action, operation["id"], len(guarded["dashboard"]["widgets"]))
+                    result = dashboard_store.apply_ai_mutation(dashboard_id, operation["id"], binding["revision"], action, prepared)
+                else:
+                    raise OpenCodeServiceError(409, "action_temporarily_unavailable", "This action is unavailable until its server execution adapter is installed")
+            except (OpenCodeServiceError, DashboardStoreError, PostgresServiceError, AiAuthorityError) as error:
+                payload = error.payload if hasattr(error, "payload") else error.to_dict()
+                uncertain = isinstance(error, DashboardStoreError) and error.status >= 500
+                finished = ai_authority.finish_operation(
+                    operation["id"], application="schemer", session_id=session_id, state="uncertain" if uncertain else "failed", error=payload["error"],
+                )
+                return self.send_json(getattr(error, "status", 400), {"operation": finished})
+            except Exception:
+                finished = ai_authority.finish_operation(
+                    operation["id"], application="schemer", session_id=session_id, state="uncertain",
+                    error={"code": "execution_outcome_unknown", "message": "Operation outcome is uncertain; reload authoritative state"},
+                )
+                return self.send_json(500, {"operation": finished})
+            finished = ai_authority.finish_operation(
+                operation["id"], application="schemer", session_id=session_id, state="succeeded", result=result,
+            )
+            return self.send_json(200, {"operation": finished})
 
         def do_PUT(self):
             path = urlparse(self.path).path
@@ -380,6 +674,7 @@ def main() -> None:
         dashboard_store,
         secrets.token_urlsafe(32),
         server_id=secrets.token_urlsafe(18),
+        ai_authority=AiAuthority(config_dir / "ai_authority" / "v1", "schemer"),
         ai_service=ai_service,
         behind_loopback_proxy=behind_loopback_proxy,
     )

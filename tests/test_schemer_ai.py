@@ -50,7 +50,7 @@ class SchemerAiTests(unittest.TestCase):
         self.assertTrue(json.loads(context)["truncated"])
 
     def test_fallback_accepts_only_bounded_schemer_actions(self):
-        action = {"type": "widget_rename", "dashboardId": "dashboard_mercury", "expectedRevision": 0}
+        action = {"type": "dashboard_open", "dashboardId": "dashboard_mercury", "expectedRevision": 0, "title": "Mercury", "requiresConfirmation": True}
         response = {"text": "Review this.\nSCHEMER_PROPOSALS:" + json.dumps([action]), "parts": [{"type": "text", "text": "fallback"}], "actions": []}
         repaired = proposal_manifest_fallback(response)
         self.assertEqual(repaired["actions"], [action])

@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from schemii.dashboard_store import DashboardStore
+from schemii.ai_authority import AiAuthority
 from schemii.schema_store import SchemaStore
 from schemii.schemer_server import make_handler as make_schemer_handler
 from schemii.server import make_handler as make_schemii_handler
@@ -23,11 +24,11 @@ class PostgresHttpContractTests(unittest.TestCase):
             factories = {
                 "schemii": lambda service: make_schemii_handler(
                     ROOT / "src/schemii/web", service, SchemaStore(root / "schemas"),
-                    "session-token", server_id="schemii-contract",
+                    "session-token", server_id="schemii-contract", ai_authority=AiAuthority(root / "authority", "schemii"),
                 ),
                 "schemer": lambda service: make_schemer_handler(
                     ROOT / "src/schemii/schemer_web", service, DashboardStore(root / "dashboards"),
-                    "session-token", server_id="schemer-contract",
+                    "session-token", server_id="schemer-contract", ai_authority=AiAuthority(root / "authority", "schemer"),
                 ),
             }
             for name, factory in factories.items():

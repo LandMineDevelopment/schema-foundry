@@ -10,6 +10,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from schemii.postgres_http import PostgresHttpMixin
 from schemii.ai_http import ai_context_fingerprint
+from schemii.ai_authority import AiAuthority
 from schemii.dashboard_store import DashboardStore
 from schemii.schemer_examples import MERCURY_PROFILE_ID
 from schemii.schemer_server import _ai_catalog_sources, make_handler
@@ -30,7 +31,7 @@ class SchemerServerTests(unittest.TestCase):
             descriptor={
                 "profileId": "shared", "database": "schemii", "namespace": "bookstore", "relation": "orders",
                 "kind": "table", "columns": [{"name": "id", "type": "bigint", "nullable": False, "ordinal": 1, "suggestions": ["dimension", "identifier"]}],
-                "fingerprint": "catalog-fingerprint",
+                "fingerprint": "a" * 64,
                 "definition": {"status": "unavailable", "reason": "not_supported"},
             },
             preview_rows=[{"id": 1}],
@@ -45,6 +46,7 @@ class SchemerServerTests(unittest.TestCase):
             self.dashboard_store,
             "session-token",
             server_id="schemer-server",
+            ai_authority=AiAuthority(Path(self.temporary_directory.name) / "authority", "schemer"),
             ai_service=self.ai_service,
         )
         self.assertTrue(issubclass(handler, PostgresHttpMixin))
@@ -56,6 +58,44 @@ class SchemerServerTests(unittest.TestCase):
 
     def request(self, path, method="GET", payload=None, authorized=False):
         return self.http.request(path, method, payload, authorized=authorized)
+
+    def test_ai_widget_rename_executes_server_side_and_reconciles(self):
+        record = self.dashboard_store.get("dashboard_mercury")
+        widget = record["dashboard"]["widgets"][0]
+        self.ai_service.session_title = "SCHEMER_CONTEXT:dashboard_mercury:dashboard Demo"
+        self.ai_service.prompt_response = {"text": "Review.", "parts": [], "actions": [{"type": "widget_rename", "dashboardId": record["id"], "expectedRevision": record["revision"], "widgetId": widget["id"], "currentTitle": widget["title"], "title": "Renamed", "requiresConfirmation": True}]}
+        message = {"text": "Rename it", "model": {}, "dashboardId": record["id"], "accessLevel": "dashboard"}
+        _, body, _ = self.request("/api/ai/sessions/ses_1/messages", "POST", message, authorized=True)
+        proposal = json.loads(body)["proposals"][0]
+        path = f"/api/ai/sessions/ses_1/proposals/{proposal['proposalId']}"
+        execute = {"dashboardId": record["id"], "accessLevel": "dashboard", "confirmation": {"accepted": True, "mode": "explicit"}}
+        operation = json.loads(self.request(path + "/execute", "POST", execute, authorized=True)[1])["operation"]
+        self.assertEqual(operation["result"]["kind"], "dashboard_saved")
+        self.assertEqual(self.dashboard_store.get(record["id"])["dashboard"]["widgets"][0]["title"], "Renamed")
+        reconciled = json.loads(self.request(path + "/reconcile", "POST", execute, authorized=True)[1])["operation"]
+        self.assertEqual(reconciled["id"], operation["id"])
+
+    def test_ai_dashboard_create_uses_deterministic_server_identity(self):
+        self.ai_service.session_title = "SCHEMER_CONTEXT:dashboard_mercury:metadata Demo"
+        self.ai_service.prompt_response = {"text": "Review.", "parts": [], "actions": [{"type": "dashboard_create", "title": "Operations", "requiresConfirmation": True}]}
+        message = {"text": "Create it", "model": {}, "dashboardId": "dashboard_mercury", "accessLevel": "metadata"}
+        _, body, _ = self.request("/api/ai/sessions/ses_1/messages", "POST", message, authorized=True)
+        proposal = json.loads(body)["proposals"][0]
+        path = f"/api/ai/sessions/ses_1/proposals/{proposal['proposalId']}/execute"
+        execute = {"dashboardId": "dashboard_mercury", "accessLevel": "metadata", "confirmation": {"accepted": True, "mode": "explicit"}}
+        operation = json.loads(self.request(path, "POST", execute, authorized=True)[1])["operation"]
+        self.assertTrue(operation["result"]["dashboardId"].startswith("dashboard_"))
+        self.assertEqual(self.dashboard_store.get(operation["result"]["dashboardId"])["dashboard"]["title"], "Operations")
+
+    def test_configured_widget_builder_sanitizes_catalog_columns(self):
+        from schemii.schemer_server import _configured_ai_widget
+        query = {"version": 2, "dimensions": [], "measures": [{"id": "measure_orders", "label": "Orders", "column": None, "aggregation": "count_rows", "distinct": False, "nullBehavior": "preserve", "numberFormat": {"style": "integer"}}], "filters": [], "sort": [], "limit": 100}
+        action = {"title": "Orders", "source": {"profileId": "shared", "database": "schemii", "namespace": "bookstore", "relation": "orders", "kind": "table", "fingerprint": "a" * 64}, "query": query, "visualizationMode": "kpi"}
+        widget = _configured_ai_widget(self.service, action, "operation_widget", 1)
+        self.assertEqual(set(widget["configuration"]["source"]["columns"][0]), {"name", "type", "nullable", "ordinal"})
+        record = self.dashboard_store.get("dashboard_mercury")
+        saved = self.dashboard_store.apply_ai_mutation(record["id"], "operation_widget", record["revision"], {"type": "widget_create", "title": "Orders"}, widget)
+        self.assertEqual(saved["kind"], "dashboard_saved")
 
     def test_static_shared_assets_and_session(self):
         status, body, _ = self.request("/")
@@ -270,7 +310,7 @@ class SchemerServerTests(unittest.TestCase):
             "profileId": "shared", "database": "schemii", "namespace": "bookstore", "columns": [{"name": "count"}], "rows": [[1]],
             "rowCount": 1, "truncated": False, "maxRows": 100, "maxColumns": 50, "maxResultBytes": 256 * 1024,
         }
-        self.assertEqual(self.request(path, "POST", {**base, **target, "queryResult": query_result}, True)[0], 200)
+        self.assertEqual(self.request(path, "POST", {**base, **target, "queryResult": query_result}, True)[0], 400)
         self.assertEqual(self.request(path, "POST", {**base, **target, "queryResult": {**query_result, "database": "other"}}, True)[0], 400)
         dashboard_message = {**base, "accessLevel": "dashboard", "queryResult": query_result}
         for key in target:

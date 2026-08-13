@@ -76,7 +76,7 @@ Each application remembers its last selected provider/model in its own origin's 
 
 OpenCode stores chat sessions in the Docker-managed `schemii-opencode-data` volume. Schemii accepts only sessions associated with the sidecar's fixed `/workspace`; host OpenCode data is neither mounted nor shown, and records imported from another workspace are rejected. **New chat** starts a separate conversation without deleting the previous session. Open **Chat history** to list conversations by bounded title and timestamp, restore one, continue its existing session, or permanently delete it after confirmation.
 
-Schemer uses the same persistent volume but accepts only `/workspace-schemer` sessions. Its history dialog cannot list, restore, delete, or continue Schemii conversations. A Schemer conversation can continue only while its original dashboard and disclosure level are selected; otherwise history opens read-only and sending starts a newly isolated chat. Provider authentication remains shared because OpenCode stores it globally rather than per workspace.
+Schemer uses the same persistent volume but accepts only `/workspace-schemer` sessions. History list and message routes require the exact current schema or dashboard, disclosure level, and, for data mode, server-verified PostgreSQL target. The server filters session titles against that binding before returning any history; browser title parsing is not an authorization boundary. Provider authentication remains shared because OpenCode stores it globally rather than per workspace.
 
 Restored history is intentionally narrower than OpenCode's raw records. Each application returns at most 100 messages and a bounded amount of text through its same-origin authenticated routes. It strips injected context, raw tool inputs and outputs, paths, metadata, provider response details, and action payloads. Historical proposals are never restored as interactive actions; ask the assistant for a fresh proposal against the current design or dashboard and database target.
 
@@ -98,9 +98,9 @@ Schemii data access has a separate SQL policy:
 
 - `Disabled` shows generated SQL but cannot execute it.
 - `Ask each time` requires confirmation for each query.
-- `Allow for session` executes proposals only after the user deliberately selects that setting; a new chat resets it to disabled.
+- `Ask each time` requires confirmation for every query. Session-wide SQL approval is unavailable because read-only statements can invoke externally effectful functions.
 
-Query results are bounded before being sent back to the model. PostgreSQL runs these queries in a read-only transaction, but a `SELECT` can invoke database functions with external side effects. Use a narrowly privileged role and review every generated statement.
+Query results are bounded before being sent back to the model. The server stores the bounded result under an expiring, one-use opaque reference bound to the application, chat session, saved resource revision, and exact PostgreSQL target. Follow-up messages submit only that reference; browser-supplied rows are never accepted as query provenance. PostgreSQL runs these queries in a read-only transaction, but a `SELECT` can invoke database functions with external side effects. Use a narrowly privileged role and review every generated statement.
 
 Schemer does not offer session-wide SQL approval: every analytic query requires a new confirmation. Changing the dashboard, disclosure level, profile, database, or namespace starts a separately bound conversation. Data-mode history cannot be viewed outside that exact target context.
 
@@ -123,22 +123,29 @@ The embedded agent can load only these packaged skills:
 - Read-only query safety
 - Migration safety
 
-The explicit tools can propose:
+The currently enabled Schemii tools can propose:
 
 - Read-only raw SQL
-- Add or rename a table
-- Add or update a column
-- Delete a table or column
-- Add a foreign-key relationship
-- Atomically populate an active design with complete tables, columns, keys, and relationships
-- Create a local project or open an exact listed project
-- Open an exact listed saved PostgreSQL connection
+- Open an exact listed project
 - Prefill a connection profile without a password
-- Open migration preview and apply review workflows
+- Create a local project
+- Populate the active saved design
+- Add or rename tables
+- Add or update columns
+- Delete a table or column with dependent-object review
+- Add a foreign-key relationship between exact saved columns
+- Open an exact listed PostgreSQL connection and namespace
+- Generate a read-only migration preview against an exact listed target
 
-Schemer's separate agent can load only Schemer help, dashboard safety, layout safety, and query safety. Its tools can propose creating or opening a dashboard and creating, renaming, duplicating, or deleting a widget. Complete widget proposals must use one exact source from the bounded live catalog, listed columns, a version-2 structured query, and a compatible visualization; Schemer re-inspects the fingerprint, revision-guards and executes the query before mutation, chooses the ID and placement, and persists once. A placeholder is proposed only when explicitly requested. In data mode only, `schemer_read_query` can emit an inert read-query proposal bound to the supplied dashboard revision, profile, database, and namespace; it is disabled in metadata/dashboard modes and never executes inside OpenCode. Confirmed analytic SQL may join relations, but widget configuration remains single-relation. Schemii's schema, connection, and migration tools remain unavailable in the Schemer workspace and prompt policy.
+Confirmed schema mutations execute in the Schemii backend, not in the browser. Each proposal is bound to the exact saved schema revision and layout token, uses operation-derived stable IDs, writes the semantic change and operation receipt atomically with one revision increment, and preserves established positions, colors, layer viewport, views, functions, PostgreSQL metadata, and unrelated objects. A duplicate execute or restart returns the stored receipt instead of applying the change again. Stale revisions or layouts require a refresh. Column renames fail closed when stored SQL definitions cannot be rewritten safely; destructive results include the server-derived dependency impact.
 
-The Schemer browser adapter sends the confirmed database, namespace, SQL, dashboard revision, and a local redacted-profile fingerprint to `/api/postgres/profiles/{profileId}/sql`. The backend rejects missing or unknown fields, holds the dashboard revision guard throughout execution, rejects profile changes after confirmation, verifies the saved and connected database plus namespace, rejects superuser and row-security-bypass roles, disables `EXPLAIN`, and returns complete JSON values within 100 rows, 50 columns, and 256 KiB. A data-mode follow-up may include that response as `queryResult` only when it is at most 48 KiB and exactly matches the selected profile, database, and namespace. Results are rejected in every other disclosure mode. The namespace is a default search path rather than a security boundary, so the saved role must be restricted to only the schemas and functions the user intends the assistant to read.
+Connection-opening proposals are bound to the server's current saved profile fingerprint, database, and namespace. AI migration previews revalidate that exact target, introspect PostgreSQL read-only, and return a non-persisted preview-only plan. They cannot be applied from the migration dialog; applying changes requires a separate ordinary UI preview until a destructive server adapter is explicitly approved and installed.
+
+When an AI preview is eligible to apply, the server also issues a separate apply proposal that the model cannot create. Apply requires another explicit confirmation and uses only the durable server-stored plan. The backend holds the exact saved revision and layout binding through the transaction, rechecks the profile and live catalog under the namespace migration lock, and records source and intended result fingerprints for restart and response-loss reconciliation. Destructive plans require a separate destructive warning. An outcome matching neither fingerprint remains `uncertain` and is never retried automatically.
+
+Schemer's separate agent can load only Schemer help, dashboard safety, layout safety, and query safety. Its enabled tools can create a dashboard; open an exact listed dashboard; create, rename, duplicate, or delete widgets; and, in data mode only, emit an inert read-query proposal bound to the supplied dashboard revision, profile, database, and namespace. Dashboard mutations execute through server-owned adapters with deterministic IDs, atomic operation receipts, one revision increment, stale-revision rejection, restart reconciliation, and exact preservation of unrelated widget order, desktop/mobile layout, viewport, source, query, and presentation. Complete widget creation re-verifies the exact relation fingerprint, normalizes and executes its structured single-relation visualization projection, and persists only after successful validation. Confirmed analytic SQL may join relations, but widget configuration remains single-relation. Schemii tools remain unavailable in the Schemer workspace and prompt policy.
+
+The Schemer browser adapter sends the confirmed database, namespace, SQL, dashboard revision, exact chat session, and a local redacted-profile fingerprint to `/api/postgres/profiles/{profileId}/sql`. The backend rejects missing or unknown fields, holds the dashboard revision guard throughout execution, rejects profile changes after confirmation, verifies the saved and connected database plus namespace, rejects superuser and row-security-bypass roles, disables `EXPLAIN`, and returns complete JSON values within 100 rows, 50 columns, and 256 KiB. It also stores a model-facing projection capped at 48 KiB and returns an opaque result reference. A data-mode follow-up can consume that reference once only while the same dashboard revision, chat, disclosure, and PostgreSQL target remain current. Results are rejected in every other disclosure mode. The namespace is a default search path rather than a security boundary, so the saved role must be restricted to only the schemas and functions the user intends the assistant to read.
 
 Tool output is inert structured data. It does not prove that an action ran.
 
@@ -156,7 +163,7 @@ Free-model providers may retain these prompts and the bounded Schemii metadata c
 
 ## Confirmation And Migration Safety
 
-Every schema mutation requires a separate browser confirmation. The proposal is bound to the active design and an in-memory schema snapshot; changing the design invalidates it. Schema saves must succeed before the UI marks a proposal applied, and existing table layout is preserved.
+Every model action is validated and canonicalized before being replaced by an expiring server-issued proposal envelope bound to the application, exact chat session, resource, disclosure level, saved revision, and verified data target when applicable. Confirmation starts one persistent operation keyed by the proposal ID. Concurrent or repeated requests observe that same operation instead of repeating its effect; lost responses reconcile through the operation record. Success and known failure are terminal, while an interrupted running lease becomes `uncertain` and cannot be replayed. Records use application-scoped inter-process locking and atomic JSON writes in the protected config volume.
 
 Initial example-schema generation uses one `populate_schema` action rather than separate table cards. Schemii validates table and column counts, names, types, declared keys, defaults, relationship endpoints, type compatibility, referenced uniqueness, referential actions, and unsupported fields before showing confirmation. PostgreSQL-valid keyless tables are allowed; only foreign-key targets must be primary or unique. Approval applies the validated batch atomically, lays out only the new tables, preserves all existing table layout, and saves once. If a provider fails to execute a custom proposal tool, Schemii accepts only a bounded `SCHEMII_PROPOSALS:` fallback manifest containing this same inert action; the browser performs identical validation and confirmation.
 
@@ -166,9 +173,9 @@ Project navigation accepts only logical schema IDs, never paths. Creation saves 
 
 Saved-connection opening accepts only an exact listed profile ID. On review Schemii refreshes redacted profile metadata, verifies its current name and database, and explains that confirmation will contact PostgreSQL using credentials already stored server-side. Only after confirmation does Schemii connect and load namespaces; an optional proposed namespace is selected only if PostgreSQL returns it. This action does not reveal credentials, introspect or import a schema, run SQL, preview a migration, or authorize apply.
 
-Migration proposals never bypass Schemii's existing safety flow. The exact profile and namespace must still be selected, SQL must be previewed, destructive planning must be explicitly enabled, destructive steps require the separate checkbox, and apply retains expiry, profile, fingerprint, advisory-lock, timeout, transaction, and rollback checks.
+Migration proposals never bypass Schemii's existing safety flow. AI can open a fresh preview only; it cannot emit a standalone apply proposal. The exact profile and namespace must still be selected, SQL must be previewed, destructive planning must be explicitly enabled, destructive steps require the separate checkbox, and apply uses the exact server-issued plan reviewed in the migration dialog with expiry, profile, fingerprint, advisory-lock, timeout, transaction, and rollback checks.
 
-Natural-language messages such as "yes", "confirm", or "apply" are never authorization.
+Natural-language messages such as "yes", "confirm", or "apply" are never authorization. Schema/dashboard mutation proposals, resource creation, connection opening, and AI migration preview remain disabled until action-specific server execution and reconciliation adapters are complete; use the normal application UI for those workflows.
 
 ## Persistent Volumes
 

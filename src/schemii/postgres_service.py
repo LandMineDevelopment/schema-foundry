@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .atomic_json import write_json
+from .file_lock import exclusive_file_lock
 from .postgres_common import (
     ConflictError,
     NotFoundError,
@@ -45,12 +46,6 @@ from .widget_query import (
     normalize_query,
     normalize_temporal_series,
 )
-
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - direct Windows use has one process per profile store.
-    fcntl = None
-
 
 def _profile_context_fingerprint(profile_id: str, profile: dict[str, Any]) -> str:
     encoded = json.dumps(
@@ -289,6 +284,8 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         self.profile_path = self.config_dir / "postgres_profiles.json"
         self.profile_lock_path = self.config_dir / ".postgres_profiles.lock"
         self.history_path = self.config_dir / "migration_history.json"
+        self.ai_plan_dir = self.config_dir / "ai_migration_plans"
+        self.ai_plan_lock_path = self.config_dir / ".ai_migration_plans.lock"
         self._connect_factory = connect_factory
         self._plan_ttl = plan_ttl_seconds
         self._lock_timeout_ms = lock_timeout_ms
@@ -299,6 +296,9 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         self._plans: dict[str, dict[str, Any]] = {}
         self._console = PostgresConsole(self)
         self._ensure_config_dir()
+
+    def profile_context_fingerprint(self, profile_id: str) -> str:
+        return _profile_context_fingerprint(profile_id, self._profile(profile_id))
 
     def execute_console(self, profile_id: str, payload: Any, binding: str, server_id: str, policy: ConsolePolicy | None = None) -> dict[str, Any]:
         return self._console.execute(profile_id, payload, binding, server_id, policy or ConsolePolicy(statement_timeout_ms=self._statement_timeout_ms))
@@ -324,6 +324,42 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             os.chmod(self.profile_path, 0o600)
         if self.history_path.exists():
             os.chmod(self.history_path, 0o600)
+        self.ai_plan_dir.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(self.ai_plan_dir, 0o700)
+        self.ai_plan_lock_path.touch(mode=0o600, exist_ok=True)
+        os.chmod(self.ai_plan_lock_path, 0o600)
+
+    @contextmanager
+    def _ai_plan_store_lock(self):
+        with self._lock:
+            with exclusive_file_lock(self.ai_plan_lock_path):
+                yield
+
+    def _ai_plan_path(self, plan_id: str) -> Path:
+        if not isinstance(plan_id, str) or not PROFILE_ID_RE.fullmatch(plan_id) or not plan_id.startswith("ai_plan_"):
+            raise ValidationError("AI migration plan ID is invalid")
+        return self.ai_plan_dir / f"{plan_id}.json"
+
+    def _read_ai_plan(self, plan_id: str) -> dict[str, Any]:
+        path = self._ai_plan_path(plan_id)
+        if not path.exists():
+            raise NotFoundError("AI migration plan was not found or has expired")
+        try:
+            plan = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise PostgresServiceError(500, "plan_store_error", "AI migration plan could not be read") from exc
+        required = {"version", "id", "operationId", "applyOperationId", "profileId", "database", "namespace", "profileFingerprint", "schemaBinding", "liveFingerprint", "resultFingerprint", "allowDestructive", "destructive", "steps", "warnings", "desiredSchema", "state", "createdAt", "expiresAt", "result"}
+        if not isinstance(plan, dict) or set(plan) != required or plan.get("version") != 1 or plan.get("id") != plan_id or plan.get("state") not in {"ready", "applying", "succeeded", "failed", "uncertain"}:
+            raise PostgresServiceError(500, "plan_store_error", "AI migration plan is invalid")
+        if plan["expiresAt"] <= self._clock() and plan["state"] == "ready":
+            raise NotFoundError("AI migration plan was not found or has expired")
+        return plan
+
+    def _write_ai_plan(self, plan: dict[str, Any]) -> None:
+        try:
+            write_json(self._ai_plan_path(plan["id"]), plan, mode=0o600, sort_keys=True)
+        except OSError as exc:
+            raise PostgresServiceError(500, "plan_store_error", "AI migration plan could not be written") from exc
 
     def _read_profiles(self) -> dict[str, dict[str, Any]]:
         with self._lock:
@@ -339,16 +375,8 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
 
     @contextmanager
     def _profile_store_lock(self):
-        descriptor = os.open(self.profile_lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-        try:
-            os.fchmod(descriptor, 0o600)
-            if fcntl is not None:
-                fcntl.flock(descriptor, fcntl.LOCK_EX)
+        with exclusive_file_lock(self.profile_lock_path):
             yield
-        finally:
-            if fcntl is not None:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
-            os.close(descriptor)
 
     def _write_profiles(self, profiles: dict[str, dict[str, Any]]) -> None:
         self._ensure_config_dir()
@@ -1570,12 +1598,15 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             raise ValidationError(f"Constraint on table {table['name']} references an unknown column ID") from exc
 
     def preview(
-        self, profile_id: str, namespace: str, desired_schema: dict[str, Any], allow_destructive: bool = False
+        self, profile_id: str, namespace: str, desired_schema: dict[str, Any], allow_destructive: bool = False,
+        *, persist: bool = True,
     ) -> dict[str, Any]:
         namespace = self._validate_namespace(namespace)
         desired = self._require_schema(copy.deepcopy(desired_schema))
         if not isinstance(allow_destructive, bool):
             raise ValidationError("allow_destructive must be boolean")
+        if not isinstance(persist, bool):
+            raise ValidationError("persist must be boolean")
         profile_fingerprint = self._profile_fingerprint(self._profile(profile_id))
         live = self.introspect(profile_id, namespace)
         if self._profile_fingerprint(self._profile(profile_id)) != profile_fingerprint:
@@ -1591,17 +1622,203 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         plan_id = "plan_" + secrets.token_hex(16)
         now = self._clock()
         stored = {
-            "id": plan_id, "profileId": profile_id, "namespace": namespace,
+            "id": plan_id, "profileId": profile_id, "database": live.get("postgres", {}).get("database"), "namespace": namespace,
             "liveFingerprint": live["postgres"]["fingerprint"], "allowDestructive": allow_destructive,
             "profileFingerprint": profile_fingerprint,
             "destructive": any(step["destructive"] for step in steps), "steps": copy.deepcopy(steps),
             "warnings": list(warnings), "createdAt": now, "expiresAt": now + self._plan_ttl,
             "desiredSchema": copy.deepcopy(desired),
         }
-        with self._lock:
-            self._purge_plans(now)
-            self._plans[plan_id] = stored
-        return self._public_plan(stored)
+        if persist:
+            with self._lock:
+                self._purge_plans(now)
+                self._plans[plan_id] = stored
+        public = self._public_plan(stored)
+        if not persist:
+            public.update({"id": None, "previewOnly": True})
+        return public
+
+    def preview_ai_migration(
+        self, operation_id: str, profile_id: str, database: str, namespace: str, desired_schema: dict[str, Any],
+        allow_destructive: bool, schema_binding: dict[str, Any],
+    ) -> dict[str, Any]:
+        profile_id = self._validate_profile_id(profile_id)
+        database = self._validate_database(database)
+        namespace = self._validate_namespace(namespace)
+        if not isinstance(operation_id, str) or not PROFILE_ID_RE.fullmatch(operation_id):
+            raise ValidationError("operation_id is invalid")
+        plan_id = f"ai_plan_{hashlib.sha256(operation_id.encode()).hexdigest()[:24]}"
+        with self._ai_plan_store_lock():
+            path = self._ai_plan_path(plan_id)
+            if path.exists():
+                stored = self._read_ai_plan(plan_id)
+                if stored["operationId"] != operation_id:
+                    raise ConflictError("plan_conflict", "AI migration plan identity is already in use")
+                return {**self._public_plan(stored), "previewOnly": True, "applyPlanId": plan_id}
+            preview = self.preview(profile_id, namespace, desired_schema, allow_destructive, persist=False)
+            profile = self._profile(profile_id)
+            if profile.get("dbname") != database:
+                raise ConflictError("database_changed", "Connection profile database changed during preview")
+            if preview.get("database") != database:
+                raise ConflictError("database_changed", "Connected PostgreSQL database does not match the requested database")
+            now = self._clock()
+            stored = {
+                "version": 1, "id": plan_id, "operationId": operation_id, "applyOperationId": None, "profileId": profile_id,
+                "database": database, "namespace": namespace, "profileFingerprint": self._profile_fingerprint(profile),
+                "schemaBinding": copy.deepcopy(schema_binding), "liveFingerprint": preview["liveFingerprint"], "resultFingerprint": None,
+                "allowDestructive": allow_destructive, "destructive": preview["destructive"], "steps": copy.deepcopy(preview["steps"]),
+                "warnings": copy.deepcopy(preview["warnings"]), "desiredSchema": copy.deepcopy(desired_schema),
+                "state": "ready", "createdAt": now, "expiresAt": now + self._plan_ttl, "result": None,
+            }
+            self._write_ai_plan(stored)
+            return {**self._public_plan(stored), "previewOnly": True, "applyPlanId": plan_id}
+
+    def apply_ai_migration(
+        self, operation_id: str, plan_id: str, profile_id: str, database: str, namespace: str,
+        expected_destructive: bool, confirm_destructive: bool,
+    ) -> dict[str, Any]:
+        if not isinstance(operation_id, str) or not PROFILE_ID_RE.fullmatch(operation_id):
+            raise ValidationError("operation_id is invalid")
+        profile_id = self._validate_profile_id(profile_id)
+        database = self._validate_database(database)
+        namespace = self._validate_namespace(namespace)
+        if not isinstance(expected_destructive, bool):
+            raise ValidationError("expected_destructive must be boolean")
+        if not isinstance(confirm_destructive, bool):
+            raise ValidationError("confirm_destructive must be boolean")
+        with self._ai_plan_store_lock():
+            plan = self._read_ai_plan(plan_id)
+            if (plan["profileId"], plan["database"], plan["namespace"], plan["destructive"]) != (profile_id, database, namespace, expected_destructive):
+                raise NotFoundError("AI migration plan was not found or has expired")
+            if plan["state"] == "succeeded":
+                if plan["applyOperationId"] != operation_id:
+                    raise ConflictError("plan_consumed", "AI migration plan belongs to another apply operation")
+                return copy.deepcopy(plan["result"])
+            if plan["state"] in {"applying", "uncertain"}:
+                return self._reconcile_ai_migration_locked(plan)
+            if plan["state"] == "failed":
+                raise ConflictError("plan_consumed", "AI migration plan has already failed")
+            if plan["applyOperationId"] not in {None, operation_id}:
+                raise ConflictError("plan_consumed", "AI migration plan belongs to another apply operation")
+            if plan["destructive"] and not confirm_destructive:
+                raise ConflictError("destructive_confirmation_required", "Plan contains destructive steps")
+            profile = self._profile(profile_id)
+            if self._profile_fingerprint(profile) != plan["profileFingerprint"] or profile.get("dbname") != plan["database"]:
+                raise ConflictError("profile_changed", "Connection profile changed after preview")
+            try:
+                connection = self._connect_profile(profile)
+            except PostgresServiceError as error:
+                raise ConflictError("apply_not_committed", "Migration did not start; request a fresh preview and explicit confirmation") from error
+            plan.update({"state": "applying", "applyOperationId": operation_id, "result": {"operationId": operation_id}})
+            self._write_ai_plan(plan)
+            return self._execute_ai_migration_locked(plan, connection, operation_id)
+
+    def _execute_ai_migration_locked(self, plan: dict[str, Any], connection: Any, operation_id: str) -> dict[str, Any]:
+        failed_step = None
+        try:
+            cursor = connection.cursor()
+            try:
+                cursor.execute("BEGIN")
+                self._acquire_namespace_mutation_lock(cursor, plan["namespace"])
+                current = self._introspect_connection(connection, plan["profileId"], plan["namespace"])
+                if current.get("postgres", {}).get("database") != plan["database"]:
+                    raise ConflictError("database_changed", "Connected PostgreSQL database does not match the migration plan")
+                if current["postgres"]["fingerprint"] != plan["liveFingerprint"]:
+                    raise ConflictError("stale_plan", "Database schema changed after preview")
+                for index, step in enumerate(plan["steps"]):
+                    failed_step = (index, step)
+                    cursor.execute(step["sql"])
+                failed_step = None
+                refreshed = self._introspect_connection(connection, plan["profileId"], plan["namespace"])
+                plan["resultFingerprint"] = refreshed["postgres"]["fingerprint"]
+                self._write_ai_plan(plan)
+                connection.commit()
+                result = {
+                    "kind": "migration_applied", "operationId": operation_id, "planId": plan["id"],
+                    "target": {"profileId": plan["profileId"], "database": plan["database"], "namespace": plan["namespace"]},
+                    "sourceFingerprint": plan["liveFingerprint"], "resultFingerprint": plan["resultFingerprint"],
+                    "destructive": plan["destructive"], "schemaBinding": plan["schemaBinding"], "refreshedSchema": refreshed,
+                }
+                plan.update({"state": "succeeded", "result": result})
+                try:
+                    self._write_ai_plan(plan)
+                except PostgresServiceError as exc:
+                    raise PostgresServiceError(500, "execution_outcome_unknown", "Migration committed, but its durable receipt could not be finalized") from exc
+                return result
+            except PostgresServiceError as error:
+                rollback = getattr(connection, "rollback", None)
+                if rollback: rollback()
+                if plan.get("resultFingerprint") is None:
+                    plan.update({"state": "failed", "result": {"error": error.to_dict()["error"]}})
+                    self._write_ai_plan(plan)
+                    raise
+                raise PostgresServiceError(500, "execution_outcome_unknown", "Migration outcome requires reconciliation against PostgreSQL") from error
+            except Exception as exc:
+                rollback = getattr(connection, "rollback", None)
+                if rollback: rollback()
+                if plan.get("resultFingerprint") is not None:
+                    plan.update({"state": "uncertain", "result": {"error": {"code": "execution_outcome_unknown", "message": "Migration outcome is uncertain; reconcile authoritative PostgreSQL state"}}})
+                else:
+                    message = "PostgreSQL plan failed and was rolled back"
+                    if failed_step is not None:
+                        index, step = failed_step
+                        message = f"Migration step {index + 1} failed: {step['action']} {step['objectType']} {step['name']}. All changes were rolled back"
+                    plan.update({"state": "failed", "result": {"error": {"code": "apply_failed", "message": message}}})
+                self._write_ai_plan(plan)
+                raise PostgresServiceError(500 if plan["state"] == "uncertain" else 422, plan["result"]["error"]["code"], plan["result"]["error"]["message"]) from exc
+            finally:
+                close = getattr(cursor, "close", None)
+                if close: close()
+        finally:
+            self._close(connection)
+
+    def _reconcile_ai_migration_locked(self, plan: dict[str, Any]) -> dict[str, Any]:
+        profile = self._profile(plan["profileId"])
+        if self._profile_fingerprint(profile) != plan["profileFingerprint"]:
+            raise ConflictError("profile_changed", "Connection profile changed after preview")
+        live = self.introspect(plan["profileId"], plan["namespace"])
+        if live.get("postgres", {}).get("database") != plan["database"]:
+            raise ConflictError("database_changed", "Connected PostgreSQL database does not match the migration plan")
+        fingerprint = live["postgres"]["fingerprint"]
+        if plan.get("resultFingerprint") is not None and fingerprint == plan["resultFingerprint"]:
+            result = {
+                "kind": "migration_applied", "operationId": plan.get("result", {}).get("operationId"), "planId": plan["id"],
+                "target": {"profileId": plan["profileId"], "database": plan["database"], "namespace": plan["namespace"]},
+                "sourceFingerprint": plan["liveFingerprint"], "resultFingerprint": fingerprint, "destructive": plan["destructive"],
+                "schemaBinding": plan["schemaBinding"], "refreshedSchema": live,
+            }
+            plan.update({"state": "succeeded", "result": result})
+            self._write_ai_plan(plan)
+            return result
+        if fingerprint == plan["liveFingerprint"]:
+            plan.update({"state": "ready", "resultFingerprint": None, "result": None})
+            self._write_ai_plan(plan)
+            raise ConflictError("apply_not_committed", "Migration did not commit; request a fresh preview and explicit confirmation")
+        plan.update({"state": "uncertain", "result": {"error": {"code": "execution_outcome_unknown", "message": "PostgreSQL state matches neither the preview nor intended result"}}})
+        self._write_ai_plan(plan)
+        raise ConflictError("execution_outcome_unknown", "PostgreSQL state matches neither the preview nor intended result")
+
+    def reconcile_ai_migration(self, plan_id: str, profile_id: str) -> dict[str, Any]:
+        profile_id = self._validate_profile_id(profile_id)
+        with self._ai_plan_store_lock():
+            plan = self._read_ai_plan(plan_id)
+            if plan["profileId"] != profile_id:
+                raise NotFoundError("AI migration plan was not found or has expired")
+            if plan["state"] == "succeeded":
+                return copy.deepcopy(plan["result"])
+            if plan["state"] == "failed":
+                error = plan.get("result", {}).get("error", {})
+                raise ConflictError(error.get("code", "plan_consumed"), error.get("message", "AI migration plan failed"))
+            return self._reconcile_ai_migration_locked(plan)
+
+    def update_ai_migration_result(self, plan_id: str, result: dict[str, Any]) -> dict[str, Any]:
+        with self._ai_plan_store_lock():
+            plan = self._read_ai_plan(plan_id)
+            if plan["state"] != "succeeded":
+                raise ConflictError("execution_outcome_unknown", "Migration result cannot be finalized before commit is proven")
+            plan["result"] = copy.deepcopy(result)
+            self._write_ai_plan(plan)
+            return copy.deepcopy(result)
 
     def preview_view_mutation(
         self, profile_id: str, database: str, namespace: str, relation: str,

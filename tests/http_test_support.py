@@ -63,6 +63,11 @@ class FakePostgresService:
     def list_profiles(self):
         return self.profiles
 
+    def profile_context_fingerprint(self, profile_id):
+        profile = next(item for item in self.profiles if item["id"] == profile_id)
+        from schemii.ai_http import ai_context_fingerprint
+        return ai_context_fingerprint([profile_id, profile.get("host"), profile.get("port"), profile.get("dbname"), profile.get("user"), profile.get("sslmode")])
+
     def save_profile(self, profile_id, body):
         self.calls.append(("save_profile", profile_id, body))
         saved = {"id": profile_id or "pg_created", **{key: value for key, value in body.items() if key != "password"}}
@@ -156,9 +161,25 @@ class FakePostgresService:
         self.calls.append(("introspect", profile_id, namespace))
         return {"projectName": "demo.public", "tables": [], "relationships": [], "functions": []}
 
-    def preview(self, profile_id, namespace, schema, allow_destructive):
-        self.calls.append(("preview", profile_id, namespace, schema, allow_destructive))
-        return {"id": "plan_one", "steps": [], "warnings": []}
+    def preview(self, profile_id, namespace, schema, allow_destructive, *, persist=True):
+        self.calls.append(("preview", profile_id, namespace, schema, allow_destructive, persist))
+        return {"id": "plan_one" if persist else None, "previewOnly": not persist, "steps": [], "warnings": []}
+
+    def preview_ai_migration(self, operation_id, profile_id, database, namespace, schema, allow_destructive, schema_binding):
+        self.calls.append(("preview_ai_migration", operation_id, profile_id, database, namespace, schema, allow_destructive, schema_binding))
+        return {"id": None, "previewOnly": True, "applyPlanId": "ai_plan_one", "destructive": False, "steps": [], "warnings": [], "liveFingerprint": "live"}
+
+    def apply_ai_migration(self, operation_id, plan_id, profile_id, database, namespace, expected_destructive, confirm_destructive):
+        self.calls.append(("apply_ai_migration", operation_id, plan_id, profile_id, database, namespace, expected_destructive, confirm_destructive))
+        return {"kind": "migration_applied", "operationId": operation_id, "planId": plan_id, "refreshedSchema": {"projectName": "demo.public", "tables": [], "relationships": [], "functions": []}}
+
+    def reconcile_ai_migration(self, plan_id, profile_id):
+        self.calls.append(("reconcile_ai_migration", plan_id, profile_id))
+        return {"kind": "migration_applied", "planId": plan_id}
+
+    def update_ai_migration_result(self, plan_id, result):
+        self.calls.append(("update_ai_migration_result", plan_id, result))
+        return result
 
     def apply(self, profile_id, plan_id, confirm_destructive):
         self.calls.append(("apply", profile_id, plan_id, confirm_destructive))
