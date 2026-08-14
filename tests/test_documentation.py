@@ -37,6 +37,9 @@ class DocumentationTests(unittest.TestCase):
         self.assertIn("first start downloads", readme)
         self.assertIn("default `ai-docker-db` mode", setup)
         self.assertIn("Do not assume port 8080", setup)
+        self.assertIn("schemii-metadata-postgres", readme)
+        self.assertIn("metadata-migrate", setup)
+        self.assertIn("SCHEMII_METADATA_HOST_PORT", setup)
         self.assertIn("no model request is made until the user sends", assistant)
         for stale in (
             "The default trial starts only Schemii",

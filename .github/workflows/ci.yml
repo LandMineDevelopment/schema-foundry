@@ -62,6 +62,7 @@ jobs:
       - run: docker compose -f compose.yaml -f compose.ai.yaml config
       - run: docker compose -f compose.yaml -f compose.local-db.yaml -f compose.ai.yaml -f compose.ai.local-db.yaml config
       - run: docker compose -f compose.yaml -f compose.postgres.yaml -f compose.ai.yaml config
+      - run: docker compose -f compose.yaml -f compose.postgres.yaml -f compose.schemer.yaml config
       - run: docker compose -f compose.yaml -f compose.postgres.yaml -f compose.ai.yaml -f compose.schemer.yaml -f compose.schemer.ai.yaml config
       - name: Validate embedded OpenCode JSON
         run: python -m json.tool ai/workspace/opencode.json > /dev/null && python -m json.tool ai/schemer-workspace/opencode.json > /dev/null

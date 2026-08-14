@@ -1,0 +1,1 @@
+"""Packaged metadata SQL migrations."""

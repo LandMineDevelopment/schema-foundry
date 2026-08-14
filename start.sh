@@ -74,15 +74,20 @@ fi
 if [[ "$project" == "schemii" ]]; then
   default_port=8080
   default_opencode_port=4096
+  default_metadata_port=5433
 else
   read -r instance_number _ <<< "$(printf '%s' "$project" | cksum)"
   default_port=$((12000 + instance_number % 30000))
   default_opencode_port=$((42000 + instance_number % 20000))
+  default_metadata_port=$((20000 + instance_number % 20000))
 fi
 port="${SCHEMII_HOST_PORT:-$default_port}"
 opencode_port="${SCHEMII_OPENCODE_HOST_PORT:-$default_opencode_port}"
+metadata_port="${SCHEMII_METADATA_HOST_PORT:-$default_metadata_port}"
 project_containers=( $(docker ps -aq --filter "label=com.docker.compose.project=$project" --filter label=com.docker.compose.service=schemii) )
 opencode_containers=( $(docker ps -aq --filter "label=com.docker.compose.project=$project" --filter label=com.docker.compose.service=opencode) )
+metadata_containers=( $(docker ps -aq --filter "label=com.docker.compose.project=$project" --filter label=com.docker.compose.service=metadata-postgres) )
+port_in_use() { (exec 3<>"/dev/tcp/127.0.0.1/$1") >/dev/null 2>&1; }
 if [[ ${#project_containers[@]} -gt 0 && -z "${SCHEMII_HOST_PORT:-}" ]]; then
   existing_port="$(docker inspect --format '{{with index .HostConfig.PortBindings "8080/tcp"}}{{(index . 0).HostPort}}{{end}}' "${project_containers[0]}" 2>/dev/null || true)"
   if [[ -z "$existing_port" ]]; then
@@ -92,7 +97,6 @@ if [[ ${#project_containers[@]} -gt 0 && -z "${SCHEMII_HOST_PORT:-}" ]]; then
   fi
   [[ "$existing_port" =~ ^[0-9]+$ ]] && port="$existing_port"
 elif [[ ${#project_containers[@]} -eq 0 ]]; then
-  port_in_use() { (exec 3<>"/dev/tcp/127.0.0.1/$1") >/dev/null 2>&1; }
   if [[ -z "${SCHEMII_HOST_PORT:-}" ]]; then
     while port_in_use "$port"; do
       port=$((port + 1))
@@ -110,8 +114,18 @@ if [[ ${#opencode_containers[@]} -gt 0 && -z "${SCHEMII_OPENCODE_HOST_PORT:-}" ]
   existing_opencode_port="$(docker inspect --format '{{with index .HostConfig.PortBindings "4096/tcp"}}{{(index . 0).HostPort}}{{end}}' "${opencode_containers[0]}" 2>/dev/null || true)"
   [[ "$existing_opencode_port" =~ ^[0-9]+$ ]] && opencode_port="$existing_opencode_port"
 fi
+if [[ ${#metadata_containers[@]} -gt 0 && -z "${SCHEMII_METADATA_HOST_PORT:-}" ]]; then
+  existing_metadata_port="$(docker inspect --format '{{with index .HostConfig.PortBindings "5432/tcp"}}{{(index . 0).HostPort}}{{end}}' "${metadata_containers[0]}" 2>/dev/null || true)"
+  [[ "$existing_metadata_port" =~ ^[0-9]+$ ]] && metadata_port="$existing_metadata_port"
+elif [[ ${#metadata_containers[@]} -eq 0 && -z "${SCHEMII_METADATA_HOST_PORT:-}" ]]; then
+  while port_in_use "$metadata_port" || [[ "$metadata_port" == "$port" || "$metadata_port" == "$opencode_port" ]]; do
+    metadata_port=$((metadata_port + 1))
+    [[ "$metadata_port" -le 41999 ]] || metadata_port=20000
+  done
+fi
 export SCHEMII_HOST_PORT="$port"
 export SCHEMII_OPENCODE_HOST_PORT="$opencode_port"
+export SCHEMII_METADATA_HOST_PORT="$metadata_port"
 export SCHEMII_IMAGE="${SCHEMII_IMAGE:-schemii:${project}}"
 export SCHEMII_OPENCODE_IMAGE="${SCHEMII_OPENCODE_IMAGE:-schemii-opencode:1.18.15-${project}}"
 compose_base=(docker compose --project-name "$project" --project-directory "$script_dir" -f "$script_dir/compose.yaml")

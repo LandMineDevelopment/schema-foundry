@@ -16,7 +16,7 @@ PowerShell:
 powershell -ExecutionPolicy Bypass -File .\start.ps1
 ```
 
-The default `ai-docker-db` mode includes Schemii, private PostgreSQL, private OpenCode, the linked Mercury Books tutorial, and the local Event Studio design. The launcher prints the instance name and loopback URL. Do not assume port 8080. The current launchers do not start Schemer; use the explicit advanced Compose combinations below when the user requests the dashboard application.
+The default `ai-docker-db` mode includes Schemii, dedicated private metadata PostgreSQL plus its one-shot migrator, private tutorial PostgreSQL, private OpenCode, the linked Mercury Books tutorial, and the local Event Studio design. Every mode includes metadata PostgreSQL; it is not a user target. The launcher prints the instance name and loopback URL. Do not assume port 8080. The current launchers do not start Schemer; use the explicit advanced Compose combinations below when the user requests the dashboard application.
 
 ## Help A User Install Docker
 
@@ -48,7 +48,7 @@ Do not replace a launcher command with partial direct Compose commands. Launcher
 - A generated internal OpenCode credential
 - Per-installation project, image, volume, and port isolation
 - Free-port selection and existing-port reuse
-- PostgreSQL, OpenCode, and Schemii readiness checks
+- Metadata migration, PostgreSQL, OpenCode, and Schemii readiness checks
 - Safe legacy-container reuse and an explicit stop when only ambiguous legacy volumes remain
 
 Rerun the same launcher command to start or update an installation. For Git updates:
@@ -64,7 +64,7 @@ If the launcher finds legacy config and schema volumes without a legacy containe
 
 ## Modes
 
-| Mode | Services | PostgreSQL profile host |
+| Mode | Services | User-target PostgreSQL profile host |
 | --- | --- | --- |
 | Default / `ai-docker-db` | UI, included PostgreSQL, OpenCode | `postgres` |
 | `ui` | UI only | Docker Desktop host: `host.docker.internal` |
@@ -74,6 +74,8 @@ If the launcher finds legacy config and schema volumes without a legacy containe
 | `ai-local-db` | Linux host-network UI and loopback OpenCode | `127.0.0.1` |
 
 Base Compose does not add a Linux `host.docker.internal` mapping. Use a Linux host-network mode for PostgreSQL bound to host loopback. Existing Docker PostgreSQL requires an explicit shared private network override and its service name or network alias.
+
+Metadata PostgreSQL remains private in bridge modes. Linux host-network modes publish it on `127.0.0.1:${SCHEMII_METADATA_HOST_PORT}` (an instance-specific free port selected by the launcher) solely so Schemii can reach it. Do not publish it on a non-loopback address or add it as a saved PostgreSQL profile.
 
 ## Schemer-Enabled Compose
 
@@ -113,8 +115,8 @@ The examples use instance `my-schemii` and loopback ports 18080/18081. Direct Co
 
 Use the instance and URL printed by the launcher.
 
-1. Confirm `schemii`, `postgres`, and `opencode` are healthy in default mode.
-2. Confirm `example-seed` exited with status 0.
+1. Confirm `schemii`, `metadata-postgres`, `postgres`, and `opencode` are healthy in default mode.
+2. Confirm `metadata-migrate` and `example-seed` exited with status 0.
 3. Open the printed URL in a browser.
 4. Verify the affected UI or API behavior.
 
@@ -149,6 +151,7 @@ Launcher-created volumes are scoped under the printed instance:
 - `schemii-config`: profiles, stored passwords, migration history, example state
 - `schemii-schemas`: saved designs and user-owned layout
 - `schemii-postgres`: included database data
+- `schemii-metadata-postgres`: application authority and metadata, separate from user target data
 - `schemii-opencode-data`: provider credentials and chats
 - `schemii-opencode-config` and `schemii-opencode-state`: OpenCode configuration/state
 - `schemii-opencode-cache`: recreatable cache
@@ -160,7 +163,9 @@ List the exact volumes with:
 docker volume ls --filter "label=com.docker.compose.project=<instance>"
 ```
 
-Never run `docker compose down --volumes`, `docker volume rm`, or equivalent destructive commands without explicit approval. Disclose that volume deletion can remove designs, Schemer dashboards, widget configuration, dashboard and canvas layouts, viewport state, profiles/passwords, migration history, PostgreSQL data, provider credentials, chat history, and AI state.
+Never run `docker compose down --volumes`, `docker volume rm`, or equivalent destructive commands without explicit approval. Disclose that volume deletion can remove designs, Schemer dashboards, widget configuration, dashboard and canvas layouts, viewport state, profiles/passwords, migration history, user-target PostgreSQL data, metadata authority/history, provider credentials, chat history, and AI state. Back up metadata separately because it can contain sensitive transient query-result payloads.
+
+The four metadata password variables documented in `README.md` have local-only defaults. Supply secrets through the deployment environment without logging them. They initialize roles only for a new metadata volume; never delete a stable volume or claim a password was rotated merely because an environment value changed.
 
 Schemer AI must join the exact same Compose project and OpenCode service as Schemii. Use `compose.schemer.yaml` with `compose.schemer.ai.yaml`; do not start a second OpenCode service or copy provider credentials. Provider authentication is shared globally, while `/workspace` and `/workspace-schemer` keep application chats, skills, and proposal tools separate.
 

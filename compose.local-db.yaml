@@ -1,5 +1,9 @@
 # Linux-only override for PostgreSQL bound to host loopback.
 services:
+  metadata-postgres:
+    ports:
+      - "127.0.0.1:${SCHEMII_METADATA_HOST_PORT:-5433}:5432"
+
   schemii:
     network_mode: host
     ports: !reset []
@@ -7,5 +11,6 @@ services:
       SCHEMII_HOST: 127.0.0.1
       SCHEMII_PORT: ${SCHEMII_HOST_PORT:-8080}
       SCHEMII_BEHIND_LOOPBACK_PROXY: 0
+      SCHEMII_METADATA_DSN: host=127.0.0.1 port=${SCHEMII_METADATA_HOST_PORT:-5433} dbname=schemii_metadata user=schemii_metadata_schemii
     healthcheck:
       test: ["CMD", "python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ['SCHEMII_PORT'] + '/', timeout=2).read(1)"]

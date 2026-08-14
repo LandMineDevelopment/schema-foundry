@@ -82,6 +82,7 @@ if ($project -cnotmatch '^[a-z0-9][a-z0-9_-]*$') {
 if ($project -eq "schemii") {
     $defaultPort = 8080
     $defaultOpenCodePort = 4096
+    $defaultMetadataPort = 5433
 }
 else {
     $portSha = [System.Security.Cryptography.SHA256]::Create()
@@ -94,6 +95,7 @@ else {
     }
     $defaultPort = 12000 + ($portNumber % 30000)
     $defaultOpenCodePort = 42000 + ($portNumber % 20000)
+    $defaultMetadataPort = 20000 + ($portNumber % 20000)
 }
 function Test-LocalTcpPort([int]$Port) {
     $client = [System.Net.Sockets.TcpClient]::new()
@@ -110,6 +112,7 @@ function Test-LocalTcpPort([int]$Port) {
 }
 $currentInstance = (& docker ps -aq --filter "label=com.docker.compose.project=$project" --filter "label=com.docker.compose.service=schemii" | Select-Object -First 1)
 $currentOpenCode = (& docker ps -aq --filter "label=com.docker.compose.project=$project" --filter "label=com.docker.compose.service=opencode" | Select-Object -First 1)
+$currentMetadata = (& docker ps -aq --filter "label=com.docker.compose.project=$project" --filter "label=com.docker.compose.service=metadata-postgres" | Select-Object -First 1)
 if (-not $env:SCHEMII_HOST_PORT) {
     $selectedPort = $defaultPort
     if ($currentInstance) {
@@ -145,6 +148,21 @@ if (-not $env:SCHEMII_OPENCODE_HOST_PORT) {
         }
     }
     $env:SCHEMII_OPENCODE_HOST_PORT = [string]$selectedOpenCodePort
+}
+if (-not $env:SCHEMII_METADATA_HOST_PORT) {
+    $selectedMetadataPort = $defaultMetadataPort
+    if ($currentMetadata) {
+        $metadataDetails = (& docker inspect $currentMetadata | ConvertFrom-Json)[0]
+        $metadataBinding = $metadataDetails.HostConfig.PortBindings.'5432/tcp'
+        if ($metadataBinding) { $selectedMetadataPort = [int]$metadataBinding[0].HostPort }
+    }
+    else {
+        while ((Test-LocalTcpPort $selectedMetadataPort) -or $selectedMetadataPort -eq [int]$env:SCHEMII_HOST_PORT -or $selectedMetadataPort -eq [int]$env:SCHEMII_OPENCODE_HOST_PORT) {
+            $selectedMetadataPort++
+            if ($selectedMetadataPort -gt 41999) { $selectedMetadataPort = 20000 }
+        }
+    }
+    $env:SCHEMII_METADATA_HOST_PORT = [string]$selectedMetadataPort
 }
 if (-not $env:SCHEMII_IMAGE) { $env:SCHEMII_IMAGE = "schemii:$project" }
 if (-not $env:SCHEMII_OPENCODE_IMAGE) { $env:SCHEMII_OPENCODE_IMAGE = "schemii-opencode:1.18.15-$project" }

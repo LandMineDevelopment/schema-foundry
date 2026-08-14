@@ -5,8 +5,8 @@ services:
       target: schemer-runtime
     image: ${SCHEMER_IMAGE:-schemer:local}
     depends_on:
-      schemii:
-        condition: service_healthy
+      metadata-migrate:
+        condition: service_completed_successfully
     ports:
       - "127.0.0.1:${SCHEMER_HOST_PORT:-8081}:8081"
     environment:
@@ -15,6 +15,9 @@ services:
       SCHEMER_CONFIG_DIR: /data/config
       SCHEMER_DASHBOARD_DIR: /data/dashboards
       SCHEMER_BEHIND_LOOPBACK_PROXY: 1
+      SCHEMII_METADATA_DSN: host=metadata-postgres port=5432 dbname=schemii_metadata user=schemii_metadata_schemer
+      SCHEMII_METADATA_APPLICATION_NAME: schemer
+      PGPASSWORD: ${SCHEMII_METADATA_SCHEMER_PASSWORD:-schemer-metadata-runtime-local}
     volumes:
       - schemii-config:/data/config
       - schemer-dashboards:/data/dashboards

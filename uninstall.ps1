@@ -30,7 +30,7 @@ docker ps -a --filter "label=com.docker.compose.service=schemii" --format '{{.La
     ForEach-Object { if ($_ -cmatch '^[a-z0-9][a-z0-9_-]*$') { [void]$projects.Add($_) } }
 
 $volumeSuffixes = @(
-    "schemii-config", "schemii-schemas", "schemii-postgres",
+    "schemii-config", "schemii-schemas", "schemii-postgres", "schemii-metadata-postgres",
     "schemii-opencode-data", "schemii-opencode-config", "schemii-opencode-state", "schemii-opencode-cache"
 )
 docker volume ls --format '{{.Name}}' | ForEach-Object {

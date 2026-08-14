@@ -40,7 +40,7 @@ while IFS= read -r project; do
 done < <(docker ps -a --filter label=com.docker.compose.service=schemii --format '{{.Label "com.docker.compose.project"}}')
 
 volume_suffixes=(
-  schemii-config schemii-schemas schemii-postgres
+  schemii-config schemii-schemas schemii-postgres schemii-metadata-postgres
   schemii-opencode-data schemii-opencode-config schemii-opencode-state schemii-opencode-cache
 )
 while IFS= read -r volume; do

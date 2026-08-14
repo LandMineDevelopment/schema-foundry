@@ -6,13 +6,13 @@ Durable working notes for `architecture/sustainable-boundaries`. Keep this file 
 
 - **Branch:** `architecture/sustainable-boundaries`
 - **Base checkpoint:** `main` at `692e6e6`, pushed to `origin/main`
-- **Current phase:** Phase 0 — baseline and target design
-- **Next action:** implement the metadata PostgreSQL service, migrator, connection/repository foundation, and disposable integration tests
+- **Current phase:** Phase 1 — metadata PostgreSQL foundation
+- **Next action:** finish authority lifecycle/recovery semantics, then replace JSON `AiAuthority`/`AiChatStore` usage in both servers
 - **Active files:** Compose/launcher files, metadata migration and repository modules, focused metadata tests
-- **Worktree:** durable checklist/notes committed at `23e8f95`; Phase 0 design documents are in progress
+- **Worktree:** Phase 0 architecture is committed; the metadata PostgreSQL foundation is implemented and under final verification
 - **Invariants:** PostgreSQL, not SQLite, for transactional server metadata; browser and OpenCode never execute DB work; exact target/profile role; preserve schema/dashboard layout; stale conflicts fail closed; uncertain writes are never retried blindly
 - **Latest verification before branch creation:** 286 Python tests passed with 5 expected skips; all JavaScript tests and syntax checks passed; `git diff --check` passed; live Schemii container was rebuilt and healthy
-- **Blockers:** none
+- **Blockers:** none; application startup is not yet wired to the repository, so this branch is not ready for cutover
 
 ## Decisions
 
@@ -104,12 +104,23 @@ Critical transaction boundaries:
 - Selected archive/reset rather than ambiguous executable-authority import.
 - Defined transactional authority and migration boundaries above.
 
+### Phase 1 metadata PostgreSQL foundation
+
+- Added a dedicated metadata PostgreSQL service, volume, bootstrap roles, checksummed migrator gate, and runtime DSNs in all Compose modes.
+- Added the packaged `schemii.metadata_migrate` entry point and exact-prefix migration-ledger validation.
+- Added normalized metadata tables and a transactional repository foundation for policy, operation, and query-result workflows.
+- Enforced Schemii/Schemer row isolation in PostgreSQL with runtime-role-derived RLS and denied runtime mutation of the migration ledger.
+- Hardened repository validation, proposal expiry checks, policy/authorization lock ordering, active-chat result creation, payload scrubbing, and ambiguous commit reporting.
+- Application server integration, lease/reconciliation behavior, transition audit writes, and durable migration execution remain subsequent work.
+
 ## Verification log
 
 - Pre-branch full Python: 286 passed, 5 skipped.
 - Pre-branch all `tests/test_*.js`: passed.
 - Pre-branch Python compile, JavaScript syntax, and `git diff --check`: passed.
 - Live `schemii-schemii-1`: rebuilt from checkpoint worktree and healthy on `127.0.0.1:8080`.
+- Metadata-focused unit/Compose checks: 20 passed after reconciliation.
+- Disposable PostgreSQL integration: built the wheel-backed image, bootstrapped roles, applied migration 1, verified runtime migration-ledger writes are denied, verified Schemii rows are invisible to Schemer, reran migrations after restart, and confirmed metadata persisted.
 
 ## Open risks
 
@@ -118,3 +129,5 @@ Critical transaction boundaries:
 - Metadata DB outage must not accidentally fall back to weaker JSON authority.
 - Prototype migration from existing JSON authority/chat state needs an explicit decision: import, archive, or reset.
 - Normal migration and AI migration consolidation must preserve layout synchronization and stale-catalog guarantees.
+- Runtime metadata credentials still use development defaults and environment injection; production-grade per-instance secret generation/storage is unresolved.
+- Operation lease takeover and uncertain token-returning commits need explicit idempotency/reconciliation design before authority cutover.

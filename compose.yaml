@@ -1,6 +1,48 @@
 name: ${SCHEMII_INSTANCE:-schemii}
 
 services:
+  metadata-postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: schemii_metadata
+      POSTGRES_USER: schemii_metadata_bootstrap
+      POSTGRES_PASSWORD: ${SCHEMII_METADATA_BOOTSTRAP_PASSWORD:-schemii-metadata-bootstrap-local}
+      SCHEMII_METADATA_MIGRATION_PASSWORD: ${SCHEMII_METADATA_MIGRATION_PASSWORD:-schemii-metadata-migration-local}
+      SCHEMII_METADATA_SCHEMII_PASSWORD: ${SCHEMII_METADATA_SCHEMII_PASSWORD:-schemii-metadata-runtime-local}
+      SCHEMII_METADATA_SCHEMER_PASSWORD: ${SCHEMII_METADATA_SCHEMER_PASSWORD:-schemer-metadata-runtime-local}
+    volumes:
+      - schemii-metadata-postgres:/var/lib/postgresql/data
+      - ./docker/metadata/001_roles.sh:/docker-entrypoint-initdb.d/001_roles.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U schemii_metadata_migration -d $$POSTGRES_DB"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s
+    restart: unless-stopped
+
+  metadata-migrate:
+    build:
+      context: .
+      target: schemii-runtime
+    image: ${SCHEMII_IMAGE:-schemii:local}
+    command: ["python", "-m", "schemii.metadata_migrate"]
+    environment:
+      SCHEMII_METADATA_DSN: host=metadata-postgres port=5432 dbname=schemii_metadata user=schemii_metadata_migration options='-c role=schemii_metadata_owner'
+      SCHEMII_METADATA_APPLICATION_NAME: schemii-metadata-migrate
+      PGPASSWORD: ${SCHEMII_METADATA_MIGRATION_PASSWORD:-schemii-metadata-migration-local}
+    depends_on:
+      metadata-postgres:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
   schemii:
     build:
       context: .
@@ -14,6 +56,12 @@ services:
       SCHEMII_SCHEMA_DIR: /data/schemas
       SCHEMII_BEHIND_LOOPBACK_PROXY: 1
       SCHEMII_EXAMPLES: local
+      SCHEMII_METADATA_DSN: host=metadata-postgres port=5432 dbname=schemii_metadata user=schemii_metadata_schemii
+      SCHEMII_METADATA_APPLICATION_NAME: schemii
+      PGPASSWORD: ${SCHEMII_METADATA_SCHEMII_PASSWORD:-schemii-metadata-runtime-local}
+    depends_on:
+      metadata-migrate:
+        condition: service_completed_successfully
     volumes:
       - schemii-config:/data/config
       - schemii-schemas:/data/schemas
@@ -33,5 +81,6 @@ services:
     restart: on-failure
 
 volumes:
+  schemii-metadata-postgres:
   schemii-config:
   schemii-schemas:

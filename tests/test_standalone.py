@@ -240,16 +240,39 @@ esac
             self.assertIn("SCHEMII_INSTANCE", source)
             self.assertIn("--project-name", source)
             self.assertIn("SCHEMII_HOST_PORT", source)
+            self.assertIn("SCHEMII_METADATA_HOST_PORT", source)
             self.assertIn("Legacy Schemii data volumes were found", source)
         self.assertIn("service_completed_successfully", postgres_compose)
         self.assertIn("/seed/001_bookstore.sql:ro", postgres_compose)
         self.assertIn("SCHEMII_EXAMPLES: all", postgres_compose)
 
+    def test_metadata_postgres_is_dedicated_migrated_and_role_scoped(self):
+        compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
+        local = (ROOT / "compose.local-db.yaml").read_text(encoding="utf-8")
+        schemer = (ROOT / "compose.schemer.yaml").read_text(encoding="utf-8")
+        roles = (ROOT / "docker/metadata/001_roles.sh").read_text(encoding="utf-8")
+        package = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+        self.assertIn("schemii-metadata-postgres:/var/lib/postgresql/data", compose)
+        self.assertIn('["python", "-m", "schemii.metadata_migrate"]', compose)
+        self.assertIn("service_completed_successfully", compose)
+        self.assertNotRegex(compose, r'(?m)^    ports:.*\n(?:.*\n){0,3}.*metadata-postgres')
+        self.assertIn('127.0.0.1:${SCHEMII_METADATA_HOST_PORT:-5433}:5432', local)
+        self.assertIn("host=127.0.0.1 port=${SCHEMII_METADATA_HOST_PORT:-5433}", local)
+        self.assertIn("schemii_metadata_schemii", compose)
+        self.assertIn("schemii_metadata_schemer", schemer)
+        self.assertIn("schemii_metadata_owner NOLOGIN", roles)
+        self.assertIn("options='-c role=schemii_metadata_owner'", compose)
+        self.assertIn("ALTER DEFAULT PRIVILEGES FOR ROLE schemii_metadata_owner", roles)
+        self.assertNotIn("postgresql://schemii_metadata_", compose + schemer + local)
+        self.assertIn("metadata/migrations/*.sql", package)
+
     def test_compose_allows_a_clean_browser_shutdown_to_remain_stopped(self):
         compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
 
-        self.assertIn("restart: on-failure", compose)
-        self.assertNotIn("restart: unless-stopped", compose)
+        schemii_service = compose.split("  schemii:\n", 1)[1].split("\nvolumes:", 1)[0]
+        self.assertIn("restart: on-failure", schemii_service)
+        self.assertNotIn("restart: unless-stopped", schemii_service)
 
     def test_schemer_is_a_separate_service_with_shared_profiles(self):
         compose = (ROOT / "compose.schemer.yaml").read_text(encoding="utf-8")

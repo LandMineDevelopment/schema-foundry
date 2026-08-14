@@ -73,11 +73,12 @@ No account is required to start Schemii. Anonymous AI models may be available, b
 The no-argument launcher starts:
 
 - Schemii UI and local API
+- A dedicated private PostgreSQL 17 metadata database and one-shot schema migrator
 - A private PostgreSQL 17 tutorial database
 - A private OpenCode agent sidecar
 - A one-shot tutorial seed service
 
-Only the Schemii UI is published to host loopback. PostgreSQL and OpenCode are not exposed to the LAN.
+Only the Schemii UI is published to host loopback. Both PostgreSQL services and OpenCode are private in bridge modes. Linux host-network modes publish metadata PostgreSQL only to an instance-specific host-loopback port so the host-network Schemii process can reach it; it is never bound to the LAN.
 
 ### Other Modes
 
@@ -169,7 +170,7 @@ To run both applications with one shared OpenCode service, set `SCHEMII_OPENCODE
 docker compose -f compose.yaml -f compose.postgres.yaml -f compose.ai.yaml -f compose.schemer.yaml -f compose.schemer.ai.yaml up --build -d
 ```
 
-With the example overrides above, open Schemii at `http://127.0.0.1:18080/` and Schemer at `http://127.0.0.1:18081/`; without overrides, direct Compose defaults to ports 8080 and 8081. Saved PostgreSQL profiles are shared through the same instance-scoped `schemii-config` volume; passwords remain server-side and are never returned to either browser. Versioned dashboard records are stored separately in the owner-only `schemer-dashboards` volume and survive container replacement or restart. Deleting that volume permanently deletes the saved dashboards. Direct native launches use `SCHEMER_DASHBOARD_DIR`, which defaults to `~/.local/share/schemer/dashboards`.
+With the example overrides above, open Schemii at `http://127.0.0.1:18080/` and Schemer at `http://127.0.0.1:18081/`; without overrides, direct Compose defaults to ports 8080 and 8081. The applications share the dedicated metadata service but connect as distinct runtime roles; `metadata-migrate` must finish successfully before either application starts. Saved PostgreSQL profiles are shared through the same instance-scoped `schemii-config` volume; passwords remain server-side and are never returned to either browser. Versioned dashboard records are stored separately in the owner-only `schemer-dashboards` volume and survive container replacement or restart. Deleting that volume permanently deletes the saved dashboards. Direct native launches use `SCHEMER_DASHBOARD_DIR`, which defaults to `~/.local/share/schemer/dashboards`.
 
 Schemer saves edits automatically using revision checks. If another browser tab saves the same dashboard first, the stale tab is blocked rather than overwriting the newer record and must reload the current dashboard.
 
@@ -218,6 +219,7 @@ The default stack stores data in instance-scoped Docker volumes:
 - `schemii-config`: PostgreSQL profiles, stored profile passwords, migration history, and example state
 - `schemii-schemas`: saved designs and canvas layouts
 - `schemii-postgres`: included PostgreSQL data
+- `schemii-metadata-postgres`: server authority, migration records, and other application metadata; independent from every user-selected target database
 - `schemii-opencode-data`: provider credentials and chat sessions
 - `schemii-opencode-config` and `schemii-opencode-state`: OpenCode configuration and state
 - `schemii-opencode-cache`: recreatable cache
@@ -229,7 +231,7 @@ List the exact volumes for the launcher-printed instance:
 docker volume ls --filter "label=com.docker.compose.project=<instance>"
 ```
 
-Back up the config, schemas, Schemer dashboards, PostgreSQL database, and non-cache OpenCode volumes before upgrades or migration work. Use `pg_dump` for important PostgreSQL data.
+Back up the config, schemas, Schemer dashboards, both PostgreSQL databases, and non-cache OpenCode volumes before upgrades or migration work. Use `pg_dump` for important PostgreSQL data. Metadata can contain sensitive authority history and transient query-result payloads, so protect and retain its backups separately from user target backups.
 
 Database backup on Linux/macOS, using the printed instance:
 
@@ -245,7 +247,7 @@ $postgresId = docker ps -q --filter "label=com.docker.compose.project=<instance>
 docker exec $postgresId pg_dump -U schemii -d schemii > schemii-postgres.sql
 ```
 
-If `.env` changes the user or database, substitute those values. To archive a stopped named volume, repeat this command for `<instance>_schemii-config`, `<instance>_schemii-schemas`, `<instance>_schemer-dashboards` when present, `<instance>_schemii-opencode-data`, `<instance>_schemii-opencode-config`, and `<instance>_schemii-opencode-state`:
+If `.env` changes the user or database, substitute those values. Back up metadata with `pg_dump` from the `metadata-postgres` container using the configured migration role; do not expose its port merely to perform a backup. To archive a stopped named volume, repeat this command for `<instance>_schemii-config`, `<instance>_schemii-schemas`, `<instance>_schemer-dashboards` when present, `<instance>_schemii-opencode-data`, `<instance>_schemii-opencode-config`, and `<instance>_schemii-opencode-state`:
 
 ```bash
 docker run --rm -v <volume-name>:/source:ro -v "$PWD":/backup alpine:3.20 tar -czf /backup/<volume-name>.tgz -C /source .
@@ -254,6 +256,8 @@ docker run --rm -v <volume-name>:/source:ro -v "$PWD":/backup alpine:3.20 tar -c
 On PowerShell, replace `"$PWD"` with an absolute directory accepted by Docker Desktop. Keep backups outside the installation directory before replacing source files.
 
 Never run `docker compose down --volumes` or remove project volumes unless permanent deletion is intended. Doing so can delete saved designs, Schemer dashboards and widget layouts, profiles and passwords, migration history, PostgreSQL data, provider credentials, chats, and AI state.
+
+Metadata role passwords have local-development defaults and may be overridden with `SCHEMII_METADATA_BOOTSTRAP_PASSWORD`, `SCHEMII_METADATA_MIGRATION_PASSWORD`, `SCHEMII_METADATA_SCHEMII_PASSWORD`, and `SCHEMII_METADATA_SCHEMER_PASSWORD` before the first start. Do not put production secrets in committed files or command output. PostgreSQL initialization variables apply only when `schemii-metadata-postgres` is first created; changing them later does not rotate roles in an existing volume and requires a coordinated in-database rotation plus matching application configuration. Never delete the metadata volume merely to change a credential.
 
 To remove only the included PostgreSQL database, stop the instance, remove only `<instance>_schemii-postgres`, and use explicit `ui` or `ai` mode afterward. The default launcher recreates and reseeds a missing included database.
 
