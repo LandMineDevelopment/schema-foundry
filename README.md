@@ -398,6 +398,8 @@ Direct Compose operation is advanced. It does not derive an instance or free por
 
 Migration apply, view mutation, and Mercury seed writes use the same database-local, namespace-scoped PostgreSQL advisory transaction lock. This serializes Schemii and seed changes to `bookstore`; each transaction has a 5-second lock timeout and 30-second statement timeout by default. Apply also uses stale-plan fingerprints and one transaction, and failed steps roll back. Partitioned tables can be introspected but require manual migrations.
 
+Apply-capable normal, view, and AI plans are UUID records in metadata PostgreSQL, not browser documents, process memory, or executable JSON files. Confirmation is persisted before target connection; target identity and `pg_current_xact_id()` are persisted before mutation; and the intended result is persisted before commit. A lost commit acknowledgement or interrupted `applying` execution is reconciled with `pg_xact_status` without replay. A committed transaction without a persisted intended result remains explicitly uncertain and requires manual inspection; it is never promoted to success automatically. PostgreSQL commit state remains `succeeded` when later saved-schema synchronization is pending, conflicted, or failed. Terminal private execution payloads have an explicit 30-day retention window and are then redacted by metadata cleanup.
+
 ## Developer Setup
 
 End users do not need this section. Contributors need Python 3.10 or newer and Node.js in addition to Docker.

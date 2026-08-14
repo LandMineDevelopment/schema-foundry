@@ -5378,10 +5378,12 @@ async function previewPostgresMigration() {
   setPostgresBusy(true, "Comparing the design with PostgreSQL...");
   try {
     await flushPendingSave();
+    const record = schemaLibrary.schemas.find(item => item.id === activeSchemaId);
+    if (!record || !Number.isInteger(record.revision) || typeof record.layoutToken !== "string") throw new Error("The saved schema binding is unavailable");
     postgresState.schemaSnapshot = JSON.stringify(schema);
     postgresState.plan = await postgresRequest(`/api/postgres/profiles/${encodeURIComponent(postgresState.selectedProfileId)}/preview`, {
       method: "POST",
-      body: JSON.stringify({ namespace: postgresState.namespace, schema, allowDestructive: elements.includeDestructive.checked })
+      body: JSON.stringify({ schemaId: activeSchemaId, expectedRevision: record.revision, layoutToken: record.layoutToken, namespace: postgresState.namespace, allowDestructive: elements.includeDestructive.checked })
     });
     postgresState.previewOnly = false;
     renderMigrationPreview();
@@ -5409,19 +5411,18 @@ async function applyPostgresMigration() {
   }
   if (postgresState.plan.destructive && !elements.confirmDestructive.checked) return showToast("Confirm the destructive migration first");
   const targetSchemaId = activeSchemaId;
-  const targetSchema = clone(schema);
   const targetSnapshot = postgresState.schemaSnapshot;
   setPostgresBusy(true);
   elements.applyMigrationButton.textContent = "Applying...";
   let databaseApplied = false;
   try {
-    const refreshed = migrateSchema(await postgresRequest(`/api/postgres/profiles/${encodeURIComponent(postgresState.selectedProfileId)}/plans/${encodeURIComponent(postgresState.plan.id)}/apply`, {
+    const result = await postgresRequest(`/api/postgres/profiles/${encodeURIComponent(postgresState.selectedProfileId)}/plans/${encodeURIComponent(postgresState.plan.id)}/apply`, {
       method: "POST",
-      body: JSON.stringify({ confirmDestructive: elements.confirmDestructive.checked })
-    }));
+      body: JSON.stringify({ reviewDigest: postgresState.plan.reviewDigest, confirmDestructive: elements.confirmDestructive.checked })
+    });
     databaseApplied = true;
-    const merged = preserveTableLayout(refreshed, targetSchema);
-    merged.projectName = targetSchema.projectName;
+    if (result.state === "uncertain") throw new Error("PostgreSQL commit outcome is uncertain. Reconcile this execution before retrying");
+    if (result.state !== "succeeded") throw new Error("Migration did not succeed");
     postgresState.plan = null;
     postgresState.schemaSnapshot = null;
     elements.databaseDriftBanner.hidden = true;
@@ -5431,25 +5432,14 @@ async function applyPostgresMigration() {
       showToast("Database updated; local edits still need reconciliation");
       return;
     }
-    try {
-      await persistSchemaRecord(targetSchemaId, merged);
-    } catch (error) {
+    const sync = result.execution?.sync;
+    if (sync?.state !== "succeeded") {
       elements.migrationWarnings.hidden = false;
-      elements.migrationWarnings.textContent = `PostgreSQL was updated, but the local design could not be saved: ${error.message}`;
-      if (activeSchemaId === targetSchemaId) {
-        schema = merged;
-        render();
-      }
-      showToast("Database updated; local design save needs attention");
-      return;
+      elements.migrationWarnings.textContent = "PostgreSQL committed, but saved-schema synchronization needs attention. The migration will not be replayed.";
     }
-    if (activeSchemaId === targetSchemaId) {
-      schema = merged;
-      render();
-    }
+    if (activeSchemaId === targetSchemaId) await reloadActiveSchemaRecord();
     elements.migrationDialog.close();
-    const warning = refreshed.postgres?.refreshWarning || refreshed.postgres?.historyWarning;
-    showToast(warning ? warning : "PostgreSQL migration applied successfully");
+    showToast(sync?.state === "succeeded" ? "PostgreSQL migration applied successfully" : "PostgreSQL committed; saved schema sync needs attention");
   } catch (error) {
     elements.migrationWarnings.hidden = false;
     elements.migrationWarnings.textContent = databaseApplied ? `PostgreSQL was updated, but local synchronization failed: ${error.message}` : error.message;
@@ -7307,17 +7297,22 @@ elements.prototypeViewCommitForm.addEventListener("submit", async event => {
   let databaseApplied = false;
   try {
     const binding = activeViewsBinding();
-    const result = await postgresRequest(`/api/postgres/profiles/${encodeURIComponent(binding.profileId)}/view-plans/${encodeURIComponent(pending.plan.id)}/apply`, { method: "POST", body: JSON.stringify({ confirmDestructive }) });
-    if (!result?.applied || !result.schemaSync || !["upsert", "delete"].includes(result.operation) || (result.operation === "upsert" ? !result.descriptor : !result.deleted)) throw new Error("PostgreSQL returned an invalid view apply result");
+    const status = await postgresRequest(`/api/postgres/profiles/${encodeURIComponent(binding.profileId)}/view-plans/${encodeURIComponent(pending.plan.id)}/apply`, { method: "POST", body: JSON.stringify({ reviewDigest: pending.plan.reviewDigest, confirmDestructive }) });
+    const intended = status.execution?.intendedResult;
+    const syncRecord = status.execution?.sync;
+    const result = intended?.operation === "upsert"
+      ? { operation: "upsert", descriptor: intended.descriptor, schemaSync: syncRecord?.receipt }
+      : { operation: "delete", deleted: { relation: intended?.relation, kind: intended?.deletedKind }, schemaSync: syncRecord?.receipt };
+    if (status.state !== "succeeded" || !syncRecord || !["upsert", "delete"].includes(result.operation) || (result.operation === "upsert" ? !result.descriptor : !result.deleted)) throw new Error("PostgreSQL returned an invalid durable view result");
     databaseApplied = true;
     elements.prototypeViewCommitDialog.close();
     viewsPrototypeState.pendingPlan = null;
-    if (result.schemaSync.status === "conflict") {
+    if (syncRecord.state === "conflict") {
       showToast("PostgreSQL committed, but the saved schema changed. Refreshing the schema; the plan will not be retried");
       await reloadActiveSchemaRecord();
       return loadViewsCatalog({ preserveSelection: true });
     }
-    if (result.schemaSync.status === "storage_error") {
+    if (syncRecord.state === "failed") {
       showToast("PostgreSQL committed, but the saved schema could not be synchronized. Refreshing; the plan will not be retried");
       await reloadActiveSchemaRecord();
       return loadViewsCatalog({ preserveSelection: false });

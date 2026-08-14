@@ -141,6 +141,37 @@ class SchemaStoreTests(unittest.TestCase):
         changed["schema"]["tables"][0]["x"] = 3
         self.assertNotEqual(schema_layout_token(original), schema_layout_token(changed))
 
+    def test_full_migration_sync_preserves_parsed_layout_and_legacy_visuals_exactly(self):
+        original = record("schema_one")
+        original["schema"].update({
+            "postgres": {"sourceProfileId": "local", "database": "demo", "namespace": "public"},
+            "layout": {"version": 2, "layers": {
+                "tables": {"objects": {"table_events": {"x": 901, "y": 73, "color": "#123456"}}, "viewport": {"x": 8, "y": 9, "zoom": .75}},
+                "views": {"objects": {}, "viewport": {"x": 3, "y": 4, "zoom": 1.2}},
+            }},
+            "tables": [{"id": "table_events", "name": "events", "namespace": "public", "x": 901, "y": 73,
+                        "color": "#123456", "columns": [{"id": "column_id", "name": "id"}]}],
+        })
+        saved = self.store.save("schema_one", original, expected_layout_token=None, layout_protocol=None)
+        before = self.store.get("schema_one")
+        layout_snapshot = json.loads(json.dumps(before["schema"]["layout"]))
+        legacy_snapshot = {key: before["schema"]["tables"][0][key] for key in ("x", "y", "color")}
+        refreshed = {
+            "projectName": "ignored", "relationships": [], "functions": [], "views": [],
+            "postgres": {"sourceProfileId": "local", "database": "demo", "namespace": "public", "fingerprint": "a" * 64},
+            "tables": [{"id": "generated", "name": "events", "namespace": "public", "x": 100, "y": 100,
+                        "color": "#ffffff", "columns": [{"id": "generated_column", "name": "id"}],
+                        "postgres": {"liveOid": 42}}],
+        }
+        result = self.store.sync_full_migration_result(
+            "schema_one", saved["revision"], saved["layoutToken"], refreshed,
+            "12345678-1234-4123-8123-123456789abc",
+        )
+        after = self.store.get("schema_one")
+        self.assertEqual(result["status"], "saved")
+        self.assertEqual(after["schema"]["layout"], layout_snapshot)
+        self.assertEqual({key: after["schema"]["tables"][0][key] for key in ("x", "y", "color")}, legacy_snapshot)
+
     def test_v2_table_view_and_viewport_replacements_require_layout_token(self):
         original = record("schema_one")
         original["schema"]["layout"] = {

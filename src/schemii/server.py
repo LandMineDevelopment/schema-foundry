@@ -14,6 +14,7 @@ from .ai_actions import normalize_schemii_action, schemii_action_approval_floor,
 from .ai_schema_mutations import apply_schema_actions, destructive_impact
 from .ai_http import AiHttpRouter, authority_call, bounded_ai_query_result, issue_ai_proposals
 from .metadata import MetadataConfig, MetadataConnectionFactory, MetadataStore, MetadataStoreError
+from .migration_execution import DurableMigrationCoordinator
 from .examples import ExampleInstaller, installer_from_environment
 from .http_common import CONTENT_SECURITY_POLICY, MAX_BODY_SIZE, is_local_request as _is_local_request, make_local_app_handler
 from .opencode_service import OpenCodeService, OpenCodeServiceError
@@ -37,6 +38,9 @@ AI_CONTEXT_SIZE = 64 * 1024
 APPLY_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/plans/([A-Za-z0-9_-]+)/apply$")
 VIEW_PREVIEW_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/views/preview$")
 VIEW_APPLY_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/view-plans/([A-Za-z0-9_-]+)/apply$")
+MIGRATION_PLAN_STATUS_PATH = re.compile(r"^/api/postgres/migration-plans/([0-9a-f-]{36})/status$")
+MIGRATION_EXECUTION_STATUS_PATH = re.compile(r"^/api/postgres/migration-executions/([0-9a-f-]{36})/status$")
+MIGRATION_RECONCILE_PATH = re.compile(r"^/api/postgres/migration-executions/([0-9a-f-]{36})/reconcile$")
 AI_SCHEMA_MUTATION_TYPES = {"populate_schema", "add_table", "rename_table", "add_column", "update_column", "delete_element", "add_relationship"}
 AI_PERMISSION_ORDER = ("schema", "structured", "write", "rawread", "rawwrite")
 AI_ACCESS_LEVELS = {"metadata", "data", "schema-data", "schema-read-write"} | {
@@ -282,10 +286,12 @@ def make_handler(
     *,
     server_id: str,
     ai_authority: SchemiiMetadataAuthority,
+    migration_coordinator: DurableMigrationCoordinator | None = None,
     ai_service: OpenCodeService | None = None,
     example_installer: ExampleInstaller | None = None,
     behind_loopback_proxy: bool = False,
 ):
+    migration_coordinator = migration_coordinator or getattr(service, "_migration_coordinator", None)
     base_handler = make_local_app_handler(
         web_dir, service, session_token, server_id=server_id, behind_loopback_proxy=behind_loopback_proxy,
     )
@@ -450,6 +456,14 @@ def make_handler(
                     return self.send_json(error.status, {"ready": False, **error.to_dict()})
             if self._handle_common_get(path) or self._handle_postgres_get(parsed):
                 return
+            plan_status = MIGRATION_PLAN_STATUS_PATH.fullmatch(path)
+            execution_status = MIGRATION_EXECUTION_STATUS_PATH.fullmatch(path)
+            if plan_status or execution_status:
+                if not self._authorize_postgres():
+                    return
+                if migration_coordinator is None:
+                    return self.send_json(503, {"error": {"code": "durable_migrations_unavailable", "message": "Durable migration metadata is unavailable"}})
+                return self._service_call(lambda: migration_coordinator.status(plan_status.group(1)) if plan_status else migration_coordinator.execution_status(execution_status.group(1)))
             if path == "/api/schemas":
                 if not self._authorize_local_api("Schema API", "Schema API session token is missing or invalid"):
                     return
@@ -476,6 +490,16 @@ def make_handler(
 
         def do_POST(self):
             path = urlparse(self.path).path
+            reconcile_match = MIGRATION_RECONCILE_PATH.fullmatch(path)
+            if reconcile_match:
+                if not self._authorize_postgres():
+                    return
+                body = self._body_or_error()
+                if body != {}:
+                    return self.send_json(400, {"error": {"code": "validation_error", "message": "Reconcile request fields are invalid"}})
+                if migration_coordinator is None:
+                    return self.send_json(503, {"error": {"code": "durable_migrations_unavailable", "message": "Durable migration metadata is unavailable"}})
+                return self._service_call(lambda: migration_coordinator.reconcile(reconcile_match.group(1)))
             if path == "/api/shutdown":
                 if not self._authorize_shutdown():
                     return
@@ -503,7 +527,13 @@ def make_handler(
             if body is None:
                 return
             if apply_match:
-                return self._service_call(lambda: service.apply(apply_match.group(1), apply_match.group(2), body.get("confirmDestructive", False)))
+                if not isinstance(body, dict) or set(body) != {"reviewDigest", "confirmDestructive"}:
+                    return self.send_json(400, {"error": {"code": "validation_error", "message": "Migration apply request fields are invalid"}})
+                if migration_coordinator is None:
+                    return self.send_json(503, {"error": {"code": "durable_migrations_unavailable", "message": "Durable migration metadata is unavailable"}})
+                return self._service_call(lambda: migration_coordinator.apply(
+                    apply_match.group(2), body["reviewDigest"], body["confirmDestructive"], expected_profile_id=apply_match.group(1),
+                ))
             if view_preview_match:
                 common_fields = {
                     "schemaId", "expectedSchemaRevision", "layoutToken", "database", "namespace",
@@ -518,53 +548,34 @@ def make_handler(
                         view_preview_match.group(1), body["database"], body["namespace"], body["relation"],
                         body["operation"], body["expectation"],
                     )
-                    return service.preview_view_mutation(
+                    if migration_coordinator is None:
+                        raise PostgresServiceError(503, "durable_migrations_unavailable", "Durable migration metadata is unavailable")
+                    return migration_coordinator.preview_view(
                         view_preview_match.group(1), body["database"], body["namespace"], body["relation"],
                         body["operation"], body["expectation"], body.get("desired"), body["allowDestructive"], {
-                            "schemaId": body["schemaId"], "expectedSchemaRevision": body["expectedSchemaRevision"],
+                            "schemaId": body["schemaId"], "revision": body["expectedSchemaRevision"],
                             "layoutToken": body["layoutToken"], "savedViewId": saved_binding["savedViewId"],
                         },
                     )
 
                 return self._view_mutation_call(preview_view)
             if view_apply_match:
-                if not isinstance(body, dict) or set(body) != {"confirmDestructive"}:
+                if not isinstance(body, dict) or set(body) != {"reviewDigest", "confirmDestructive"}:
                     return self.send_json(400, {"error": {"code": "validation_error", "message": "View apply request fields are invalid"}})
 
-                def apply_view():
-                    profile_id = view_apply_match.group(1)
-                    plan_id = view_apply_match.group(2)
-                    target = service.view_mutation_binding(profile_id, plan_id)
-                    binding = target["schemaBinding"]
-                    with store.reserve_view_mutation_binding(
-                        binding["schemaId"], binding["expectedSchemaRevision"], binding["layoutToken"],
-                        profile_id, target["database"], target["namespace"], target["relation"],
-                        target["operation"], target["expectation"], binding.get("savedViewId"),
-                    ):
-                        result = service.apply_view_mutation(profile_id, plan_id, body["confirmDestructive"])
-                        result.pop("schemaBinding")
-                        expected_absent = result.pop("expectedAbsent")
-                        operation = result["operation"]
-                        descriptor = result.get("descriptor")
-                        identity = descriptor or result["deleted"]
-                        definition = result.pop("desiredDefinition", None)
-                        query_definition = result.pop("queryDefinition", None)
-                        try:
-                            result["schemaSync"] = store.sync_view_after_mutation(
-                                binding["schemaId"], binding["expectedSchemaRevision"], binding["layoutToken"],
-                                profile_id, identity["database"], identity["namespace"], identity["relation"],
-                                identity["kind"], definition, query_definition, descriptor["fingerprint"] if descriptor else None,
-                                operation=operation, expected_absent=expected_absent, saved_view_id=binding.get("savedViewId"),
-                            )
-                        except SchemaStoreError as error:
-                            status = "conflict" if error.status == 409 else "storage_error"
-                            result["schemaSync"] = {"status": status, **error.payload["error"]}
-                        return result
-
-                return self._view_mutation_call(apply_view)
+                if migration_coordinator is None:
+                    return self.send_json(503, {"error": {"code": "durable_migrations_unavailable", "message": "Durable migration metadata is unavailable"}})
+                return self._view_mutation_call(lambda: migration_coordinator.apply(
+                    view_apply_match.group(2), body["reviewDigest"], body["confirmDestructive"], expected_profile_id=view_apply_match.group(1),
+                ))
             profile_id, action = profile_match.groups()
-            return self._service_call(lambda: service.preview(
-                profile_id, body.get("namespace"), body.get("schema"), body.get("allowDestructive", False)
+            required = {"schemaId", "expectedRevision", "layoutToken", "namespace", "allowDestructive"}
+            if not isinstance(body, dict) or set(body) != required:
+                return self.send_json(400, {"error": {"code": "validation_error", "message": "Migration preview request fields are invalid"}})
+            if migration_coordinator is None:
+                return self.send_json(503, {"error": {"code": "durable_migrations_unavailable", "message": "Durable migration metadata is unavailable"}})
+            return self._service_call(lambda: migration_coordinator.preview_full(
+                profile_id, body["namespace"], body["schemaId"], body["expectedRevision"], body["layoutToken"], body["allowDestructive"],
             ))
 
         def _view_mutation_call(self, callback):
@@ -758,29 +769,6 @@ def make_handler(
                                 raise SchemaStoreError(409, "operation_not_applied", "No created-project receipt exists for this operation")
                         else:
                             return {"operation": current}
-                        if action["type"] == "migration_apply" and "schemaSync" not in result:
-                            operation_binding = proposal["schemaConcurrency"]
-                            try:
-                                result["schemaSync"] = store.sync_ai_migration_result(
-                                    chat["schemaId"], operation_binding["revision"], operation_binding["layoutToken"], result["refreshedSchema"],
-                                )
-                            except SchemaStoreError as error:
-                                raise PostgresServiceError(
-                                    500, "execution_outcome_unknown",
-                                    "PostgreSQL committed, but the saved design could not be synchronized; reconcile authoritative state",
-                                ) from error
-                            result.pop("refreshedSchema", None)
-                            result = service.update_ai_migration_result(action["planId"], result)
-                        elif action["type"] == "postgres_write_apply" and action["writeKind"] == "create_view" and "schemaSync" not in result:
-                            operation_binding = proposal["schemaConcurrency"]
-                            descriptor = result["descriptor"]
-                            result["schemaSync"] = store.sync_view_after_mutation(
-                                chat["schemaId"], operation_binding["revision"], operation_binding["layoutToken"],
-                                action["profileId"], action["database"], action["namespace"], action["relation"],
-                                descriptor["kind"], result["desiredDefinition"], result.get("queryDefinition"), descriptor["fingerprint"],
-                                operation="upsert", expected_absent=True, saved_view_id=None, receipt_id=action["planId"],
-                            )
-                            result = service.update_ai_postgres_write_result(action["planId"], result)
                     except (PostgresServiceError, SchemaStoreError) as error:
                         if isinstance(error, SchemaStoreError):
                             error_payload = error.payload["error"]
@@ -794,7 +782,16 @@ def make_handler(
                         state = "uncertain" if error_code == "execution_outcome_unknown" else "failed" if error_code in terminal_codes or error_status < 500 else "uncertain"
                         resolved = current if state == "uncertain" else ai_authority.resolve_operation(current["id"], session_id, state, error=error_payload)
                     else:
-                        resolved = ai_authority.resolve_operation(current["id"], session_id, "succeeded", result=result)
+                        durable_state = result.get("state") if action.get("type") in {"migration_apply", "postgres_write_apply"} and isinstance(result, dict) else None
+                        if durable_state in {"ready", "applying", "uncertain"}:
+                            return {"operation": current, "migrationExecution": result}
+                        if durable_state == "failed":
+                            resolved = ai_authority.resolve_operation(
+                                current["id"], session_id, "failed",
+                                error={"code": "apply_not_committed", "message": "PostgreSQL execution did not commit; create a fresh preview"},
+                            )
+                        else:
+                            resolved = ai_authority.resolve_operation(current["id"], session_id, "succeeded", result=result)
                     return {"operation": resolved}
                 return authority_call(self, reconcile)
             try:
@@ -862,6 +859,16 @@ def make_handler(
                     action, session_id, schema_id, record, profile, authorization_target,
                     schema_concurrency, operation["id"], access,
                 )
+                if action.get("type") in {"migration_apply", "postgres_write_apply"} and isinstance(result, dict):
+                    durable_state = result.get("state")
+                    if durable_state == "failed":
+                        raise PostgresServiceError(409, "apply_not_committed", "PostgreSQL execution did not commit; create a fresh preview")
+                    if durable_state in {"ready", "applying", "uncertain"}:
+                        execution = result.get("execution") if isinstance(result.get("execution"), dict) else {}
+                        raise PostgresServiceError(
+                            503, "execution_outcome_unknown", "PostgreSQL execution requires reconciliation without replay",
+                            {"executionId": execution.get("executionId"), "reconcileRequired": True},
+                        )
             except (OpenCodeServiceError, SchemaStoreError, PostgresServiceError, MetadataStoreError) as error:
                 payload = error.payload if hasattr(error, "payload") else error.to_dict()
                 action_type = action.get("type")
@@ -955,6 +962,7 @@ def make_handler(
                 apply_action = {
                     "type": "migration_apply", "profileId": selected["id"], "database": selected["dbname"],
                     "namespace": action["namespace"], "planId": plan["applyPlanId"], "destructive": plan["destructive"],
+                    "reviewDigest": plan["reviewDigest"],
                     "requiresConfirmation": True,
                 }
                 current_chat = ai_authority.get_chat(session_id)
@@ -1001,51 +1009,17 @@ def make_handler(
                     "schemaBinding": schema_binding, "applyProposal": self._ai_proposal_envelope(proposal, session_id, current_chat),
                 }
             if action_type == "migration_apply":
-                with store.reserve_ai_binding(schema_id, schema_concurrency["revision"], schema_concurrency["layoutToken"]):
-                    result = service.apply_ai_migration(
-                        operation_id, action["planId"], action["profileId"], action["database"], action["namespace"],
-                        action["destructive"], True,
-                    )
-                    if "schemaSync" not in result:
-                        try:
-                            result["schemaSync"] = store.sync_ai_migration_result(
-                                schema_id, schema_concurrency["revision"], schema_concurrency["layoutToken"], result["refreshedSchema"],
-                            )
-                        except SchemaStoreError as error:
-                            raise PostgresServiceError(
-                                500, "execution_outcome_unknown",
-                                "PostgreSQL committed, but the saved design could not be synchronized; reconcile authoritative state",
-                            ) from error
-                        result.pop("refreshedSchema", None)
-                        result = service.update_ai_migration_result(action["planId"], result)
-                    return result
+                return service.apply_ai_migration(
+                    operation_id, action["planId"], action["profileId"], action["database"], action["namespace"],
+                    action["destructive"], True,
+                )
             if action_type == "postgres_write_apply":
                 if profile is None or any(action.get(key) != authorization_target.get(key) for key in ("profileId", "database", "namespace")):
                     raise PostgresServiceError(409, "action_target_changed", "PostgreSQL write target no longer matches the reviewed plan")
-                reservation = store.reserve_view_mutation_binding(
-                    schema_id, schema_concurrency["revision"], schema_concurrency["layoutToken"], action["profileId"], action["database"],
-                    action["namespace"], action["relation"], "upsert", {"absent": True}, None,
-                ) if action["writeKind"] == "create_view" else store.reserve_ai_binding(schema_id, schema_concurrency["revision"], schema_concurrency["layoutToken"])
-                with reservation:
-                    result = service.apply_ai_postgres_write(
-                        operation_id, action["planId"], action["profileId"], action["database"], action["namespace"],
-                        action["relation"], action["writeKind"], action["reviewDigest"],
-                    )
-                    if action["writeKind"] == "create_view":
-                        result = service.reconcile_ai_postgres_write(action["planId"], action["profileId"])
-                    if action["writeKind"] == "create_view" and "schemaSync" not in result:
-                        descriptor = result["descriptor"]
-                        try:
-                            result["schemaSync"] = store.sync_view_after_mutation(
-                                schema_id, schema_concurrency["revision"], schema_concurrency["layoutToken"], action["profileId"], action["database"],
-                                action["namespace"], action["relation"], descriptor["kind"], result["desiredDefinition"],
-                                result.get("queryDefinition"), descriptor["fingerprint"], operation="upsert", expected_absent=True,
-                                saved_view_id=None, receipt_id=action["planId"],
-                            )
-                        except SchemaStoreError as error:
-                            raise PostgresServiceError(500, "execution_outcome_unknown", "PostgreSQL committed, but the saved view could not be synchronized; reconcile authoritative state") from error
-                        result = service.update_ai_postgres_write_result(action["planId"], result)
-                    return result
+                return service.apply_ai_postgres_write(
+                    operation_id, action["planId"], action["profileId"], action["database"], action["namespace"],
+                    action["relation"], action["writeKind"], action["reviewDigest"],
+                )
             if action_type == "open_project":
                 target = store.get(action.get("schemaId"))
                 if target["schema"].get("projectName") != action.get("projectName"):
@@ -1109,7 +1083,7 @@ def make_handler(
                 apply_action = {
                     "type": "migration_apply", "profileId": authorization_target["profileId"],
                     "database": authorization_target["database"], "namespace": authorization_target["namespace"],
-                    "planId": plan["applyPlanId"], "destructive": plan["destructive"], "requiresConfirmation": True,
+                    "planId": plan["applyPlanId"], "destructive": plan["destructive"], "reviewDigest": plan["reviewDigest"], "requiresConfirmation": True,
                 }
                 chat = ai_authority.get_chat(session_id)
                 proposal = ai_authority.create_proposal(
@@ -1185,6 +1159,8 @@ def main() -> None:
         metadata_store.health()
     except (ValueError, MetadataStoreError) as error:
         raise SystemExit(f"Schemii metadata readiness failed: {error}") from error
+    migration_coordinator = DurableMigrationCoordinator(service, metadata_store, store)
+    service.set_migration_coordinator(migration_coordinator)
     retire_legacy_schemii_authority(config_dir)
     try:
         example_installer = installer_from_environment(service, store, config_dir)
@@ -1207,6 +1183,7 @@ def main() -> None:
         secrets.token_urlsafe(32),
         server_id=server_id,
         ai_authority=SchemiiMetadataAuthority(metadata_store, worker_id=f"schemii-{server_id}"),
+        migration_coordinator=migration_coordinator,
         ai_service=ai_service,
         example_installer=example_installer,
         behind_loopback_proxy=behind_loopback_proxy,

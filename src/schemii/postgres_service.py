@@ -288,6 +288,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         self.profile_lock_path = self.config_dir / ".postgres_profiles.lock"
         self.history_path = self.config_dir / "migration_history.json"
         self.ai_plan_dir = self.config_dir / "ai_migration_plans"
+        self.ai_plan_archive_dir = self.config_dir / "retired_ai_migration_plans"
         self.ai_plan_lock_path = self.config_dir / ".ai_migration_plans.lock"
         self._connect_factory = connect_factory
         self._plan_ttl = plan_ttl_seconds
@@ -296,9 +297,12 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         self._clock = clock
         self._temporal_series_secret = secrets.token_bytes(32)
         self._lock = threading.RLock()
-        self._plans: dict[str, dict[str, Any]] = {}
+        self._migration_coordinator = None
         self._console = PostgresConsole(self)
         self._ensure_config_dir()
+
+    def set_migration_coordinator(self, coordinator: Any) -> None:
+        self._migration_coordinator = coordinator
 
     def profile_context_fingerprint(self, profile_id: str) -> str:
         return _profile_context_fingerprint(profile_id, self._profile(profile_id))
@@ -327,8 +331,18 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             os.chmod(self.profile_path, 0o600)
         if self.history_path.exists():
             os.chmod(self.history_path, 0o600)
-        self.ai_plan_dir.mkdir(mode=0o700, exist_ok=True)
-        os.chmod(self.ai_plan_dir, 0o700)
+        # Legacy JSON plans are retained only as inert evidence. They are never
+        # loaded into the durable execution lifecycle.
+        if self.ai_plan_dir.exists():
+            self.ai_plan_archive_dir.mkdir(mode=0o700, exist_ok=True)
+            for path in self.ai_plan_dir.glob("*.json"):
+                destination = self.ai_plan_archive_dir / f"{path.stem}.retired.json"
+                if not destination.exists():
+                    os.replace(path, destination)
+            try:
+                self.ai_plan_dir.rmdir()
+            except OSError:
+                pass
         self.ai_plan_lock_path.touch(mode=0o600, exist_ok=True)
         os.chmod(self.ai_plan_lock_path, 0o600)
 
@@ -344,6 +358,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         return self.ai_plan_dir / f"{plan_id}.json"
 
     def _read_ai_plan(self, plan_id: str) -> dict[str, Any]:
+        raise PostgresServiceError(503, "durable_migrations_unavailable", "Legacy JSON migration plans are retired")
         path = self._ai_plan_path(plan_id)
         if not path.exists():
             raise NotFoundError("AI migration plan was not found or has expired")
@@ -472,6 +487,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                 raise PostgresServiceError(500, "plan_store_error", "AI view synchronization receipt is invalid")
 
     def _write_ai_plan(self, plan: dict[str, Any]) -> None:
+        raise PostgresServiceError(503, "durable_migrations_unavailable", "Legacy JSON migration plans are retired")
         try:
             write_json(self._ai_plan_path(plan["id"]), plan, mode=0o600, sort_keys=True)
         except OSError as exc:
@@ -578,9 +594,6 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                 profile = self._validated_profile(payload, existing)
                 profiles[profile_id] = profile
                 self._write_profiles(profiles)
-            if existing is not None:
-                for plan_key in [key for key, plan in self._plans.items() if plan["profileId"] == profile_id]:
-                    del self._plans[plan_key]
             return self._redact(profile_id, profile)
 
     def delete_profile(self, profile_id: str) -> dict[str, str]:
@@ -592,8 +605,6 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                     raise NotFoundError("Profile was not found")
                 del profiles[profile_id]
                 self._write_profiles(profiles)
-            for plan_id in [key for key, plan in self._plans.items() if plan["profileId"] == profile_id]:
-                del self._plans[plan_id]
         return {"deleted": profile_id}
 
     def _read_history(self) -> list[dict[str, Any]]:
@@ -1748,9 +1759,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             "desiredSchema": copy.deepcopy(desired),
         }
         if persist:
-            with self._lock:
-                self._purge_plans(now)
-                self._plans[plan_id] = stored
+            raise PostgresServiceError(503, "durable_migrations_unavailable", "Apply-capable preview requires the durable migration coordinator")
         public = self._public_plan(stored)
         if not persist:
             public.update({"id": None, "previewOnly": True})
@@ -1760,6 +1769,11 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         self, operation_id: str, profile_id: str, database: str, namespace: str, desired_schema: dict[str, Any],
         allow_destructive: bool, schema_binding: dict[str, Any],
     ) -> dict[str, Any]:
+        if self._migration_coordinator is not None:
+            return self._migration_coordinator.preview_ai_full(
+                operation_id, profile_id, database, namespace, desired_schema, allow_destructive, schema_binding,
+            )
+        raise PostgresServiceError(503, "durable_migrations_unavailable", "AI migration plans require durable metadata")
         profile_id = self._validate_profile_id(profile_id)
         database = self._validate_database(database)
         namespace = self._validate_namespace(namespace)
@@ -1795,6 +1809,12 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         self, operation_id: str, profile_id: str, database: str, namespace: str, relation: str,
         rows: list[dict[str, Any]], schema_binding: dict[str, Any],
     ) -> dict[str, Any]:
+        if self._migration_coordinator is not None:
+            plan = self._migration_coordinator.preview_insert(
+                profile_id, database, namespace, relation, rows, schema_binding,
+            )
+            return {**plan, "id": None, "previewOnly": True, "applyPlanId": plan["id"], "planDigest": plan["reviewDigest"]}
+        raise PostgresServiceError(503, "durable_migrations_unavailable", "AI write plans require durable metadata")
         profile_id = self._validate_profile_id(profile_id)
         database = self._validate_database(database)
         namespace = self._validate_namespace(namespace)
@@ -1842,6 +1862,13 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         self, operation_id: str, profile_id: str, database: str, namespace: str, relation: str,
         definition: str, schema_binding: dict[str, Any],
     ) -> dict[str, Any]:
+        if self._migration_coordinator is not None:
+            plan = self._migration_coordinator.preview_view(
+                profile_id, database, namespace, relation, "upsert", {"absent": True},
+                {"kind": "view", "definition": definition}, False, schema_binding, source_kind="ai",
+            )
+            return {**plan, "id": None, "previewOnly": True, "applyPlanId": plan["id"], "planDigest": plan["reviewDigest"], "kind": "create_view"}
+        raise PostgresServiceError(503, "durable_migrations_unavailable", "AI view plans require durable metadata")
         if not isinstance(operation_id, str) or not PROFILE_ID_RE.fullmatch(operation_id):
             raise ValidationError("operation_id is invalid")
         if not re.match(r"^CREATE\s+VIEW\b", definition, re.I):
@@ -2002,6 +2029,12 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         self, operation_id: str, plan_id: str, profile_id: str, database: str, namespace: str,
         expected_destructive: bool, confirm_destructive: bool,
     ) -> dict[str, Any]:
+        if self._migration_coordinator is not None:
+            status = self._migration_coordinator.status(plan_id)
+            if status["review"]["destructive"] != expected_destructive:
+                raise NotFoundError("AI migration plan was not found or has expired")
+            return self._migration_coordinator.apply(plan_id, status["reviewDigest"], confirm_destructive, expected_profile_id=profile_id)
+        raise PostgresServiceError(503, "durable_migrations_unavailable", "AI migration execution requires durable metadata")
         if not isinstance(operation_id, str) or not PROFILE_ID_RE.fullmatch(operation_id):
             raise ValidationError("operation_id is invalid")
         profile_id = self._validate_profile_id(profile_id)
@@ -2042,6 +2075,12 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         self, operation_id: str, plan_id: str, profile_id: str, database: str, namespace: str,
         relation: str, expected_kind: str, expected_review_digest: str,
     ) -> dict[str, Any]:
+        if self._migration_coordinator is not None:
+            status = self._migration_coordinator.status(plan_id)
+            if status["adapterKind"] != ("insert_rows" if expected_kind == "insert_rows" else "view_mutation"):
+                raise NotFoundError("AI write plan was not found or has expired")
+            return self._migration_coordinator.apply(plan_id, expected_review_digest, True, expected_profile_id=profile_id)
+        raise PostgresServiceError(503, "durable_migrations_unavailable", "AI write execution requires durable metadata")
         if not isinstance(operation_id, str) or not PROFILE_ID_RE.fullmatch(operation_id):
             raise ValidationError("operation_id is invalid")
         profile_id = self._validate_profile_id(profile_id)
@@ -2216,6 +2255,16 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         raise PostgresServiceError(500, "execution_outcome_unknown", "PostgreSQL transaction outcome remains uncertain")
 
     def reconcile_ai_postgres_write(self, plan_id: str, profile_id: str) -> dict[str, Any]:
+        if self._migration_coordinator is not None:
+            status = self._migration_coordinator.status(plan_id)
+            execution = status.get("execution")
+            if execution and (
+                execution["state"] in {"ready", "applying", "uncertain"}
+                or (execution["state"] == "succeeded" and (execution.get("sync") is None or execution["sync"]["state"] == "pending"))
+            ):
+                return self._migration_coordinator.reconcile(execution["executionId"])
+            return status
+        raise PostgresServiceError(503, "durable_migrations_unavailable", "AI write reconciliation requires durable metadata")
         profile_id = self._validate_profile_id(profile_id)
         with self._ai_plan_store_lock():
             plan = self._read_ai_plan(plan_id)
@@ -2341,6 +2390,16 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         raise ConflictError("execution_outcome_unknown", "PostgreSQL state matches neither the preview nor intended result")
 
     def reconcile_ai_migration(self, plan_id: str, profile_id: str) -> dict[str, Any]:
+        if self._migration_coordinator is not None:
+            status = self._migration_coordinator.status(plan_id)
+            execution = status.get("execution")
+            if execution and (
+                execution["state"] in {"ready", "applying", "uncertain"}
+                or (execution["state"] == "succeeded" and (execution.get("sync") is None or execution["sync"]["state"] == "pending"))
+            ):
+                return self._migration_coordinator.reconcile(execution["executionId"])
+            return status
+        raise PostgresServiceError(503, "durable_migrations_unavailable", "AI migration reconciliation requires durable metadata")
         profile_id = self._validate_profile_id(profile_id)
         with self._ai_plan_store_lock():
             plan = self._read_ai_plan(plan_id)
@@ -2365,7 +2424,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
     def preview_view_mutation(
         self, profile_id: str, database: str, namespace: str, relation: str,
         operation: str, expectation: dict[str, Any], desired: dict[str, Any] | None, allow_destructive: bool,
-        schema_binding: dict[str, Any],
+        schema_binding: dict[str, Any], *, persist: bool = False,
     ) -> dict[str, Any]:
         profile_id = self._validate_profile_id(profile_id)
         database = self._validate_database(database)
@@ -2492,10 +2551,16 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             "state": "ready",
             "createdAt": now, "expiresAt": now + self._plan_ttl,
         }
-        with self._lock:
-            self._purge_plans(now)
-            self._plans[plan_id] = stored
-        return self._public_plan(stored)
+        if persist:
+            if self._migration_coordinator is None:
+                raise PostgresServiceError(503, "durable_migrations_unavailable", "Durable migration metadata is unavailable")
+            return self._migration_coordinator.preview_view(
+                profile_id, database, namespace, relation, operation, expectation, desired,
+                allow_destructive, schema_binding,
+            )
+        public = self._public_plan(stored)
+        public.update({"desiredDefinition": definition, "preservation": copy.deepcopy(preservation)})
+        return public
 
     @staticmethod
     def _materialized_population_definition(definition: str, populated: bool) -> str:
@@ -2730,9 +2795,9 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             if key not in {"createdAt", "desiredSchema", "desiredDefinition", "schemaBinding", "profileFingerprint", "preservation", "state"}
         })
 
-    def _purge_plans(self, now: float) -> None:
-        for plan_id in [key for key, plan in self._plans.items() if plan["expiresAt"] <= now]:
-            del self._plans[plan_id]
+    def _purge_retired_authority(self, now: float) -> None:
+        for plan_id in [key for key, plan in self._removed_plan_authority.items() if plan["expiresAt"] <= now]:
+            del self._removed_plan_authority[plan_id]
 
     @staticmethod
     def _step(action: str, object_type: str, name: str, sql: str, destructive: bool = False) -> dict[str, Any]:
@@ -3529,12 +3594,19 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         )
 
     def view_mutation_binding(self, profile_id: str, plan_id: str) -> dict[str, Any]:
+        if self._migration_coordinator is not None:
+            plan = self._migration_coordinator.metadata.get_migration_plan(plan_id, include_private=True)
+            private = plan["privatePayload"]
+            return {"schemaBinding": private["schemaBinding"], "database": plan["target"]["databaseName"],
+                    "namespace": plan["target"]["namespaceName"], "relation": private["relation"],
+                    "operation": private["operation"], "expectation": private["expectation"]}
+        raise PostgresServiceError(503, "durable_migrations_unavailable", "View mutation plans require durable metadata")
         profile_id = self._validate_profile_id(profile_id)
         if not isinstance(plan_id, str) or not PROFILE_ID_RE.fullmatch(plan_id):
             raise ValidationError("plan_id is invalid")
         with self._lock:
-            self._purge_plans(self._clock())
-            plan = copy.deepcopy(self._plans.get(plan_id))
+            self._purge_retired_authority(self._clock())
+            plan = copy.deepcopy(self._removed_plan_authority.get(plan_id))
         if plan is None or plan.get("kind") != "view_mutation" or plan["profileId"] != profile_id:
             raise NotFoundError("Plan was not found or has expired")
         return {
@@ -3544,14 +3616,18 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         }
 
     def apply_view_mutation(self, profile_id: str, plan_id: str, confirm_destructive: bool = False) -> dict[str, Any]:
+        if self._migration_coordinator is not None:
+            status = self._migration_coordinator.status(plan_id)
+            return self._migration_coordinator.apply(plan_id, status["reviewDigest"], confirm_destructive, expected_profile_id=profile_id)
+        raise PostgresServiceError(503, "durable_migrations_unavailable", "View mutation execution requires durable metadata")
         profile_id = self._validate_profile_id(profile_id)
         if not isinstance(plan_id, str) or not PROFILE_ID_RE.fullmatch(plan_id):
             raise ValidationError("plan_id is invalid")
         if not isinstance(confirm_destructive, bool):
             raise ValidationError("confirmDestructive must be boolean")
         with self._lock:
-            self._purge_plans(self._clock())
-            plan = copy.deepcopy(self._plans.get(plan_id))
+            self._purge_retired_authority(self._clock())
+            plan = copy.deepcopy(self._removed_plan_authority.get(plan_id))
             profile = copy.deepcopy(self._read_profiles().get(profile_id))
         if plan is None or plan.get("kind") != "view_mutation" or plan.get("planVersion") != 2 or plan["profileId"] != profile_id:
             raise NotFoundError("Plan was not found or has expired")
@@ -3560,7 +3636,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         if plan["destructive"] and not confirm_destructive:
             raise ConflictError("destructive_confirmation_required", "Plan contains destructive steps")
         with self._lock:
-            stored_plan = self._plans.get(plan_id)
+            stored_plan = self._removed_plan_authority.get(plan_id)
             if stored_plan is None or stored_plan.get("state") != "ready":
                 raise ConflictError("plan_in_use", "View plan is already being applied")
             stored_plan["state"] = "applying"
@@ -3683,11 +3759,11 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                 self._close(connection)
             if committed_at is None:
                 with self._lock:
-                    stored_plan = self._plans.get(plan_id)
+                    stored_plan = self._removed_plan_authority.get(plan_id)
                     if stored_plan and stored_plan.get("state") == "applying":
                         stored_plan["state"] = "uncertain" if commit_outcome_uncertain else "ready"
         with self._lock:
-            self._plans.pop(plan_id, None)
+            self._removed_plan_authority.pop(plan_id, None)
         try:
             self._append_history({
                 "id": "migration_" + secrets.token_hex(12), "planId": plan_id,
@@ -3720,14 +3796,18 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         return result
 
     def apply(self, profile_id: str, plan_id: str, confirm_destructive: bool = False) -> dict[str, Any]:
+        if self._migration_coordinator is not None:
+            status = self._migration_coordinator.status(plan_id)
+            return self._migration_coordinator.apply(plan_id, status["reviewDigest"], confirm_destructive, expected_profile_id=profile_id)
+        raise PostgresServiceError(503, "durable_migrations_unavailable", "Migration execution requires durable metadata")
         profile_id = self._validate_profile_id(profile_id)
         if not isinstance(plan_id, str) or not PROFILE_ID_RE.fullmatch(plan_id):
             raise ValidationError("plan_id is invalid")
         if not isinstance(confirm_destructive, bool):
             raise ValidationError("confirm_destructive must be boolean")
         with self._lock:
-            self._purge_plans(self._clock())
-            plan = copy.deepcopy(self._plans.get(plan_id))
+            self._purge_retired_authority(self._clock())
+            plan = copy.deepcopy(self._removed_plan_authority.get(plan_id))
             profile = copy.deepcopy(self._read_profiles().get(profile_id))
         if plan is None or plan["profileId"] != profile_id:
             raise NotFoundError("Plan was not found or has expired")
@@ -3784,7 +3864,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         finally:
             self._close(connection)
         with self._lock:
-            self._plans.pop(plan_id, None)
+            self._removed_plan_authority.pop(plan_id, None)
         try:
             self._append_history({
                 "id": "migration_" + secrets.token_hex(12),

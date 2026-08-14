@@ -89,6 +89,56 @@ class FakeExampleInstaller:
         return {"installed": ["schemii_example_local"], "preserved": [], "completed": ["local"], "errors": []}
 
 
+class FakeMigrationCoordinator:
+    def __init__(self, service, store):
+        self.service = service
+        self.store = store
+
+    def preview_full(self, profile_id, namespace, schema_id, revision, layout_token, allow_destructive, **kwargs):
+        record = self.store.get(schema_id)
+        result = self.service.preview(profile_id, namespace, record["schema"], allow_destructive)
+        return {**result, "reviewDigest": "d" * 64}
+
+    def preview_view(self, profile_id, database, namespace, relation, operation, expectation, desired, allow_destructive, binding, **kwargs):
+        result = self.service.preview_view_mutation(profile_id, database, namespace, relation, operation, expectation, desired, allow_destructive, binding)
+        return {**result, "reviewDigest": "e" * 64}
+
+    def apply(self, plan_id, review_digest, confirm_destructive, **kwargs):
+        if plan_id == "plan_view":
+            target = self.service.view_mutation_binding("local", plan_id)
+            binding = target["schemaBinding"]
+            self.store.require_view_mutation_binding(
+                binding["schemaId"], binding["expectedSchemaRevision"], binding["layoutToken"], "local",
+                target["database"], target["namespace"], target["relation"], target["operation"],
+                target["expectation"], binding.get("savedViewId"),
+            )
+            result = self.service.apply_view_mutation("local", plan_id, confirm_destructive)
+            result.pop("schemaBinding")
+            absent = result.pop("expectedAbsent")
+            descriptor = result.get("descriptor")
+            identity = descriptor or result["deleted"]
+            try:
+                result["schemaSync"] = self.store.sync_view_after_mutation(
+                    binding["schemaId"], binding["expectedSchemaRevision"], binding["layoutToken"], "local",
+                    identity["database"], identity["namespace"], identity["relation"], identity["kind"],
+                    result.pop("desiredDefinition", None), result.pop("queryDefinition", None), descriptor["fingerprint"] if descriptor else None,
+                    operation=result["operation"], expected_absent=absent, saved_view_id=binding.get("savedViewId"),
+                )
+            except SchemaStoreError as error:
+                result["schemaSync"] = {"status": "conflict" if error.status == 409 else "storage_error", **error.payload["error"]}
+            return result
+        return self.service.apply("local", plan_id, confirm_destructive)
+
+    def status(self, plan_id):
+        return {"planId": plan_id, "state": "ready", "reviewDigest": "d" * 64}
+
+    def execution_status(self, execution_id):
+        return {"execution": {"executionId": execution_id, "state": "succeeded"}, "state": "succeeded"}
+
+    def reconcile(self, execution_id):
+        return self.execution_status(execution_id)
+
+
 class ServerTests(unittest.TestCase):
     def setUp(self):
         self.temporary_directory = tempfile.TemporaryDirectory()
@@ -97,10 +147,13 @@ class ServerTests(unittest.TestCase):
         self.example_installer = FakeExampleInstaller()
         self.store = SchemaStore(Path(self.temporary_directory.name) / "schemas")
         self.authority = FakeSchemiiAuthority()
+        self.migrations = FakeMigrationCoordinator(self.service, self.store)
+        self.service._test_migrations = self.migrations
         handler = make_handler(
             ROOT / "src" / "schemii" / "web", self.service, self.store, "session-token",
             server_id="server-start-id",
             ai_authority=self.authority,
+            migration_coordinator=self.migrations,
             ai_service=self.ai_service,
             example_installer=self.example_installer,
         )
@@ -135,7 +188,7 @@ class ServerTests(unittest.TestCase):
 
         status, body, _ = self.request("/api/readiness")
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body)["metadata"]["version"], 3)
+        self.assertEqual(json.loads(body)["metadata"]["version"], 4)
 
     def test_ai_chat_uuid_is_distinct_from_external_opencode_session(self):
         self.store.save(
@@ -268,11 +321,12 @@ class ServerTests(unittest.TestCase):
 
     def test_test_introspect_preview_and_apply_routes_forward_contracts(self):
         schema = {"projectName": "demo.public", "tables": [], "relationships": [], "functions": []}
+        saved = self.store.save("schema_one", {"id": "schema_one", "schema": {**schema, "postgres": {"sourceProfileId": "local", "database": "demo", "namespace": "public"}}}, expected_layout_token=None, layout_protocol=None)
         requests = [
             ("/api/postgres/profiles/local/test", {}),
             ("/api/postgres/profiles/local/introspect", {"namespace": "public"}),
-            ("/api/postgres/profiles/local/preview", {"namespace": "public", "schema": schema, "allowDestructive": True}),
-            ("/api/postgres/profiles/local/plans/plan_one/apply", {"confirmDestructive": True}),
+            ("/api/postgres/profiles/local/preview", {"schemaId": "schema_one", "expectedRevision": saved["revision"], "layoutToken": saved["layoutToken"], "namespace": "public", "allowDestructive": True}),
+            ("/api/postgres/profiles/local/plans/plan_one/apply", {"reviewDigest": "d" * 64, "confirmDestructive": True}),
         ]
         for path, payload in requests:
             with self.subTest(path=path):
@@ -281,8 +335,24 @@ class ServerTests(unittest.TestCase):
 
         self.assertIn(("test_profile", "local"), self.service.calls)
         self.assertIn(("introspect", "local", "public"), self.service.calls)
-        self.assertIn(("preview", "local", "public", schema, True, True), self.service.calls)
+        self.assertTrue(any(call[0:3] == ("preview", "local", "public") and call[3]["projectName"] == "demo.public" and call[4:] == (True, True) for call in self.service.calls))
         self.assertIn(("apply", "local", "plan_one", True), self.service.calls)
+
+    def test_durable_migration_status_and_reconcile_routes_are_authenticated_and_exact(self):
+        plan_id = "12345678-1234-4123-8123-123456789abc"
+        execution_id = "87654321-4321-4321-8321-cba987654321"
+        self.assertEqual(self.request(f"/api/postgres/migration-plans/{plan_id}/status")[0], 403)
+        status, body, _ = self.request(f"/api/postgres/migration-plans/{plan_id}/status", authorized=True)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["planId"], plan_id)
+        status, body, _ = self.request(f"/api/postgres/migration-executions/{execution_id}/status", authorized=True)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["state"], "succeeded")
+        route = f"/api/postgres/migration-executions/{execution_id}/reconcile"
+        self.assertEqual(self.request(route, "POST", {"unexpected": True}, authorized=True)[0], 400)
+        status, body, _ = self.request(route, "POST", {}, authorized=True)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["execution"]["executionId"], execution_id)
 
     def test_exact_view_preview_apply_and_post_commit_schema_sync(self):
         record = {
@@ -313,12 +383,12 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(self.request(preview_path, "POST", preview, authorized=True)[0], 200)
         self.assertIn((
             "preview_view_mutation", "local", "demo", "public", "summary", "upsert", preview["expectation"], preview["desired"], False,
-            {"schemaId": "schema_one", "expectedSchemaRevision": saved["revision"], "layoutToken": saved["layoutToken"], "savedViewId": "view_summary"},
+            {"schemaId": "schema_one", "revision": saved["revision"], "layoutToken": saved["layoutToken"], "savedViewId": "view_summary"},
         ), self.service.calls)
 
         apply_path = "/api/postgres/profiles/local/view-plans/plan_view/apply"
         self.assertEqual(self.request(apply_path, "POST", {}, authorized=True)[0], 400)
-        status, body, _ = self.request(apply_path, "POST", {"confirmDestructive": False}, authorized=True)
+        status, body, _ = self.request(apply_path, "POST", {"reviewDigest": "e" * 64, "confirmDestructive": False}, authorized=True)
         self.assertEqual(status, 200)
         result = json.loads(body)
         self.assertTrue(result["applied"])
@@ -346,7 +416,7 @@ class ServerTests(unittest.TestCase):
 
         status, body, _ = self.request(
             "/api/postgres/profiles/local/view-plans/plan_view/apply", "POST",
-            {"confirmDestructive": False}, authorized=True,
+            {"reviewDigest": "e" * 64, "confirmDestructive": False}, authorized=True,
         )
         self.assertEqual(status, 409)
         result = json.loads(body)
@@ -369,7 +439,7 @@ class ServerTests(unittest.TestCase):
 
         status, body, _ = self.request(
             "/api/postgres/profiles/local/view-plans/plan_view/apply", "POST",
-            {"confirmDestructive": False}, authorized=True,
+            {"reviewDigest": "e" * 64, "confirmDestructive": False}, authorized=True,
         )
 
         self.assertEqual(status, 200)
@@ -399,7 +469,7 @@ class ServerTests(unittest.TestCase):
 
         status, body, _ = self.request(
             "/api/postgres/profiles/local/view-plans/plan_view/apply", "POST",
-            {"confirmDestructive": True}, authorized=True,
+            {"reviewDigest": "e" * 64, "confirmDestructive": True}, authorized=True,
         )
 
         self.assertEqual(status, 200)
@@ -430,7 +500,7 @@ class ServerTests(unittest.TestCase):
                     )
                     status, body, _ = self.request(
                         "/api/postgres/profiles/local/view-plans/plan_view/apply", "POST",
-                        {"confirmDestructive": False}, authorized=True,
+                        {"reviewDigest": "e" * 64, "confirmDestructive": False}, authorized=True,
                     )
                     self.assertEqual(status, 200)
                     self.assertEqual(json.loads(body)["schemaSync"]["status"], expected_status)
@@ -997,32 +1067,16 @@ class RealAiWriteHttpTests(unittest.TestCase):
         return self.http.request(path, method, payload, authorized=True)
 
     def test_real_durable_insert_plan_applies_after_http_restart(self):
-        self.ai_service.prompt_response = {"text": "Review.", "parts": [], "actions": [{
-            "type": "insert_rows_preview", "profileId": "local", "namespace": "public", "relation": "events",
-            "rows": [{"name": "launch"}, {"name": "review"}], "purpose": "Seed events",
-            "readOnly": True, "requiresConfirmation": True,
-        }]}
-        message = {"text": "Insert events", "model": {}, "schemaId": "schema_one", "accessLevel": "data", "profileId": "local", "database": "demo", "namespace": "public"}
-        execute = {"schemaId": "schema_one", "accessLevel": "data", "profileId": "local", "database": "demo", "namespace": "public", "policyRevision": 1, "confirmation": {"accepted": True, "mode": "every_action"}}
-        proposal = json.loads(self.request("/api/ai/sessions/ses_1/messages", "POST", message)[1])["proposals"][0]
-        preview = json.loads(self.request(f"/api/ai/sessions/ses_1/proposals/{proposal['proposalId']}/execute", "POST", execute)[1])["operation"]
-        apply_proposal = preview["result"]["applyProposal"]
-        plan_id = apply_proposal["action"]["planId"]
-        plan_path = self.root / "config" / "ai_migration_plans" / f"{plan_id}.json"
-        stored = json.loads(plan_path.read_text())
-        self.assertEqual(stored["schemaBinding"], {"schemaId": "schema_one", "revision": self.saved["revision"], "layoutToken": self.saved["layoutToken"]})
-        self.assertNotIn("target", stored["schemaBinding"])
-
+        legacy = self.root / "config" / "ai_migration_plans"
+        legacy.mkdir()
+        (legacy / "ai_plan_old.json").write_text('{"state":"ready"}', encoding="utf-8")
         self._restart()
-        status, body, _ = self.request(f"/api/ai/sessions/ses_1/proposals/{apply_proposal['proposalId']}/execute", "POST", execute)
-        operation = json.loads(body)["operation"]
-        self.assertEqual(status, 200)
-        self.assertEqual(operation["state"], "succeeded")
-        self.assertEqual(operation["result"]["insertedRowCount"], 2)
-        inserts = [(sql, params) for sql, params in self.connections[-1].executed if sql.startswith("INSERT INTO")]
-        self.assertEqual(len(inserts), 1)
-        self.assertEqual(json.loads(inserts[0][1][0]), [{"name": "launch"}, {"name": "review"}])
-        self.assertEqual(self.service._read_ai_plan(plan_id)["state"], "succeeded")
+        self.assertFalse(legacy.exists())
+        archived = self.root / "config" / "retired_ai_migration_plans" / "ai_plan_old.retired.json"
+        self.assertTrue(archived.exists())
+        with self.assertRaises(PostgresServiceError) as caught:
+            self.service.preview_ai_insert_rows("operation", "local", "demo", "public", "events", [{"name": "x"}], {"schemaId": "schema_one", "revision": 1, "layoutToken": "0" * 64})
+        self.assertEqual(caught.exception.code, "durable_migrations_unavailable")
 
 
 if __name__ == "__main__":

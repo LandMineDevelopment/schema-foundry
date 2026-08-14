@@ -34,7 +34,7 @@ Target changes:
 
 ## Migration wire contracts
 
-Current normal preview accepts `{namespace, schema, allowDestructive}` and apply accepts `{confirmDestructive}`. View preview has stronger saved-resource binding. AI applies use authority proposals and durable JSON plans.
+Normal preview accepts the exact saved schema ID, revision, layout token, namespace, and destructive-preview choice; the server loads the desired schema. Normal, view, and overlapping AI writes persist UUID plans in metadata PostgreSQL. Apply accepts only `reviewDigest` and `confirmDestructive`; resource and target authority comes from the durable plan.
 
 Target contract:
 
@@ -51,6 +51,8 @@ Target contract:
 ```
 
 The server loads intended state, persists a canonical reviewed plan, and returns `planId`, `reviewDigest`, and bounded review data. Apply submits only plan identity, matching digest, and destructive confirmation. Status/reconcile routes expose the one durable execution.
+
+Plan status is available at `GET /api/postgres/migration-plans/{planId}/status`; execution status and explicit reconciliation use `GET /api/postgres/migration-executions/{executionId}/status` and `POST /api/postgres/migration-executions/{executionId}/reconcile`. Reconcile has an empty JSON body and checks `pg_xact_status` without replaying SQL. Interrupted `applying` records are first durably promoted to reconcile-only `uncertain`; committed XIDs require the persisted intended result for automatic success, otherwise status remains `manual_required`.
 
 ## Resource deletion
 

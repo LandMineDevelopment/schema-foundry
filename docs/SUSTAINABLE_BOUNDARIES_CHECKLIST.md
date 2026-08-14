@@ -94,16 +94,16 @@ Agents must not duplicate another active agent's scope. Research findings that a
 
 ## Phase 3 — durable migration execution
 
-- [ ] Bind normal migration preview to exact saved schema ID/revision/layout token and target.
-- [ ] Load intended schema server-side instead of accepting an authoritative browser schema document.
-- [ ] Unify normal, AI, and view migration plan state where semantics overlap.
-- [ ] Add durable single-owner `ready → applying → terminal/uncertain` execution.
-- [ ] Record PostgreSQL transaction evidence before mutation.
-- [ ] Handle lost commit responses without claiming rollback.
-- [ ] Reconcile uncertain outcomes without replay.
-- [ ] Add canonical review digests and strict durable-plan validation.
-- [ ] Make plan retention/redaction explicit.
-- [ ] Test concurrent apply, restart, commit-response loss, stale schema, stale catalog, and reconciliation.
+- [x] Bind normal migration preview to exact saved schema ID/revision/layout token and target.
+- [x] Load intended schema server-side instead of accepting an authoritative browser schema document.
+- [x] Unify normal, AI, and view migration plan state where semantics overlap.
+- [x] Add durable single-owner `ready → applying → terminal/uncertain` execution.
+- [x] Record PostgreSQL transaction evidence before mutation.
+- [x] Handle lost commit responses without claiming rollback.
+- [x] Reconcile uncertain outcomes without replay.
+- [x] Add canonical review digests and strict durable-plan validation.
+- [x] Make plan retention/redaction explicit.
+- [x] Test concurrent apply, restart, commit-response loss, stale schema, stale catalog, and reconciliation.
 
 ## Phase 4 — PostgreSQL catalog and write safety
 

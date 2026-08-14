@@ -182,7 +182,7 @@ class MetadataStoreTests(unittest.TestCase):
             for migration in migrations
         ]])
         store = MetadataStore(lambda: connection)
-        self.assertEqual(store.health(), {"ok": True, "version": 3, "expectedVersion": 3})
+        self.assertEqual(store.health(), {"ok": True, "version": 4, "expectedVersion": 4})
         self.assertEqual(connection.commits, 0)
         self.assertEqual(connection.rollbacks, 1)
         self.assertTrue(connection.closed)

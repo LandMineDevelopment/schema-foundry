@@ -42,7 +42,7 @@ class FakeSchemiiAuthority:
             }
         chat["schemaId"] = payload.get("schemaId", chat["schemaId"])
 
-    def health(self): return {"ok": True, "version": 3, "expectedVersion": 3}
+    def health(self): return {"ok": True, "version": 4, "expectedVersion": 4}
 
     def provision_chat(self, schema_id):
         chat_id = str(uuid.uuid4())

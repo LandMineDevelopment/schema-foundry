@@ -17,7 +17,7 @@ class MetadataDouble:
         self.proposal_id = str(uuid.uuid4())
         self.operation_id = str(uuid.uuid4())
 
-    def health(self): return {"ok": True, "version": 3, "expectedVersion": 3}
+    def health(self): return {"ok": True, "version": 4, "expectedVersion": 4}
     def provision_chat(self, *args): self.calls.append(("provision_chat", args)); return {"chatId": self.chat_id}
     def bind_chat_external_session(self, *args): self.calls.append(("bind", args)); return {"chatId": args[0]}
     def activate_chat(self, *args, **kwargs): self.calls.append(("activate", args, kwargs)); return {"state": "active"}

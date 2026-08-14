@@ -66,7 +66,7 @@ TARGET = {
 class MetadataRepositoryMigrationTests(unittest.TestCase):
     def test_0002_is_additive_and_adds_repository_evidence(self):
         migrations = packaged_migrations()
-        self.assertEqual([migration.version for migration in migrations], [1, 2, 3])
+        self.assertEqual([migration.version for migration in migrations], [1, 2, 3, 4])
         sql = resources.files("schemii.metadata.migrations").joinpath("0002_authority_repository.sql").read_text()
         self.assertIn("ADD COLUMN binding jsonb", sql)
         self.assertIn("lease_expires_at", sql)
@@ -75,6 +75,10 @@ class MetadataRepositoryMigrationTests(unittest.TestCase):
         self.assertIn("metadata_proposal_snapshot_guard", sql)
         self.assertIn("metadata_migration_plan_snapshot_guard", sql)
         self.assertNotIn("DROP TABLE", sql)
+        durable = resources.files("schemii.metadata.migrations").joinpath("0004_durable_migration_execution.sql").read_text()
+        self.assertIn("adapter_kind", durable)
+        self.assertIn("private_payload_redacted_at", durable)
+        self.assertNotIn("DROP TABLE", durable)
 
 
 class MetadataRepositoryContractTests(unittest.TestCase):
@@ -96,6 +100,7 @@ class MetadataRepositoryContractTests(unittest.TestCase):
             MetadataStore(connection_factory).create_migration_plan(
                 "schemii", "schema", "schema-1", 7, "layout-7", TARGET,
                 "c" * 64, "d" * 64, {"desired": {}}, {"steps": []}, "0" * 64, False,
+                adapter_kind="full_schema", source_kind="normal",
             )
         self.assertEqual(caught.exception.code, "review_digest_mismatch")
         self.assertFalse(called)
@@ -141,6 +146,7 @@ class MetadataRepositoryContractTests(unittest.TestCase):
         result = MetadataStore(lambda: connection).create_migration_plan(
             "schemii", "schema", "schema-1", 7, "layout-7", TARGET,
             "c" * 64, "d" * 64, {"desired": {}}, review, digest, True,
+            adapter_kind="full_schema", source_kind="normal",
         )
         self.assertEqual(result["reviewDigest"], digest)
         insert = next(item for item in connection.cursor_value.executions if "INSERT INTO metadata_migration_plans" in item[0])
@@ -184,6 +190,47 @@ class MetadataRepositoryContractTests(unittest.TestCase):
                 str(uuid.uuid4()), "succeeded", "committed",
             )
         self.assertEqual(caught.exception.code, "intended_result_required")
+
+    def test_interrupted_applying_execution_is_durably_promoted_to_reconcile_only(self):
+        execution = uuid.uuid4()
+        connection = FakeConnection(rows=[{
+            "state": "applying", "target_xid": "77", "target_identity": {"databaseOid": "4"},
+            "intended_result": {"resultFingerprint": "f"}, "commit_outcome": None,
+            "reconciliation_status": "not_required", "reconciliation_evidence": None,
+        }])
+        result = MetadataStore(lambda: connection).prepare_migration_reconciliation(
+            str(execution), {"code": "worker_restarted", "reconcileOnly": True},
+        )
+        self.assertEqual(result["state"], "uncertain")
+        self.assertFalse(result["manualRequired"])
+        sql = "\n".join(item[0] for item in connection.cursor_value.executions)
+        self.assertIn("reconciliation_status = %s", sql)
+        self.assertIn("INSERT INTO metadata_migration_transitions", sql)
+
+    def test_interrupted_applying_execution_without_xid_requires_manual_recovery(self):
+        connection = FakeConnection(rows=[{
+            "state": "applying", "target_xid": None, "target_identity": None,
+            "intended_result": None, "commit_outcome": None,
+            "reconciliation_status": "not_required", "reconciliation_evidence": None,
+        }])
+        result = MetadataStore(lambda: connection).prepare_migration_reconciliation(
+            str(uuid.uuid4()), {"code": "worker_restarted"},
+        )
+        self.assertTrue(result["manualRequired"])
+        update = next(params for sql, params in connection.cursor_value.executions if "reconciliation_status = %s" in sql)
+        self.assertEqual(update[0], "failed")
+
+    def test_committed_without_intended_result_stays_uncertain_manual(self):
+        connection = FakeConnection(rows=[{
+            "state": "uncertain", "target_xid": "77", "target_identity": {"databaseOid": "4"},
+            "intended_result": None, "commit_outcome": "uncertain",
+            "reconciliation_status": "required", "reconciliation_evidence": None,
+        }])
+        result = MetadataStore(lambda: connection).require_manual_migration_reconciliation(
+            str(uuid.uuid4()), {"code": "committed_without_intended_result"},
+        )
+        self.assertEqual(result, {"executionId": result["executionId"], "state": "uncertain", "manualRequired": True, "transitionOwner": True})
+        self.assertTrue(any("reconciliation_status = 'failed'" in sql for sql, _ in connection.cursor_value.executions))
 
     def test_uncertain_execution_reconciliation_records_proven_commit_without_replay(self):
         execution = uuid.uuid4()
@@ -268,8 +315,8 @@ class MetadataRepositoryContractTests(unittest.TestCase):
     def test_cleanup_is_bounded_and_only_targets_terminal_or_unowned_rows(self):
         connection = FakeConnection(rowcounts=[2, 3, 4])
         result = MetadataStore(lambda: connection).cleanup(before=datetime.now(timezone.utc), limit=25)
-        self.assertEqual(result, {"results": 2, "plans": 3, "chats": 4})
-        self.assertTrue(all(params[1] == 25 for _, params in connection.cursor_value.executions))
+        self.assertEqual(result, {"planPayloadsRedacted": 2, "results": 3, "plans": 4, "chats": 1})
+        self.assertTrue(all(len(params) == 1 or params[1] == 25 for _, params in connection.cursor_value.executions))
         sql = "\n".join(item[0] for item in connection.cursor_value.executions)
         self.assertIn("state IN ('consumed', 'uncertain', 'expired')", sql)
         self.assertIn("e.execution_id IS NULL", sql)

@@ -168,7 +168,7 @@ class FakePostgresService:
 
     def preview_ai_migration(self, operation_id, profile_id, database, namespace, schema, allow_destructive, schema_binding):
         self.calls.append(("preview_ai_migration", operation_id, profile_id, database, namespace, schema, allow_destructive, schema_binding))
-        return {"id": None, "previewOnly": True, "applyPlanId": "ai_plan_one", "destructive": False, "steps": [], "warnings": [], "liveFingerprint": "live"}
+        return {"id": None, "previewOnly": True, "applyPlanId": "ai_plan_one", "reviewDigest": "c" * 64, "destructive": False, "steps": [], "warnings": [], "liveFingerprint": "live"}
 
     def apply_ai_migration(self, operation_id, plan_id, profile_id, database, namespace, expected_destructive, confirm_destructive):
         self.calls.append(("apply_ai_migration", operation_id, plan_id, profile_id, database, namespace, expected_destructive, confirm_destructive))
@@ -192,6 +192,12 @@ class FakePostgresService:
 
     def apply_ai_postgres_write(self, operation_id, plan_id, profile_id, database, namespace, relation, expected_kind, expected_review_digest):
         self.calls.append(("apply_ai_postgres_write", operation_id, plan_id, profile_id, database, namespace, relation, expected_kind, expected_review_digest))
+        if expected_kind == "create_view" and hasattr(self, "_test_migrations"):
+            self.view_expected_absent = True
+            self.view_expectation = {"absent": True}
+            self.view_saved_id = None
+            result = self._test_migrations.apply("plan_view", expected_review_digest, False)
+            return {**result, "kind": "view_created"}
         target = {"profileId": profile_id, "database": database, "namespace": namespace, "relation": relation}
         if expected_kind == "insert_rows":
             result = {"kind": "rows_inserted", "operationId": operation_id, "planId": plan_id, "target": target, "insertedRowCount": 2}

@@ -758,12 +758,21 @@ class MetadataStore:
         review_digest: str,
         destructive: bool,
         *,
+        adapter_kind: str,
+        source_kind: str,
         ttl_seconds: int = 900,
+        retention_seconds: int = 30 * 86400,
     ) -> dict[str, Any]:
         application = identity(application_id, "application_id")
         kind = identity(resource_kind, "resource_kind")
         if kind not in {"schema", "view", "materialized_view"}:
             raise MetadataStoreError("invalid_metadata", "resource_kind is invalid", status=400)
+        adapter = identity(adapter_kind, "adapter_kind")
+        if adapter not in {"full_schema", "view_mutation", "insert_rows"}:
+            raise MetadataStoreError("invalid_metadata", "adapter_kind is invalid", status=400)
+        source = identity(source_kind, "source_kind")
+        if source not in {"normal", "ai"}:
+            raise MetadataStoreError("invalid_metadata", "source_kind is invalid", status=400)
         resource = _bounded_text(resource_id, "resource_id", 256)
         revision = _nonnegative_int(resource_revision, "resource_revision")
         layout = _bounded_text(layout_token, "layout_token", 256)
@@ -778,6 +787,7 @@ class MetadataStore:
         if type(destructive) is not bool:
             raise MetadataStoreError("invalid_metadata", "destructive must be a boolean", status=400)
         ttl = _seconds(ttl_seconds, "ttl_seconds", maximum=86400)
+        retention = _seconds(retention_seconds, "retention_seconds", maximum=365 * 86400)
         plan = uuid.uuid4()
         with self._transaction() as cursor:
             cursor.execute(
@@ -785,16 +795,55 @@ class MetadataStore:
                    (plan_id, application_id, resource_kind, resource_id, resource_revision, layout_token,
                     profile_id, database_name, namespace_name, profile_fingerprint,
                     connected_target_fingerprint, live_fingerprint, desired_fingerprint,
-                    private_payload, review_payload, review_digest, destructive, expires_at)
+                     private_payload, review_payload, review_digest, destructive, expires_at,
+                     adapter_kind, source_kind, retain_until)
                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                            %s::jsonb, %s::jsonb, %s, %s,
-                           clock_timestamp() + (%s * interval '1 second'))""",
+                            clock_timestamp() + (%s * interval '1 second'), %s, %s,
+                            clock_timestamp() + (%s * interval '1 second'))""",
                 (plan, application, kind, resource, revision, layout, safe_target["profileId"],
                  safe_target["databaseName"], safe_target["namespaceName"], safe_target["profileFingerprint"],
                  safe_target["connectedTargetFingerprint"], live, desired, _json(private), _json(review), digest,
-                 destructive, ttl),
+                  destructive, ttl, adapter, source, retention),
             )
         return {"planId": str(plan), "state": "ready", "reviewDigest": digest, "expiresInSeconds": ttl}
+
+    def fail_migration_execution_before_mutation(
+        self, execution_id: str, evidence: dict[str, Any],
+    ) -> dict[str, Any]:
+        execution = _uuid(execution_id, "execution_id")
+        safe_evidence = bounded_json(evidence, "evidence", self.max_json_bytes)
+        with self._transaction() as cursor:
+            row = self._lock_execution(cursor, execution)
+            current = _row_value(row, "state", 0)
+            if current == "failed":
+                return {"executionId": str(execution), "state": "failed", "transitionOwner": False}
+            if current != "ready":
+                raise MetadataStoreError("execution_transition_invalid", "Execution is not awaiting target validation", status=409)
+            cursor.execute(
+                "UPDATE metadata_migration_executions SET state = 'failed', commit_outcome = 'rolled_back', updated_at = clock_timestamp() WHERE execution_id = %s",
+                (execution,),
+            )
+            self._migration_transition(cursor, execution, "ready", "failed", safe_evidence)
+        return {"executionId": str(execution), "state": "failed", "commitOutcome": "rolled_back", "transitionOwner": True}
+
+    def get_migration_status(self, plan_id: str) -> dict[str, Any]:
+        plan = self.get_migration_plan(plan_id)
+        plan_uuid = _uuid(plan_id, "plan_id")
+        with self._transaction(write=False) as cursor:
+            cursor.execute(
+                """SELECT e.*, s.sync_id, s.state AS sync_state, s.receipt AS sync_receipt
+                   FROM metadata_migration_executions e
+                   LEFT JOIN metadata_migration_syncs s USING (execution_id)
+                   WHERE e.plan_id = %s""",
+                (plan_uuid,),
+            )
+            row = cursor.fetchone()
+        return {"plan": plan, "execution": None if row is None else _execution_record(row)}
+
+    def get_migration_execution_context(self, execution_id: str) -> dict[str, Any]:
+        execution = self.get_migration_execution(execution_id)
+        return {"execution": execution, "plan": self.get_migration_plan(execution["planId"], include_private=True)}
 
     def get_migration_plan(self, plan_id: str, *, include_private: bool = False) -> dict[str, Any]:
         plan = _uuid(plan_id, "plan_id")
@@ -899,6 +948,63 @@ class MetadataStore:
             cursor.execute("UPDATE metadata_migration_executions SET intended_result = %s::jsonb, updated_at = clock_timestamp() WHERE execution_id = %s",
                            (_json(intended), execution))
         return {"executionId": str(execution), "state": "applying", "recordOwner": True}
+
+    def prepare_migration_reconciliation(
+        self, execution_id: str, evidence: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Move an interrupted applying execution to reconcile-only ownership."""
+        execution = _uuid(execution_id, "execution_id")
+        safe_evidence = bounded_json(evidence, "evidence", self.max_json_bytes)
+        with self._transaction() as cursor:
+            row = self._lock_execution(cursor, execution)
+            current = _row_value(row, "state", 0)
+            xid = _row_value(row, "target_xid", 1)
+            identity_document = _json_value(_row_value(row, "target_identity", 2))
+            intended = _json_value(_row_value(row, "intended_result", 3))
+            reconciliation = _row_value(row, "reconciliation_status", 5)
+            if current == "uncertain":
+                return {
+                    "executionId": str(execution), "state": current, "transitionOwner": False,
+                    "targetXid": xid, "targetIdentity": identity_document,
+                    "intendedResultPresent": intended is not None,
+                    "manualRequired": reconciliation == "failed",
+                }
+            if current != "applying":
+                raise MetadataStoreError("reconciliation_not_required", "Execution is not applying", status=409)
+            manual = xid is None or identity_document is None
+            status = "failed" if manual else "required"
+            cursor.execute(
+                """UPDATE metadata_migration_executions
+                   SET state = 'uncertain', commit_outcome = 'uncertain', reconciliation_status = %s,
+                       reconciliation_evidence = %s::jsonb, updated_at = clock_timestamp()
+                   WHERE execution_id = %s""",
+                (status, _json(safe_evidence), execution),
+            )
+            self._migration_transition(cursor, execution, "applying", "uncertain", safe_evidence)
+        return {
+            "executionId": str(execution), "state": "uncertain", "transitionOwner": True,
+            "targetXid": xid, "targetIdentity": identity_document,
+            "intendedResultPresent": intended is not None, "manualRequired": manual,
+        }
+
+    def require_manual_migration_reconciliation(
+        self, execution_id: str, evidence: dict[str, Any],
+    ) -> dict[str, Any]:
+        execution = _uuid(execution_id, "execution_id")
+        safe_evidence = bounded_json(evidence, "evidence", self.max_json_bytes)
+        with self._transaction() as cursor:
+            row = self._lock_execution(cursor, execution)
+            if _row_value(row, "state", 0) != "uncertain":
+                raise MetadataStoreError("reconciliation_not_required", "Execution is not uncertain", status=409)
+            if _row_value(row, "reconciliation_status", 5) == "failed":
+                return {"executionId": str(execution), "state": "uncertain", "manualRequired": True, "transitionOwner": False}
+            cursor.execute(
+                """UPDATE metadata_migration_executions
+                   SET reconciliation_status = 'failed', reconciliation_evidence = %s::jsonb,
+                       updated_at = clock_timestamp() WHERE execution_id = %s""",
+                (_json(safe_evidence), execution),
+            )
+        return {"executionId": str(execution), "state": "uncertain", "manualRequired": True, "transitionOwner": True}
 
     def finish_migration_execution(
         self,
@@ -1058,6 +1164,19 @@ class MetadataStore:
         count = _limit(limit, maximum=10000)
         deleted: dict[str, int] = {}
         with self._transaction() as cursor:
+            cursor.execute(
+                """UPDATE metadata_migration_plans p
+                   SET private_payload = '{}'::jsonb, private_payload_redacted_at = clock_timestamp()
+                   FROM metadata_migration_executions e
+                   WHERE e.plan_id = p.plan_id
+                     AND (e.state = 'failed' OR (e.state = 'succeeded' AND EXISTS (
+                         SELECT 1 FROM metadata_migration_syncs s
+                         WHERE s.execution_id = e.execution_id AND s.state IN ('succeeded', 'conflict', 'failed')
+                     )))
+                     AND p.private_payload_redacted_at IS NULL AND p.retain_until < %s""",
+                (cutoff,),
+            )
+            deleted["planPayloadsRedacted"] = max(0, int(cursor.rowcount))
             for name, sql in (
                 ("results", "DELETE FROM metadata_query_result_references WHERE result_ref_id IN (SELECT result_ref_id FROM metadata_query_result_references WHERE state IN ('consumed', 'uncertain', 'expired') AND expires_at < %s ORDER BY expires_at LIMIT %s FOR UPDATE SKIP LOCKED)"),
                 ("plans", "DELETE FROM metadata_migration_plans WHERE plan_id IN (SELECT p.plan_id FROM metadata_migration_plans p LEFT JOIN metadata_migration_executions e USING (plan_id) WHERE e.execution_id IS NULL AND p.expires_at < %s ORDER BY p.expires_at LIMIT %s FOR UPDATE OF p SKIP LOCKED)"),
@@ -1347,7 +1466,8 @@ def _plan_record(row: Any, *, include_private: bool) -> dict[str, Any]:
     names = ("plan_id", "application_id", "resource_kind", "resource_id", "resource_revision", "layout_token",
              "profile_id", "database_name", "namespace_name", "profile_fingerprint", "connected_target_fingerprint",
              "live_fingerprint", "desired_fingerprint", "private_payload", "review_payload", "review_digest", "destructive",
-             "state", "created_at", "expires_at")
+              "state", "created_at", "expires_at", "adapter_kind", "source_kind", "retain_until",
+              "private_payload_redacted_at")
     values = {name: _row_value(row, name, index) for index, name in enumerate(names)}
     record = {"planId": str(values["plan_id"]), "applicationId": values["application_id"],
               "resourceKind": values["resource_kind"], "resourceId": values["resource_id"],
@@ -1358,7 +1478,9 @@ def _plan_record(row: Any, *, include_private: bool) -> dict[str, Any]:
               "liveFingerprint": values["live_fingerprint"], "desiredFingerprint": values["desired_fingerprint"],
               "reviewPayload": _json_value(values["review_payload"]), "reviewDigest": values["review_digest"],
               "destructive": values["destructive"], "state": values["state"],
-              "createdAt": values["created_at"], "expiresAt": values["expires_at"]}
+              "adapterKind": values["adapter_kind"], "sourceKind": values["source_kind"],
+              "createdAt": values["created_at"], "expiresAt": values["expires_at"],
+              "retainUntil": values["retain_until"], "privatePayloadRedactedAt": values["private_payload_redacted_at"]}
     if include_private:
         record["privatePayload"] = _json_value(values["private_payload"])
     return record

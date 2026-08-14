@@ -194,6 +194,22 @@ class SchemaStore:
                 raise SchemaStoreError(409, "layout_conflict", "Saved layout changed; hard-refresh before continuing")
             yield json.loads(json.dumps(found[1]))
 
+    def require_migration_binding(
+        self, schema_id: str, expected_revision: Any, layout_token: Any,
+        profile_id: str, database: str, namespace: str,
+    ) -> dict[str, Any]:
+        """Load the exact server-owned desired schema for a migration preview."""
+        schema_id = self.validate_id(schema_id)
+        with self._schema_guard(schema_id):
+            found = self._find(schema_id)
+            if found is None:
+                raise SchemaStoreError(404, "not_found", "Schema was not found")
+            record = found[1]
+            self._require_view_binding(
+                record, expected_revision, layout_token, profile_id, database, namespace,
+            )
+            return json.loads(json.dumps(record))
+
     def _find(self, schema_id: str) -> tuple[Path, dict[str, Any]] | None:
         for path, record in self._records():
             if record["id"] == schema_id:
@@ -334,7 +350,10 @@ class SchemaStore:
                 "updatedAt": stored["updatedAt"], "layoutToken": schema_layout_token(stored),
             }
             if receipt_id is not None:
-                if not isinstance(receipt_id, str) or not re.fullmatch(r"ai_plan_[A-Za-z0-9_-]{1,120}", receipt_id):
+                if not isinstance(receipt_id, str) or not (
+                    re.fullmatch(r"ai_plan_[A-Za-z0-9_-]{1,120}", receipt_id)
+                    or re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", receipt_id)
+                ):
                     raise SchemaStoreError(400, "invalid_schema_binding", "View mutation receipt is invalid")
                 receipts = stored.setdefault("aiViewMutationReceipts", {})
                 receipts[receipt_id] = result
@@ -384,7 +403,7 @@ class SchemaStore:
 
             stored = dict(record)
             if found:
-                for key in ("aiOperationReceipts", "aiViewMutationReceipts", "lastAiMigrationSync"):
+                for key in ("aiOperationReceipts", "aiViewMutationReceipts", "migrationSyncReceipts", "lastAiMigrationSync"):
                     if key in existing_record:
                         stored[key] = json.loads(json.dumps(existing_record[key]))
             stored.pop("layoutToken", None)
@@ -516,8 +535,10 @@ class SchemaStore:
                 sync = current.get("lastAiMigrationSync")
                 if isinstance(sync, dict) and sync.get("sourceRevision") == expected_revision:
                     return json.loads(json.dumps(sync["result"]))
-            if current.get("revision", 0) != expected_revision or schema_layout_token(current) != layout_token:
+            if current.get("revision", 0) != expected_revision:
                 raise SchemaStoreError(409, "schema_conflict", "Saved design changed after migration preview; reload and reconcile")
+            if schema_layout_token(current) != layout_token:
+                raise SchemaStoreError(409, "layout_conflict", "Saved layout changed after migration preview; hard-refresh and reconcile")
             stored = json.loads(json.dumps(current))
             semantic = json.loads(json.dumps(refreshed_schema))
             semantic["projectName"] = current["schema"]["projectName"]
@@ -583,6 +604,43 @@ class SchemaStore:
             except OSError as exc:
                 raise SchemaStoreError(500, "schema_store_error", "Schema file could not be saved after migration") from exc
             return result
+
+    def sync_full_migration_result(
+        self, schema_id: str, expected_revision: Any, layout_token: Any,
+        refreshed_schema: Any, execution_id: str,
+    ) -> dict[str, Any]:
+        """Synchronize full semantic state while proving every established layout value is unchanged."""
+        if not isinstance(execution_id, str):
+            raise SchemaStoreError(400, "invalid_schema_binding", "Execution identity is invalid")
+        current = self.get(schema_id)
+        receipts = current.get("migrationSyncReceipts", {})
+        if isinstance(receipts, dict) and isinstance(receipts.get(execution_id), dict):
+            return json.loads(json.dumps(receipts[execution_id]))
+        before_layout = json.loads(json.dumps(current.get("schema", {}).get("layout"))) if "layout" in current.get("schema", {}) else None
+        before_legacy = {
+            item.get("id"): {key: json.loads(json.dumps(item[key])) for key in ("x", "y", "color") if key in item}
+            for item in current.get("schema", {}).get("tables", []) if isinstance(item, dict) and isinstance(item.get("id"), str)
+        }
+        result = self.sync_ai_migration_result(schema_id, expected_revision, layout_token, refreshed_schema)
+        with self._schema_guard(schema_id):
+            found = self._find(schema_id)
+            if found is None:
+                raise SchemaStoreError(404, "not_found", "Schema was not found")
+            path, stored = found
+            after_layout = stored.get("schema", {}).get("layout") if "layout" in stored.get("schema", {}) else None
+            after_tables = {item.get("id"): item for item in stored.get("schema", {}).get("tables", []) if isinstance(item, dict)}
+            after_legacy = {
+                table_id: {key: json.loads(json.dumps(after_tables.get(table_id, {}).get(key))) for key in values}
+                for table_id, values in before_legacy.items()
+            }
+            if after_layout != before_layout or after_legacy != before_legacy:
+                raise SchemaStoreError(500, "layout_preservation_failed", "Migration synchronization changed established layout")
+            stored.setdefault("migrationSyncReceipts", {})[execution_id] = result
+            try:
+                write_json(path, stored)
+            except OSError as exc:
+                raise SchemaStoreError(500, "schema_store_error", "Schema sync receipt could not be saved") from exc
+        return result
 
     def delete(self, schema_id: str) -> dict[str, str]:
         schema_id = self.validate_id(schema_id)
