@@ -254,7 +254,7 @@ class MetadataStore:
             capabilities = {_row_value(item, "capability", 0): _row_value(item, "grant_mode", 1) for item in cursor.fetchall()}
         return {"policyVersionId": str(policy_id), "revision": int(_row_value(row, "revision", 1)),
                 "policy": _json_value(_row_value(row, "policy", 2)), "capabilities": capabilities,
-                "createdAt": _row_value(row, "created_at", 3)}
+                "createdAt": _iso_datetime(_row_value(row, "created_at", 3))}
 
     def list_grants(self, chat_id: str, *, active_only: bool = False) -> list[dict[str, Any]]:
         chat = _uuid(chat_id, "chat_id")
@@ -270,8 +270,9 @@ class MetadataStore:
             rows = cursor.fetchall()
         return [{"grantId": str(_row_value(row, "grant_id", 0)), "capability": _row_value(row, "capability", 1),
                  "policyRevision": int(_row_value(row, "policy_revision", 2)), "state": _row_value(row, "state", 3),
-                 "expiresAt": _row_value(row, "expires_at", 4), "createdAt": _row_value(row, "created_at", 5),
-                 "revokedAt": _row_value(row, "revoked_at", 6)} for row in rows]
+                 "expiresAt": _iso_datetime(_row_value(row, "expires_at", 4)),
+                 "createdAt": _iso_datetime(_row_value(row, "created_at", 5)),
+                 "revokedAt": _iso_datetime(_row_value(row, "revoked_at", 6))} for row in rows]
 
     def update_policy(
         self,
@@ -1154,10 +1155,10 @@ class MetadataStore:
         if kind == "migration":
             return [{"transitionId": int(_row_value(row, "transition_id", 0)), "fromState": _row_value(row, "from_state", 1),
                      "toState": _row_value(row, "to_state", 2), "evidence": _json_value(_row_value(row, "evidence", 3)),
-                     "createdAt": _row_value(row, "created_at", 4)} for row in rows]
+                     "createdAt": _iso_datetime(_row_value(row, "created_at", 4))} for row in rows]
         return [{"transitionId": int(_row_value(row, "transition_id", 0)), "fromState": _row_value(row, "from_state", 1),
                  "toState": _row_value(row, "to_state", 2), "reason": _row_value(row, "reason", 3),
-                 "createdAt": _row_value(row, "created_at", 4)} for row in rows]
+                 "createdAt": _iso_datetime(_row_value(row, "created_at", 4))} for row in rows]
 
     def cleanup(self, *, before: datetime, limit: int = 1000) -> dict[str, int]:
         cutoff = _aware_datetime(before, "before")
@@ -1435,8 +1436,9 @@ def _chat_record(row: Any) -> dict[str, Any]:
     return {"chatId": str(_row_value(row, "chat_id", 0)), "applicationId": _row_value(row, "application_id", 1),
             "resourceKind": _row_value(row, "resource_kind", 2), "resourceId": _row_value(row, "resource_id", 3),
             "externalSessionId": _row_value(row, "external_session_id", 4), "state": _row_value(row, "state", 5),
-            "createdAt": _row_value(row, "created_at", 6), "updatedAt": _row_value(row, "updated_at", 7),
-            "deletedAt": _row_value(row, "deleted_at", 8), "target": target,
+            "createdAt": _iso_datetime(_row_value(row, "created_at", 6)),
+            "updatedAt": _iso_datetime(_row_value(row, "updated_at", 7)),
+            "deletedAt": _iso_datetime(_row_value(row, "deleted_at", 8)), "target": target,
             "displayTitle": _row_value(row, "display_title", 15)}
 
 
@@ -1444,19 +1446,19 @@ def _proposal_record(row: Any) -> dict[str, Any]:
     return {"proposalId": str(_row_value(row, "proposal_id", 0)), "chatId": str(_row_value(row, "chat_id", 1)),
             "capability": _row_value(row, "capability", 2), "policyRevision": int(_row_value(row, "policy_revision", 3)),
             "binding": _json_value(_row_value(row, "binding", 4)), "action": _json_value(_row_value(row, "action", 5)),
-            "state": _row_value(row, "state", 6), "createdAt": _row_value(row, "created_at", 7),
-            "expiresAt": _row_value(row, "expires_at", 8)}
+            "state": _row_value(row, "state", 6), "createdAt": _iso_datetime(_row_value(row, "created_at", 7)),
+            "expiresAt": _iso_datetime(_row_value(row, "expires_at", 8))}
 
 
 def _operation_record(row: Any) -> dict[str, Any]:
     return {"operationId": str(_row_value(row, "operation_id", 0)),
             "proposalId": None if _row_value(row, "proposal_id", 1) is None else str(_row_value(row, "proposal_id", 1)),
             "chatId": str(_row_value(row, "chat_id", 2)), "capability": _row_value(row, "capability", 3),
-            "state": _row_value(row, "state", 4), "createdAt": _row_value(row, "created_at", 5),
-            "updatedAt": _row_value(row, "updated_at", 6),
+            "state": _row_value(row, "state", 4), "createdAt": _iso_datetime(_row_value(row, "created_at", 5)),
+            "updatedAt": _iso_datetime(_row_value(row, "updated_at", 6)),
             "attempt": None if _row_value(row, "attempt_id", 7) is None else {
                 "attemptId": str(_row_value(row, "attempt_id", 7)), "workerId": _row_value(row, "worker_id", 8),
-                "leaseExpiresAt": _row_value(row, "lease_expires_at", 9)},
+                "leaseExpiresAt": _iso_datetime(_row_value(row, "lease_expires_at", 9))},
             "outcome": None if _row_value(row, "outcome_state", 10) is None else {
                 "state": _row_value(row, "outcome_state", 10), "result": _json_value(_row_value(row, "result", 11)),
                 "error": _json_value(_row_value(row, "error", 12))}}
@@ -1479,8 +1481,9 @@ def _plan_record(row: Any, *, include_private: bool) -> dict[str, Any]:
               "reviewPayload": _json_value(values["review_payload"]), "reviewDigest": values["review_digest"],
               "destructive": values["destructive"], "state": values["state"],
               "adapterKind": values["adapter_kind"], "sourceKind": values["source_kind"],
-              "createdAt": values["created_at"], "expiresAt": values["expires_at"],
-              "retainUntil": values["retain_until"], "privatePayloadRedactedAt": values["private_payload_redacted_at"]}
+              "createdAt": _iso_datetime(values["created_at"]), "expiresAt": _iso_datetime(values["expires_at"]),
+              "retainUntil": _iso_datetime(values["retain_until"]),
+              "privatePayloadRedactedAt": _iso_datetime(values["private_payload_redacted_at"])}
     if include_private:
         record["privatePayload"] = _json_value(values["private_payload"])
     return record
@@ -1493,7 +1496,8 @@ def _execution_record(row: Any) -> dict[str, Any]:
             "state": value("state", 2), "confirmedReviewDigest": value("confirmed_review_digest", 3),
             "destructiveConfirmed": value("destructive_confirmed", 4), "targetXid": value("target_xid", 5),
             "targetIdentity": _json_value(value("target_identity", 6)), "intendedResult": _json_value(value("intended_result", 7)),
-            "commitOutcome": value("commit_outcome", 8), "createdAt": value("created_at", 9), "updatedAt": value("updated_at", 10),
+            "commitOutcome": value("commit_outcome", 8), "createdAt": _iso_datetime(value("created_at", 9)),
+            "updatedAt": _iso_datetime(value("updated_at", 10)),
             "reconciliationStatus": value("reconciliation_status", 11),
             "reconciliationEvidence": _json_value(value("reconciliation_evidence", 12)),
             "sync": None if value("sync_id", 13) is None else {"syncId": str(value("sync_id", 13)),
@@ -1512,6 +1516,12 @@ def _json(value: Any) -> str:
 
 def _json_value(value: Any) -> Any:
     return json.loads(value) if isinstance(value, str) else value
+
+
+def _iso_datetime(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return value
 
 
 def _row_value(row: Any, name: str, index: int) -> Any:

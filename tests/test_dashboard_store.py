@@ -82,6 +82,35 @@ MERCURY_DESCRIPTOR = {
 
 
 class DashboardStoreTests(unittest.TestCase):
+    def test_read_only_store_does_not_create_paths_or_allow_writes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "missing"
+            store = DashboardStore(path, read_only=True)
+            self.assertEqual(store.list(), [])
+            self.assertFalse(path.exists())
+            with self.assertRaises(DashboardStoreError) as caught:
+                store.create("Blocked")
+            self.assertEqual(caught.exception.payload["error"]["code"], "dashboard_store_read_only")
+
+    def test_read_only_get_and_revision_guard_do_not_create_file_locks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "dashboards"
+            path.mkdir()
+            record = mercury_dashboard_record()
+            record["revision"] = 1
+            (path / "dashboard_mercury.json").write_text(json.dumps(record), encoding="utf-8")
+            store = DashboardStore(path, read_only=True)
+
+            self.assertEqual(store.get("dashboard_mercury")["revision"], 1)
+            with store.guard_revision("dashboard_mercury", 1) as guarded:
+                self.assertEqual(guarded["id"], "dashboard_mercury")
+            self.assertFalse((path / ".locks").exists())
+
+            with self.assertRaises(DashboardStoreError) as caught:
+                store.save("dashboard_mercury", record)
+            self.assertEqual(caught.exception.status, 403)
+            self.assertEqual(caught.exception.payload["error"]["code"], "dashboard_store_read_only")
+
     def setUp(self):
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary_directory.name) / "dashboards"

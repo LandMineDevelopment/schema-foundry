@@ -1,5 +1,6 @@
 import json
 import sys
+import tempfile
 import unittest
 import uuid
 from importlib import resources
@@ -81,6 +82,42 @@ class MetadataConfigTests(unittest.TestCase):
         self.assertIs(factory(), expected)
         self.assertEqual(calls[0][0], ("postgresql://metadata@db/schemii_metadata",))
         self.assertEqual(calls[0][1], {"connect_timeout": 7, "application_name": "schemii-metadata"})
+
+    def test_connection_factory_reads_password_file_without_changing_dsn(self):
+        with tempfile.TemporaryDirectory() as directory:
+            password_file = Path(directory) / "password"
+            password_file.write_text("file-only-secret\n", encoding="utf-8")
+            calls = []
+            factory = MetadataConnectionFactory(
+                MetadataConfig("host=db dbname=schemii_metadata user=runtime", password_file=str(password_file)),
+                lambda *args, **kwargs: calls.append((args, kwargs)) or object(),
+            )
+            factory()
+        self.assertEqual(calls[0][0], ("host=db dbname=schemii_metadata user=runtime",))
+        self.assertEqual(calls[0][1]["password"], "file-only-secret")
+        self.assertNotIn("file-only-secret", calls[0][0][0])
+
+    def test_connection_factory_rejects_invalid_password_file_format(self):
+        for value in (
+            "short\n",
+            "valid-credential-value\r\n",
+            "valid-credential-value\r",
+            "valid-credential-value\nsecond-line\n",
+            "invalid credential value\n",
+        ):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as directory:
+                password_file = Path(directory) / "password"
+                password_file.write_text(value, encoding="utf-8")
+                factory = MetadataConnectionFactory(
+                    MetadataConfig(
+                        "host=db dbname=schemii_metadata user=runtime",
+                        password_file=str(password_file),
+                    ),
+                    lambda *args, **kwargs: object(),
+                )
+                with self.assertRaises(MetadataStoreError) as caught:
+                    factory()
+                self.assertEqual(caught.exception.code, "metadata_unavailable")
 
     def test_connection_errors_are_structured_and_do_not_leak_dsn(self):
         dsn = "postgresql://metadata:do-not-leak@db/schemii_metadata"

@@ -1,8 +1,9 @@
 import hashlib
+import json
 import sys
 import unittest
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from importlib import resources
 from pathlib import Path
 
@@ -12,6 +13,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from schemii.metadata import MetadataStore, MetadataStoreError, canonical_review_digest
 from schemii.metadata.migrator import packaged_migrations
+from schemii.metadata.store import _chat_record, _execution_record, _operation_record, _plan_record, _proposal_record
 
 
 class FakeCursor:
@@ -82,6 +84,77 @@ class MetadataRepositoryMigrationTests(unittest.TestCase):
 
 
 class MetadataRepositoryContractTests(unittest.TestCase):
+    def test_public_migration_records_serialize_postgresql_timestamps(self):
+        timestamp = datetime(2026, 8, 14, 3, tzinfo=timezone(timedelta(hours=3)))
+        plan = _plan_record({
+            "plan_id": uuid.uuid4(), "application_id": "schemii", "resource_kind": "schema",
+            "resource_id": "schema_one", "resource_revision": 1, "layout_token": "l" * 64,
+            "profile_id": "profile", "database_name": "db", "namespace_name": "public",
+            "profile_fingerprint": "a" * 64, "connected_target_fingerprint": "b" * 64,
+            "live_fingerprint": "c" * 64, "desired_fingerprint": "d" * 64,
+            "private_payload": {}, "review_payload": {}, "review_digest": "e" * 64,
+            "destructive": False, "state": "ready", "created_at": timestamp, "expires_at": timestamp,
+            "adapter_kind": "full_schema", "source_kind": "normal", "retain_until": timestamp,
+            "private_payload_redacted_at": None,
+        }, include_private=False)
+        execution = _execution_record({
+            "execution_id": uuid.uuid4(), "plan_id": uuid.uuid4(), "state": "succeeded",
+            "confirmed_review_digest": "e" * 64, "destructive_confirmed": False, "target_xid": "1",
+            "target_identity": {}, "intended_result": {}, "commit_outcome": "committed",
+            "created_at": timestamp, "updated_at": timestamp, "reconciliation_status": "not_required",
+            "reconciliation_evidence": None, "sync_id": None, "sync_state": None, "sync_receipt": None,
+        })
+        self.assertEqual(plan["createdAt"], "2026-08-14T00:00:00Z")
+        self.assertEqual(execution["updatedAt"], "2026-08-14T00:00:00Z")
+        self.assertIsNone(plan["privatePayloadRedactedAt"])
+
+    def test_public_authority_records_serialize_nullable_and_non_utc_timestamps(self):
+        timestamp = datetime(2026, 8, 13, 20, tzinfo=timezone(timedelta(hours=-4)))
+        chat_id = uuid.uuid4()
+        proposal_id = uuid.uuid4()
+        operation_id = uuid.uuid4()
+        records = [
+            _chat_record({
+                "chat_id": chat_id, "application_id": "schemii", "resource_kind": "schema",
+                "resource_id": "schema_one", "external_session_id": None, "state": "active",
+                "created_at": timestamp, "updated_at": timestamp, "deleted_at": None,
+                "target_id": None, "profile_id": None, "database_name": None, "namespace_name": None,
+                "profile_fingerprint": None, "connected_target_fingerprint": None, "display_title": "Chat",
+            }),
+            _proposal_record({
+                "proposal_id": proposal_id, "chat_id": chat_id, "capability": "schema.read",
+                "policy_revision": 1, "binding": {}, "action": {}, "state": "ready",
+                "created_at": timestamp, "expires_at": timestamp,
+            }),
+            _operation_record({
+                "operation_id": operation_id, "proposal_id": proposal_id, "chat_id": chat_id,
+                "capability": "schema.read", "state": "running", "created_at": timestamp,
+                "updated_at": timestamp, "attempt_id": uuid.uuid4(), "worker_id": "worker",
+                "lease_expires_at": timestamp, "outcome_state": None, "result": None, "error": None,
+            }),
+        ]
+        policy = MetadataStore(lambda: FakeConnection(rows=[{
+            "policy_version_id": uuid.uuid4(), "revision": 1, "policy": {}, "created_at": timestamp,
+        }, []])).get_current_policy(str(chat_id))
+        grants = MetadataStore(lambda: FakeConnection(rows=[[
+            {"grant_id": uuid.uuid4(), "capability": "schema.read", "policy_revision": 1,
+             "state": "active", "expires_at": None, "created_at": timestamp, "revoked_at": None},
+        ]])).list_grants(str(chat_id))
+        transitions = MetadataStore(lambda: FakeConnection(rows=[[
+            {"transition_id": 1, "from_state": None, "to_state": "active", "reason": "created",
+             "created_at": timestamp},
+        ]])).list_transitions("chat", str(chat_id))
+
+        self.assertEqual(records[0]["createdAt"], "2026-08-14T00:00:00Z")
+        self.assertIsNone(records[0]["deletedAt"])
+        self.assertEqual(records[1]["expiresAt"], "2026-08-14T00:00:00Z")
+        self.assertEqual(records[2]["attempt"]["leaseExpiresAt"], "2026-08-14T00:00:00Z")
+        self.assertEqual(policy["createdAt"], "2026-08-14T00:00:00Z")
+        self.assertEqual(grants[0]["createdAt"], "2026-08-14T00:00:00Z")
+        self.assertIsNone(grants[0]["expiresAt"])
+        self.assertEqual(transitions[0]["createdAt"], "2026-08-14T00:00:00Z")
+        json.dumps([*records, policy, grants, transitions])
+
     def test_canonical_review_digest_is_order_independent(self):
         first = canonical_review_digest({"steps": [{"sql": "SELECT 1"}], "destructive": False})
         second = canonical_review_digest({"destructive": False, "steps": [{"sql": "SELECT 1"}]})

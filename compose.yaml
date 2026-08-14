@@ -2,17 +2,22 @@ name: ${SCHEMII_INSTANCE:-schemii}
 
 services:
   metadata-postgres:
-    image: postgres:17-alpine
+    build:
+      context: ./docker/metadata
+    image: ${SCHEMII_METADATA_IMAGE:-schemii-metadata-postgres:local}
     environment:
       POSTGRES_DB: schemii_metadata
       POSTGRES_USER: schemii_metadata_bootstrap
-      POSTGRES_PASSWORD: ${SCHEMII_METADATA_BOOTSTRAP_PASSWORD:-schemii-metadata-bootstrap-local}
-      SCHEMII_METADATA_MIGRATION_PASSWORD: ${SCHEMII_METADATA_MIGRATION_PASSWORD:-schemii-metadata-migration-local}
-      SCHEMII_METADATA_SCHEMII_PASSWORD: ${SCHEMII_METADATA_SCHEMII_PASSWORD:-schemii-metadata-runtime-local}
-      SCHEMII_METADATA_SCHEMER_PASSWORD: ${SCHEMII_METADATA_SCHEMER_PASSWORD:-schemer-metadata-runtime-local}
+      POSTGRES_PASSWORD_FILE: /tmp/schemii-metadata-secrets/metadata_bootstrap_password
+    secrets:
+      - metadata_bootstrap_password
+      - metadata_migration_password
+      - metadata_schemii_password
+      - metadata_schemer_password
     volumes:
       - schemii-metadata-postgres:/var/lib/postgresql/data
       - ./docker/metadata/001_roles.sh:/docker-entrypoint-initdb.d/001_roles.sh:ro
+      - ./docker/metadata/002_rotation_function.sql:/docker-entrypoint-initdb.d/002_rotation_function.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U schemii_metadata_migration -d $$POSTGRES_DB"]
       interval: 2s
@@ -30,7 +35,9 @@ services:
     environment:
       SCHEMII_METADATA_DSN: host=metadata-postgres port=5432 dbname=schemii_metadata user=schemii_metadata_migration options='-c role=schemii_metadata_owner'
       SCHEMII_METADATA_APPLICATION_NAME: schemii-metadata-migrate
-      PGPASSWORD: ${SCHEMII_METADATA_MIGRATION_PASSWORD:-schemii-metadata-migration-local}
+      SCHEMII_METADATA_PASSWORD_FILE: /run/secrets/metadata_migration_password
+    secrets:
+      - metadata_migration_password
     depends_on:
       metadata-postgres:
         condition: service_healthy
@@ -39,6 +46,12 @@ services:
       - /tmp:size=8m,mode=1777
     cap_drop:
       - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETPCAP
+      - SETUID
     security_opt:
       - no-new-privileges:true
     restart: "no"
@@ -54,11 +67,14 @@ services:
       SCHEMII_PORT: 8080
       SCHEMII_CONFIG_DIR: /data/config
       SCHEMII_SCHEMA_DIR: /data/schemas
+      SCHEMER_DASHBOARD_DIR: /tmp/schemer-dashboards
       SCHEMII_BEHIND_LOOPBACK_PROXY: 1
       SCHEMII_EXAMPLES: local
       SCHEMII_METADATA_DSN: host=metadata-postgres port=5432 dbname=schemii_metadata user=schemii_metadata_schemii
       SCHEMII_METADATA_APPLICATION_NAME: schemii
-      PGPASSWORD: ${SCHEMII_METADATA_SCHEMII_PASSWORD:-schemii-metadata-runtime-local}
+      SCHEMII_METADATA_PASSWORD_FILE: /run/secrets/metadata_schemii_password
+    secrets:
+      - metadata_schemii_password
     depends_on:
       metadata-migrate:
         condition: service_completed_successfully
@@ -70,6 +86,12 @@ services:
       - /tmp:size=16m,mode=1777
     cap_drop:
       - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETPCAP
+      - SETUID
     security_opt:
       - no-new-privileges:true
     healthcheck:
@@ -84,3 +106,15 @@ volumes:
   schemii-metadata-postgres:
   schemii-config:
   schemii-schemas:
+
+secrets:
+  metadata_bootstrap_password:
+    file: ${SCHEMII_CREDENTIAL_DIR:?Set SCHEMII_CREDENTIAL_DIR to an absolute directory containing instance secret files}/metadata_bootstrap_password
+  metadata_migration_password:
+    file: ${SCHEMII_CREDENTIAL_DIR:?Set SCHEMII_CREDENTIAL_DIR to an absolute directory containing instance secret files}/metadata_migration_password
+  metadata_schemii_password:
+    file: ${SCHEMII_CREDENTIAL_DIR:?Set SCHEMII_CREDENTIAL_DIR to an absolute directory containing instance secret files}/metadata_schemii_password
+  metadata_schemer_password:
+    file: ${SCHEMII_CREDENTIAL_DIR:?Set SCHEMII_CREDENTIAL_DIR to an absolute directory containing instance secret files}/metadata_schemer_password
+  opencode_password:
+    file: ${SCHEMII_CREDENTIAL_DIR:?Set SCHEMII_CREDENTIAL_DIR to an absolute directory containing instance secret files}/opencode_password

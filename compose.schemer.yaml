@@ -1,4 +1,10 @@
 services:
+  schemii:
+    environment:
+      SCHEMER_DASHBOARD_DIR: /data/dependency-dashboards
+    volumes:
+      - schemer-dashboards:/data/dependency-dashboards:ro
+
   schemer:
     build:
       context: .
@@ -14,18 +20,28 @@ services:
       SCHEMER_PORT: 8081
       SCHEMER_CONFIG_DIR: /data/config
       SCHEMER_DASHBOARD_DIR: /data/dashboards
+      SCHEMII_SCHEMA_DIR: /data/schemas
       SCHEMER_BEHIND_LOOPBACK_PROXY: 1
       SCHEMII_METADATA_DSN: host=metadata-postgres port=5432 dbname=schemii_metadata user=schemii_metadata_schemer
       SCHEMII_METADATA_APPLICATION_NAME: schemer
-      PGPASSWORD: ${SCHEMII_METADATA_SCHEMER_PASSWORD:-schemer-metadata-runtime-local}
+      SCHEMII_METADATA_PASSWORD_FILE: /run/secrets/metadata_schemer_password
+    secrets:
+      - metadata_schemer_password
     volumes:
       - schemii-config:/data/config
+      - schemii-schemas:/data/schemas:ro
       - schemer-dashboards:/data/dashboards
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777
     cap_drop:
       - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETPCAP
+      - SETUID
     security_opt:
       - no-new-privileges:true
     healthcheck:

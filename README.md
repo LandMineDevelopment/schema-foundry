@@ -170,7 +170,7 @@ $env:SCHEMER_HOST_PORT = "18081"
 docker compose -f compose.yaml -f compose.postgres.yaml -f compose.schemer.yaml up --build -d
 ```
 
-To run both applications with one shared OpenCode service, set `SCHEMII_OPENCODE_PASSWORD` and include both AI overrides:
+To run both applications with one shared OpenCode service, set `SCHEMII_CREDENTIAL_DIR` to the absolute owner-only five-file credential directory described below and include both AI overrides:
 
 ```bash
 docker compose -f compose.yaml -f compose.postgres.yaml -f compose.ai.yaml -f compose.schemer.yaml -f compose.schemer.ai.yaml up --build -d
@@ -239,6 +239,8 @@ docker volume ls --filter "label=com.docker.compose.project=<instance>"
 
 Back up the config, schemas, Schemer dashboards, both PostgreSQL databases, and non-cache OpenCode volumes before upgrades or migration work. Use `pg_dump` for important PostgreSQL data. Metadata can contain sensitive authority history and transient query-result payloads, so protect and retain its backups separately from user target backups.
 
+The launchers generate five cryptographically random credentials per instance: one metadata bootstrap initialization secret, three metadata PostgreSQL login-role passwords, and one internal OpenCode password. Every credential file has one optional LF newline after a single value of 16-256 characters from `[A-Za-z0-9_-]`; all launchers, container entrypoints, and server-side readers enforce that same format, while the metadata rotation function validates the three database passwords it accepts. They persist outside the repository at `$XDG_DATA_HOME/schemii/credentials/<instance>` (defaulting to `~/.local/share/schemii/credentials/<instance>`) on Linux/macOS and `%LOCALAPPDATA%\Schemii\credentials\<instance>` on Windows. Directories are restricted to the owner and files to the owner on POSIX. On Windows, the launcher removes inheritance and applies and verifies owner/current-user-only ACLs recursively on reused and new credential content, transaction staging, and backups; an ACL application or verification error stops the operation. Container entrypoints briefly retain `CHOWN`, `DAC_OVERRIDE`, `SETGID`, `SETPCAP`, and `SETUID` to copy owner-only mounted files, drop to the application UID, and clear the capability bounding set before the application starts. Do not commit, print, email, or include this directory in an unencrypted general-purpose backup.
+
 Database backup on Linux/macOS, using the printed instance:
 
 ```bash
@@ -253,7 +255,16 @@ $postgresId = docker ps -q --filter "label=com.docker.compose.project=<instance>
 docker exec $postgresId pg_dump -U schemii -d schemii > schemii-postgres.sql
 ```
 
-If `.env` changes the user or database, substitute those values. Back up metadata with `pg_dump` from the `metadata-postgres` container using the configured migration role; do not expose its port merely to perform a backup. To archive a stopped named volume, repeat this command for `<instance>_schemii-config`, `<instance>_schemii-schemas`, `<instance>_schemer-dashboards` when present, `<instance>_schemii-opencode-data`, `<instance>_schemii-opencode-config`, and `<instance>_schemii-opencode-state`:
+If `.env` changes the user or database, substitute those values. Back up metadata with `pg_dump` through the local socket as the container's PostgreSQL operating-system user; do not expose its port merely to perform a backup:
+
+```bash
+metadata_id=$(docker ps -q --filter "label=com.docker.compose.project=<instance>" --filter "label=com.docker.compose.service=metadata-postgres")
+docker exec -u postgres "$metadata_id" pg_dump -d schemii_metadata --format=custom > schemii-metadata.dump
+```
+
+Restore only into a stopped, reviewed instance after backing up its current state. Start only `metadata-postgres`, inspect the archive with `pg_restore --list schemii-metadata.dump`, and confirm its owners are the expected `schemii_metadata_owner` and bootstrap-owned administration objects. Then run `docker exec -i -u postgres "$metadata_id" pg_restore --clean --if-exists --exit-on-error -d schemii_metadata < schemii-metadata.dump`; do not use `--no-owner`, because metadata restore must preserve archived ownership. Rerun the normal launcher, verify `/api/readiness`, and query `pg_class`, `pg_proc`, `pg_namespace`, and `aclexplode` to confirm expected owners and ACLs, including the bootstrap-owned `SECURITY DEFINER` rotation function, no public execute privilege, and only migration-role execute access. A restore replaces metadata authority history; it does not restore designs, dashboards, target PostgreSQL, or OpenCode data.
+
+To archive a stopped named volume, repeat this command for `<instance>_schemii-config`, `<instance>_schemii-schemas`, `<instance>_schemer-dashboards` when present, `<instance>_schemii-opencode-data`, `<instance>_schemii-opencode-config`, and `<instance>_schemii-opencode-state`:
 
 ```bash
 docker run --rm -v <volume-name>:/source:ro -v "$PWD":/backup alpine:3.20 tar -czf /backup/<volume-name>.tgz -C /source .
@@ -263,15 +274,17 @@ On PowerShell, replace `"$PWD"` with an absolute directory accepted by Docker De
 
 Never run `docker compose down --volumes` or remove project volumes unless permanent deletion is intended. Doing so can delete saved designs, Schemer dashboards and widget layouts, profiles and passwords, migration history, PostgreSQL data, provider credentials, chats, and AI state.
 
-Metadata role passwords have local-development defaults and may be overridden with `SCHEMII_METADATA_BOOTSTRAP_PASSWORD`, `SCHEMII_METADATA_MIGRATION_PASSWORD`, `SCHEMII_METADATA_SCHEMII_PASSWORD`, and `SCHEMII_METADATA_SCHEMER_PASSWORD` before the first start. Do not put production secrets in committed files or command output. PostgreSQL initialization variables apply only when `schemii-metadata-postgres` is first created; changing them later does not rotate roles in an existing volume and requires a coordinated in-database rotation plus matching application configuration. Never delete the metadata volume merely to change a credential.
+Back up, restore, or rotate the instance credential set with `bash ./start.sh credentials-backup <protected-directory>`, `bash ./start.sh credentials-restore <protected-directory>`, and `bash ./start.sh credentials-rotate`. PowerShell equivalents use `-Mode credentials-backup -Path <directory>`, `-Mode credentials-restore -Path <directory>`, and `-Mode credentials-rotate`. Backup output contains plaintext credentials, and restore requires its `instance` marker to exactly match the selected instance. One instance-scoped cross-process lock serializes initialization, interrupted-transaction cleanup and recovery, backup, restore, and rotation; it is released before normal long-running Compose startup. PowerShell uses an exclusive OS file handle, which the OS releases after a crash. POSIX uses an atomic owner-PID lock directory, removes locks whose owner process has exited, and times out rather than waiting forever. Rotation and restore stage old and new sets in an owner-only transaction directory, wait for PostgreSQL readiness before the first password update, update PostgreSQL through the migration login and narrow `SECURITY DEFINER` function, replace active file contents without changing the file identities mounted by existing containers, restart consumers, wait again, and verify the resulting migration login. A failure triggers rollback of PostgreSQL, files, and restarts; if the process is interrupted, the next launcher run resumes deterministic rollback while retaining both sets for manual recovery if automatic recovery cannot authenticate. Back up metadata and credentials together before rotation.
+
+An existing metadata volume created by an older release is never reset. On first launcher use, credentials are recovered from its existing container when possible; otherwise the historical local credentials are recorded with an explicit warning. Back up immediately. The bootstrap password is initialization-only: after first-cluster setup installs the bootstrap-owned function, the bootstrap role becomes `NOLOGIN`; rotation deliberately retains rather than regenerates that file. Credential restore may carry its archived value for disaster recovery but does not re-enable or change the role. Rotation and restore require the narrowly scoped bootstrap-owned `schemii_admin.rotate_metadata_passwords` function. If a legacy volume lacks it, the launcher fails before changing active files. A database administrator must use a reviewed maintenance connection as `schemii_metadata_bootstrap` to install the exact repository file `docker/metadata/002_rotation_function.sql`, then verify its owner, `SECURITY DEFINER` flag, fixed search path, ACL, and the bootstrap role's `NOLOGIN` state. Do not edit that file for the installation, grant `CREATEROLE`, grant runtime-role administration, or reset the volume. If the volume used custom credentials and its old container no longer exists, recover the exact credentials from backup before attempting the one-time installation.
+
+Direct `docker compose` use intentionally has no credential defaults. Create an absolute owner-only directory containing `metadata_bootstrap_password`, `metadata_migration_password`, `metadata_schemii_password`, `metadata_schemer_password`, and `opencode_password` files in the single-line format above, set `SCHEMII_CREDENTIAL_DIR` to it, and then render or start Compose. Keep those files stable across restarts. Prefer the launchers because they also handle legacy detection, permissions, backup, restore, and rotation.
 
 To remove only the included PostgreSQL database, stop the instance, remove only `<instance>_schemii-postgres`, and use explicit `ui` or `ai` mode afterward. The default launcher recreates and reseeds a missing included database.
 
 ## Uninstall Schemii
 
-Back up anything important first. The uninstaller permanently removes detected Schemii instances owned by the current Docker user, including their containers, networks, Schemii designs and layouts, profiles and passwords, migration history, PostgreSQL data, provider credentials, chats, state volumes, and Schemii-built images. It then removes the repository containing the uninstall script.
-
-Current uninstall scripts predate Schemer resource cleanup: they do not discover or remove a standalone `schemer-dashboards` volume or the `schemer:local` image. Back up and remove those resources separately only when permanent Schemer dashboard deletion is intended. Do not assume repository removal deleted that dashboard volume.
+Back up anything important first. The uninstaller permanently removes verified Schemii instances owned by this repository, including their containers, default networks, Schemii designs and layouts, profiles and passwords, migration history, PostgreSQL data, provider credentials, chats, state volumes, and safely attributable project-scoped images. It then removes the repository containing the uninstall script.
 
 It does not uninstall Docker and does not use broad Docker prune commands or remove unrelated Docker projects.
 
@@ -287,7 +300,7 @@ Windows PowerShell:
 powershell -ExecutionPolicy Bypass -File .\uninstall.ps1
 ```
 
-The script lists detected Schemii instances and requires typing `UNINSTALL`. Docker must be installed and running so the script can verify resource removal before deleting the repository. For deliberate unattended use, pass `--yes` on Linux/macOS or `-Yes` on PowerShell.
+The script discovers both Schemii and Schemer-only projects from exact repository Compose labels, or orphaned instances from multiple correctly named and labeled persistent resources. It lists detected instances and requires typing `UNINSTALL`. Before removal it rechecks every resource's project and logical-resource labels. It removes `schemer-dashboards`, only project-scoped images proven to have been used solely by verified instance containers, and only a credential directory whose `instance` marker exactly matches the detected project. Shared global tags such as `schemer:local` are retained. Docker must be installed and running so the script can verify resource removal before deleting the repository. For deliberate unattended use, pass `--yes` on Linux/macOS or `-Yes` on PowerShell.
 
 ## PostgreSQL Connections
 
@@ -389,7 +402,7 @@ Most users do not need configuration. These launcher and Compose variables are t
 
 Native Schemii variables include `SCHEMII_HOST`, `SCHEMII_PORT`, `SCHEMII_CONFIG_DIR`, `SCHEMII_SCHEMA_DIR`, `SCHEMII_BEHIND_LOOPBACK_PROXY`, and `SCHEMII_METADATA_APPLICATION_NAME`. Native Schemer variables include `SCHEMER_HOST`, `SCHEMER_PORT`, `SCHEMER_CONFIG_DIR`, `SCHEMER_DASHBOARD_DIR`, `SCHEMER_BEHIND_LOOPBACK_PROXY`, `SCHEMER_OPENCODE_URL`, `SCHEMER_OPENCODE_USERNAME`, `SCHEMER_OPENCODE_PASSWORD`, and `SCHEMER_OPENCODE_TIMEOUT`. `SCHEMER_DASHBOARD_DIR` defaults to `~/.local/share/schemer/dashboards`; the AI timeout defaults to 120 seconds and accepts `1`–`300`. `compose.schemer.ai.yaml` intentionally maps Schemer's OpenCode connection and timeout from the shared `SCHEMII_OPENCODE_*` Compose values.
 
-Direct Compose operation is advanced. It does not derive an instance or free port. Always set a stable, unique `SCHEMII_INSTANCE`, choose collision-free `SCHEMII_HOST_PORT` and `SCHEMER_HOST_PORT` values for enabled applications, and include the complete file set for the intended mode. Set distinct image names with `SCHEMII_IMAGE` and `SCHEMER_IMAGE` when projects should not share build tags. AI Compose also requires a strong, stable `SCHEMII_OPENCODE_PASSWORD`. Prefer the launchers for routine Schemii installation, updates, and mode changes.
+Direct Compose operation is advanced. It does not derive an instance or free port. Always set a stable, unique `SCHEMII_INSTANCE`, choose collision-free `SCHEMII_HOST_PORT` and `SCHEMER_HOST_PORT` values for enabled applications, set `SCHEMII_CREDENTIAL_DIR` to the stable owner-only five-file credential directory, and include the complete file set for the intended mode. Set distinct image names with `SCHEMII_IMAGE` and `SCHEMER_IMAGE` when projects should not share build tags. Prefer the launchers for routine Schemii installation, updates, and mode changes.
 
 ## Migration Safety
 

@@ -106,18 +106,29 @@ esac
         for source in (shell, powershell):
             self.assertIn("UNINSTALL", source)
             self.assertIn("com.docker.compose.project", source)
+            self.assertIn("com.docker.compose.project.working_dir", source)
+            self.assertIn("com.docker.compose.volume", source)
+            self.assertIn("com.docker.compose.network", source)
             self.assertIn("schemii-opencode-data", source)
             self.assertIn("schemii-postgres", source)
+            self.assertIn("schemer-dashboards", source)
+            self.assertNotIn('"schemer:local"', source)
             self.assertNotIn("system prune", source)
             self.assertNotIn("volume prune", source)
         self.assertIn('! -f "$repo_dir/compose.yaml"', shell)
         self.assertIn("not a recognized Schemii repository", powershell)
 
+    def test_shell_launch_scripts_support_bash_3_2(self):
+        bash_4_only = re.compile(r"\b(?:mapfile|readarray)\b|\b(?:declare|local)\s+-A\b")
+        for name in ("start.sh", "uninstall.sh"):
+            source = (ROOT / name).read_text(encoding="utf-8")
+            self.assertNotRegex(source, bash_4_only, name)
+
     @unittest.skipIf(os.name == "nt", "POSIX shell uninstaller is tested on POSIX runners")
-    def test_shell_uninstaller_removes_only_discovered_resources_and_its_repo(self):
+    def test_shell_uninstaller_removes_only_label_verified_owned_resources(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            repository = root / "schemii-copy"
+            repository = root / "schemii copy"
             (repository / "src/schemii").mkdir(parents=True)
             shutil.copy2(ROOT / "uninstall.sh", repository / "uninstall.sh")
             (repository / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
@@ -125,15 +136,54 @@ esac
             binary = root / "bin"
             binary.mkdir()
             log = root / "docker.log"
+            credentials = root / "credential data"
+            (credentials / "owned-app").mkdir(parents=True)
+            (credentials / "owned-app/instance").write_text("owned-app\n", encoding="utf-8")
             docker = binary / "docker"
             docker.write_text('''#!/bin/sh
 printf '%s\n' "$*" >> "$DOCKER_LOG"
-case "$1 $2" in
-  "info ") exit 0 ;;
-  "ps -a") printf 'demo-one\n' ;;
-  "volume ls") printf 'demo-one_schemii-config\ndemo-one_schemii-schemas\nother_data\n' ;;
-  "ps -aq") printf 'container-one\ncontainer-two\n' ;;
-  "network ls") printf 'network-one\n' ;;
+for argument do last=$argument; done
+case "$*" in
+  info) exit 0 ;;
+  "ps -aq") printf 'owned-app-container\nowned-schemer-container\nforeign-schemer-container\nspoof-container\n' ;;
+  "ps -aq --filter ancestor="*) exit 0 ;;
+  "volume ls -q") printf '%s\n' \
+    owned-app_schemii-config owned-app_schemii-schemas owned-app_schemii-postgres \
+    owned-schemer_schemer-dashboards owned-schemer_schemii-config \
+    orphaned_schemii-config orphaned_schemii-schemas \
+    collision_schemii-config foreign_schemer-dashboards ;;
+  inspect*"{{.Config.Image}}"*owned-app-container)
+    printf 'owned-app|%s|sha256:owned-app|schemii:owned-app\n' "$REPOSITORY" ;;
+  inspect*"{{.Config.Image}}"*owned-schemer-container)
+    printf 'owned-schemer|%s|sha256:shared-schemer|schemer:local\n' "$REPOSITORY" ;;
+  inspect*"{{.Config.Image}}"*foreign-schemer-container)
+    printf 'foreign|/tmp/unrelated|sha256:foreign|schemer:local\n' ;;
+  inspect*"{{.Config.Image}}"*spoof-container)
+    printf 'owned-app|/tmp/unrelated|sha256:spoof|schemii:owned-app\n' ;;
+  "inspect --format "*owned-app-container)
+    printf 'owned-app|schemii|%s\n' "$REPOSITORY" ;;
+  "inspect --format "*owned-schemer-container)
+    printf 'owned-schemer|schemer|%s\n' "$REPOSITORY" ;;
+  "inspect --format "*foreign-schemer-container)
+    printf 'foreign|schemer|/tmp/unrelated\n' ;;
+  "inspect --format "*spoof-container)
+    printf 'owned-app|schemer|/tmp/unrelated\n' ;;
+  "volume inspect --format "*owned-app_schemii-postgres)
+    case "$*" in
+      *"{{.Name}}"*) printf 'someone-else|schemii-postgres|owned-app_schemii-postgres\n' ;;
+      *) printf 'someone-else|schemii-postgres\n' ;;
+    esac ;;
+  "volume inspect --format "*"{{.Name}}"*)
+    project=${last%%_*}; logical=${last#*_}
+    printf '%s|%s|%s\n' "$project" "$logical" "$last" ;;
+  "volume inspect --format "*)
+    project=${last%%_*}; logical=${last#*_}
+    printf '%s|%s\n' "$project" "$logical" ;;
+  "network ls -q --filter label=com.docker.compose.project=owned-app") printf 'owned-network\nspoof-network\n' ;;
+  "network ls -q --filter label=com.docker.compose.project="*) exit 0 ;;
+  "network inspect --format "*owned-network) printf 'owned-app|default|owned-app_default\n' ;;
+  "network inspect --format "*spoof-network) printf 'someone-else|default|owned-app_default\n' ;;
+  "image inspect --format "*"schemii:owned-app") printf 'sha256:owned-app\n' ;;
   *) exit 0 ;;
 esac
 ''', encoding="utf-8")
@@ -142,7 +192,13 @@ esac
             result = subprocess.run(
                 ["/bin/bash", str(repository / "uninstall.sh"), "--yes"],
                 cwd=repository,
-                env={**os.environ, "PATH": f"{binary}:/usr/bin:/bin", "DOCKER_LOG": str(log)},
+                env={
+                    **os.environ,
+                    "PATH": f"{binary}:/usr/bin:/bin",
+                    "DOCKER_LOG": str(log),
+                    "REPOSITORY": str(repository),
+                    "SCHEMII_CREDENTIAL_ROOT": str(credentials),
+                },
                 capture_output=True,
                 text=True,
                 timeout=20,
@@ -150,12 +206,23 @@ esac
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse(repository.exists())
+            self.assertFalse((credentials / "owned-app").exists())
             calls = log.read_text(encoding="utf-8")
-            self.assertIn("rm -f container-one container-two", calls)
-            self.assertIn("network rm network-one", calls)
-            self.assertIn("volume rm demo-one_schemii-config", calls)
-            self.assertIn("volume rm demo-one_schemii-schemas", calls)
-            self.assertNotIn("other_data:/", calls)
+            self.assertIn("rm -f owned-app-container", calls)
+            self.assertIn("rm -f owned-schemer-container", calls)
+            self.assertNotIn("rm -f foreign-schemer-container", calls)
+            self.assertNotIn("rm -f spoof-container", calls)
+            self.assertIn("network rm owned-network", calls)
+            self.assertNotIn("network rm spoof-network", calls)
+            self.assertIn("volume rm owned-app_schemii-config", calls)
+            self.assertIn("volume rm owned-schemer_schemer-dashboards", calls)
+            self.assertIn("volume rm orphaned_schemii-config", calls)
+            self.assertIn("volume rm orphaned_schemii-schemas", calls)
+            self.assertNotIn("volume rm owned-app_schemii-postgres", calls)
+            self.assertNotIn("volume rm collision_schemii-config", calls)
+            self.assertNotIn("volume rm foreign_schemer-dashboards", calls)
+            self.assertIn("image rm schemii:owned-app", calls)
+            self.assertNotIn("image rm schemer:local", calls)
 
     def test_backend_has_no_outbound_clients_or_process_execution(self):
         forbidden_modules = {
@@ -218,6 +285,26 @@ esac
         self.assertNotIn("${HOME}", compose)
         self.assertNotIn("down --volumes", launcher)
         self.assertNotIn("volume rm", launcher)
+        self.assertIn('credential_dir="${SCHEMII_CREDENTIAL_DIR:-$credential_root/$project}"', launcher)
+        self.assertNotIn("SCHEMII_OPENCODE_PASSWORD=", launcher)
+
+    def test_metadata_and_opencode_credentials_are_file_mounted(self):
+        compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
+        ai_compose = (ROOT / "compose.ai.yaml").read_text(encoding="utf-8")
+        launcher = (ROOT / "start.sh").read_text(encoding="utf-8")
+        for source in (compose, ai_compose):
+            self.assertNotIn("PGPASSWORD:", source)
+            self.assertNotIn("metadata-runtime-local", source)
+        self.assertIn("POSTGRES_PASSWORD_FILE", compose)
+        self.assertIn("SCHEMII_METADATA_PASSWORD_FILE", compose)
+        self.assertIn("OPENCODE_SERVER_PASSWORD_FILE", ai_compose)
+        self.assertIn("chmod 700", launcher)
+        self.assertIn("chmod 600", launcher)
+        self.assertIn("Existing metadata volume", launcher)
+        self.assertNotIn("volume rm", launcher)
+        self.assertIn("DAC_OVERRIDE", compose)
+        runtime_entrypoint = (ROOT / "docker/runtime-secret-entrypoint.sh").read_text(encoding="utf-8")
+        self.assertIn("--bounding-set=-all", runtime_entrypoint)
 
     def test_launchers_do_not_open_duplicate_browser_tabs(self):
         shell = (ROOT / "start.sh").read_text(encoding="utf-8")
@@ -234,7 +321,7 @@ esac
         powershell = (ROOT / "start.ps1").read_text(encoding="utf-8")
         postgres_compose = (ROOT / "compose.postgres.yaml").read_text(encoding="utf-8")
 
-        self.assertIn('mode="${1:-ai-docker-db}"', shell)
+        self.assertIn('requested="${1:-ai-docker-db}"', shell)
         self.assertIn('[string]$Mode = "ai-docker-db"', powershell)
         for source in (shell, powershell):
             self.assertIn("SCHEMII_INSTANCE", source)
@@ -251,6 +338,7 @@ esac
         local = (ROOT / "compose.local-db.yaml").read_text(encoding="utf-8")
         schemer = (ROOT / "compose.schemer.yaml").read_text(encoding="utf-8")
         roles = (ROOT / "docker/metadata/001_roles.sh").read_text(encoding="utf-8")
+        rotation = (ROOT / "docker/metadata/002_rotation_function.sql").read_text(encoding="utf-8")
         package = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
         self.assertIn("schemii-metadata-postgres:/var/lib/postgresql/data", compose)
@@ -262,10 +350,131 @@ esac
         self.assertIn("schemii_metadata_schemii", compose)
         self.assertIn("schemii_metadata_schemer", schemer)
         self.assertIn("schemii_metadata_owner NOLOGIN", roles)
+        self.assertNotIn("CREATEROLE", roles + rotation)
+        self.assertNotIn("ADMIN OPTION", roles + rotation)
+        self.assertIn("SECURITY DEFINER", rotation)
+        self.assertIn("SET search_path = pg_catalog", rotation)
+        self.assertIn("OWNER TO schemii_metadata_bootstrap", rotation)
+        self.assertIn("REVOKE ALL ON FUNCTION", rotation)
+        self.assertIn("TO schemii_metadata_migration", rotation)
+        self.assertIn("^[A-Za-z0-9_-]+$", rotation)
+        self.assertIn("octet_length", rotation)
+        self.assertIn("ALTER ROLE schemii_metadata_bootstrap NOLOGIN", rotation)
+        self.assertEqual(rotation.count("EXECUTE format('ALTER ROLE schemii_metadata_"), 3)
+        self.assertNotIn("ALTER ROLE schemii_metadata_", (ROOT / "start.sh").read_text(encoding="utf-8"))
+        self.assertNotIn("ALTER ROLE schemii_metadata_", (ROOT / "start.ps1").read_text(encoding="utf-8"))
         self.assertIn("options='-c role=schemii_metadata_owner'", compose)
         self.assertIn("ALTER DEFAULT PRIVILEGES FOR ROLE schemii_metadata_owner", roles)
+        self.assertIn("schemii_admin.rotate_metadata_passwords", rotation)
+        self.assertIn("002_rotation_function.sql:/docker-entrypoint-initdb.d/002_rotation_function.sql:ro", compose)
+        self.assertEqual(compose.count("002_rotation_function.sql:/docker-entrypoint-initdb.d/002_rotation_function.sql:ro"), 1)
         self.assertNotIn("postgresql://schemii_metadata_", compose + schemer + local)
         self.assertIn("metadata/migrations/*.sql", package)
+
+    def test_credential_lifecycle_is_marker_bound_and_recoverable(self):
+        shell = (ROOT / "start.sh").read_text(encoding="utf-8")
+        powershell = (ROOT / "start.ps1").read_text(encoding="utf-8")
+        for source in (shell, powershell):
+            self.assertIn(".credential-transaction", source)
+            self.assertIn("Backup instance marker", source)
+            self.assertIn("16-256 characters from [A-Za-z0-9_-]", source)
+        self.assertIn("rollback_credential_transaction", shell)
+        self.assertIn("Undo-CredentialTransaction", powershell)
+        self.assertIn("wait_for_metadata", shell)
+        self.assertIn("Wait-MetadataReady", powershell)
+        self.assertIn('cp "$temporary" "$path"', shell)
+        self.assertIn("WriteAllBytes($Target", powershell)
+        self.assertIn('write_secret "$temporary_dir/metadata_bootstrap_password"', shell)
+        self.assertIn('$newValues["metadata_bootstrap_password"] = Read-CredentialValue', powershell)
+
+    def test_credential_lifecycle_is_cross_process_locked_and_waits_before_forward_update(self):
+        shell = (ROOT / "start.sh").read_text(encoding="utf-8")
+        powershell = (ROOT / "start.ps1").read_text(encoding="utf-8")
+
+        self.assertIn('credential_lock="${credential_dir}.lock"', shell)
+        self.assertIn('mkdir "$credential_lock"', shell)
+        self.assertIn('kill -0 "$lock_pid"', shell)
+        self.assertIn("Timed out waiting for another launcher credential operation", shell)
+        self.assertLess(shell.index("release_credential_lock\nif [[ \"$project\""), shell.index('"${compose[@]}" up'))
+        self.assertRegex(shell, re.compile(r'run_credential_transaction\(\).*?wait_for_metadata .*?update_metadata_passwords', re.S))
+
+        self.assertIn("[System.IO.FileShare]::None", powershell)
+        self.assertIn("Exit-CredentialLock", powershell)
+        self.assertLess(powershell.index("finally {\n    Exit-CredentialLock\n}\nif ($project"), powershell.index("& docker @upArgs"))
+        self.assertRegex(powershell, re.compile(r'function Complete-CredentialTransaction.*?Wait-MetadataReady .*?Invoke-MetadataPasswordUpdate', re.S))
+
+    @unittest.skipIf(os.name == "nt", "POSIX stale lock recovery is tested on POSIX runners")
+    def test_shell_credential_lock_recovers_after_owner_crash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "bin"
+            binary.mkdir()
+            docker = binary / "docker"
+            docker.write_text(
+                '#!/bin/sh\ncase "$*" in info|"compose version") exit 0 ;; *) exit 1 ;; esac\n',
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+            project = "schemii-lock-test"
+            credentials = root / "credentials" / project
+            credentials.mkdir(parents=True, mode=0o700)
+            (credentials / "instance").write_text(f"{project}\n", encoding="utf-8")
+            for name in (
+                "metadata_bootstrap_password", "metadata_migration_password",
+                "metadata_schemii_password", "metadata_schemer_password", "opencode_password",
+            ):
+                path = credentials / name
+                path.write_text("a" * 32 + "\n", encoding="utf-8")
+                path.chmod(0o600)
+            lock = Path(f"{credentials}.lock")
+            lock.mkdir(mode=0o700)
+            (lock / "pid").write_text("99999999\n", encoding="utf-8")
+            (lock / "token").write_text("crashed-owner\n", encoding="utf-8")
+            backup = root / "backup"
+
+            result = subprocess.run(
+                ["/bin/bash", str(ROOT / "start.sh"), "credentials-backup", str(backup)],
+                cwd=ROOT,
+                env={
+                    **os.environ,
+                    "PATH": f"{binary}:/usr/bin:/bin",
+                    "SCHEMII_INSTANCE": project,
+                    "SCHEMII_CREDENTIAL_DIR": str(credentials),
+                },
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(lock.exists())
+            self.assertTrue((backup / project / "metadata_migration_password").is_file())
+
+    def test_windows_credential_acls_are_recursive_verified_and_fail_closed(self):
+        powershell = (ROOT / "start.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("WindowsIdentity]::GetCurrent().User", powershell)
+        self.assertIn("SetAccessRuleProtection($true, $false)", powershell)
+        self.assertIn("Set-Acl -LiteralPath", powershell)
+        self.assertIn("Get-Acl -LiteralPath", powershell)
+        self.assertIn("Credential ACL verification failed closed", powershell)
+        self.assertIn("Protect-CredentialTree $credentialDirectory", powershell)
+        self.assertIn("Protect-CredentialTree $backupDirectory", powershell)
+        self.assertIn("if ($runningOnWindows) { Protect-CredentialTree $sourceDirectory }", powershell)
+        self.assertIn("Protect-CredentialPath $staging $true", powershell)
+        self.assertNotIn("icacls.exe", powershell)
+
+    def test_container_secret_consumers_enforce_one_credential_format(self):
+        paths = (
+            ROOT / "docker/metadata/001_roles.sh",
+            ROOT / "docker/metadata/secret-entrypoint.sh",
+            ROOT / "docker/runtime-secret-entrypoint.sh",
+            ROOT / "ai/secret-entrypoint.sh",
+        )
+        for path in paths:
+            source = path.read_text(encoding="utf-8")
+            self.assertIn("[!A-Za-z0-9_-]", source)
+            self.assertIn('"${#', source)
 
     def test_compose_allows_a_clean_browser_shutdown_to_remain_stopped(self):
         compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
@@ -299,10 +508,8 @@ esac
         self.assertIn(".State.Health.Status", shell)
         self.assertIn(".State.Health.Status", powershell)
         self.assertIn("docker run --rm python:3.12-slim", shell)
-        self.assertIn("docker run --rm python:3.12-slim", powershell)
-        self.assertNotIn("od -An", shell)
-        self.assertNotIn("RandomNumberGenerator]::Fill", powershell)
-        self.assertNotIn("[Convert]::ToHexString", powershell)
+        self.assertIn("RandomNumberGenerator]::Fill", powershell)
+        self.assertIn("[Convert]::ToHexString", powershell)
 
     def test_ai_navigation_tools_accept_only_logical_ids_and_public_labels(self):
         tools = "\n".join(path.read_text(encoding="utf-8") for path in sorted((ROOT / "ai" / "workspace" / ".opencode" / "tools").glob("schema_*_open.ts")))

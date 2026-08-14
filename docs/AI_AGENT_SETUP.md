@@ -45,7 +45,8 @@ The first launch downloads and builds several images and packages, requires inte
 Do not replace a launcher command with partial direct Compose commands. Launchers provide:
 
 - Mode-specific Compose file selection
-- A generated internal OpenCode credential
+- Persistent instance-scoped metadata and OpenCode credential files with owner-only host permissions
+- An instance-scoped cross-process credential lock covering initialization, stale transaction recovery, backup, restore, and rotation, released before normal Compose startup
 - Per-installation project, image, volume, and port isolation
 - Free-port selection and existing-port reuse
 - Metadata migration, PostgreSQL, OpenCode, and Schemii readiness checks
@@ -105,7 +106,7 @@ Then run in either shell:
 docker compose -f compose.yaml -f compose.postgres.yaml -f compose.schemer.yaml up --build -d
 ```
 
-With one shared private OpenCode service, first set a strong `SCHEMII_OPENCODE_PASSWORD`, then run:
+With one shared private OpenCode service, first create the five owner-only secret files documented in `README.md` and set `SCHEMII_CREDENTIAL_DIR` to their absolute directory, then run:
 
 ```bash
 docker compose -f compose.yaml -f compose.postgres.yaml -f compose.ai.yaml -f compose.schemer.yaml -f compose.schemer.ai.yaml up --build -d
@@ -167,11 +168,13 @@ docker volume ls --filter "label=com.docker.compose.project=<instance>"
 
 Never run `docker compose down --volumes`, `docker volume rm`, or equivalent destructive commands without explicit approval. Disclose that volume deletion can remove designs, Schemer dashboards, widget configuration, dashboard and canvas layouts, viewport state, profiles/passwords, migration history, user-target PostgreSQL data, metadata authority/history, provider credentials, chat history, and AI state. Back up metadata separately because it can contain sensitive transient query-result payloads.
 
-The four metadata password variables documented in `README.md` have local-only defaults. Supply secrets through the deployment environment without logging them. They initialize roles only for a new metadata volume; never delete a stable volume or claim a password was rotated merely because an environment value changed.
+Metadata and OpenCode passwords have no Compose or environment defaults. Launchers generate and persist five owner-only files in the exact instance credential directory; each contains one optional trailing LF newline after 16-256 characters from `[A-Za-z0-9_-]`, and direct Compose requires the same files and format through `SCHEMII_CREDENTIAL_DIR`. Never log their contents, regenerate them on restart, delete a stable metadata volume, or claim rotation from a file-only change. The launcher serializes credential initialization, stale transaction cleanup/recovery, backup, restore, and rotation for each instance, then releases the lock before normal Compose startup. POSIX stale owner-PID locks are recoverable after crashes and lock waits are bounded; PowerShell holds a real exclusive file handle that the OS releases on process exit. On Windows, every reused or new credential directory/file, marker, transaction stage, and backup is recursively restricted to the owner/current user and the resulting ACL is verified; any error fails closed. The bootstrap password is used only to initialize a new cluster; setup makes that role `NOLOGIN`, and rotation retains its existing value instead of generating another. Rotation and restore use staged old/new sets and must wait for metadata PostgreSQL before the first forward update, then succeed through the bootstrap-owned `schemii_admin.rotate_metadata_passwords` function, in-place updates that preserve mounted file identities, container restart, readiness, and authentication verification; failure or interruption uses the retained transaction set for deterministic rollback. Restore also requires an exact instance-marker match. A legacy volume lacking that function requires the reviewed one-time bootstrap-owned installation in `docker/metadata/002_rotation_function.sql`; never grant `CREATEROLE` or runtime-role administration to the migration login.
+
+Metadata custom-format archives must preserve their archived owners. Inspect `pg_restore --list`, restore without `--no-owner`, and verify expected `schemii_metadata_owner` and bootstrap-owned objects plus database, schema, table, sequence, and function ACLs before declaring recovery complete. In particular, verify the rotation function remains bootstrap-owned and `SECURITY DEFINER`, has its fixed `pg_catalog` search path, grants no public execute privilege, and grants execute only to the migration role.
 
 The documented combined AI deployment keeps Schemer in the same Compose project and OpenCode service so provider credentials are shared without copying them. Use `compose.schemer.yaml` with `compose.schemer.ai.yaml`; `/workspace` and `/workspace-schemer` keep application chats, skills, and proposal tools separate. Schemer depends on metadata migration and OpenCode health in this mode, never on the Schemii container's health or readiness.
 
-For a user-requested Schemii uninstall, use `uninstall.sh` or `uninstall.ps1`. The scripts inventory and remove detected Schemii projects for the current Docker user and then remove their own repository. They require typing `UNINSTALL` unless the user explicitly requests unattended `--yes`/`-Yes` operation. Current scripts do not discover or remove a standalone `schemer-dashboards` volume or `schemer:local` image; disclose and inventory those separately before claiming a complete Schemer uninstall. Never run an uninstaller merely to troubleshoot startup, and back up requested data first.
+For a user-requested Schemii uninstall, use `uninstall.sh` or `uninstall.ps1`. The scripts inventory Schemii and Schemer-only projects for the current Docker user, remove their dashboard and application resources plus exact marker-matched instance credential directories, and then remove their own repository. They require typing `UNINSTALL` unless the user explicitly requests unattended `--yes`/`-Yes` operation. Never run an uninstaller merely to troubleshoot startup, and back up requested data first.
 
 The browser shutdown action saves pending design edits and stops only Schemii. Sidecars can remain running. To stop all project containers without deleting volumes, use Docker Desktop or stop containers selected by the exact project label.
 

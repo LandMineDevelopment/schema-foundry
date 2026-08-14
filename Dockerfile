@@ -22,12 +22,14 @@ ENV PATH="/opt/venv/bin:$PATH" \
     SCHEMII_BEHIND_LOOPBACK_PROXY=1
 
 COPY --from=builder /opt/venv /opt/venv
+COPY --chmod=0555 docker/runtime-secret-entrypoint.sh /usr/local/bin/schemii-runtime
 
 RUN useradd --create-home --uid 10001 schemii \
     && mkdir -p /data/config /data/schemas /data/dashboards \
     && chown -R schemii:schemii /data
 
-USER schemii
+USER root
+ENTRYPOINT ["/usr/local/bin/schemii-runtime"]
 EXPOSE 8080
 
 FROM runtime AS schemer-runtime

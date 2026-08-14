@@ -3,8 +3,10 @@ services:
     environment:
       SCHEMII_OPENCODE_URL: http://opencode:4096
       SCHEMII_OPENCODE_USERNAME: ${SCHEMII_OPENCODE_USERNAME:-opencode}
-      SCHEMII_OPENCODE_PASSWORD: ${SCHEMII_OPENCODE_PASSWORD:?Set SCHEMII_OPENCODE_PASSWORD or use an AI launcher mode}
+      SCHEMII_OPENCODE_PASSWORD_FILE: /run/secrets/opencode_password
       SCHEMII_OPENCODE_TIMEOUT: ${SCHEMII_OPENCODE_TIMEOUT:-300}
+    secrets:
+      - opencode_password
     depends_on:
       opencode:
         condition: service_healthy
@@ -14,16 +16,18 @@ services:
       context: ./ai
     image: ${SCHEMII_OPENCODE_IMAGE:-schemii-opencode:1.18.15-local}
     working_dir: /workspace
-    command: serve --hostname 0.0.0.0 --port 4096
+    command: ["serve", "--hostname", "0.0.0.0", "--port", "4096"]
     environment:
       OPENCODE_SERVER_USERNAME: ${SCHEMII_OPENCODE_USERNAME:-opencode}
-      OPENCODE_SERVER_PASSWORD: ${SCHEMII_OPENCODE_PASSWORD:?Set SCHEMII_OPENCODE_PASSWORD or use an AI launcher mode}
+      OPENCODE_SERVER_PASSWORD_FILE: /run/secrets/opencode_password
       XDG_DATA_HOME: /opencode/data
       XDG_CONFIG_HOME: /opencode/config
       XDG_STATE_HOME: /opencode/state
       XDG_CACHE_HOME: /opencode/cache
       OPENCODE_DISABLE_EXTERNAL_SKILLS: 1
       OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: 1
+    secrets:
+      - opencode_password
     volumes:
       - ./ai/workspace:/workspace:ro
       - schemii-opencode-data:/opencode/data
@@ -31,7 +35,7 @@ services:
       - schemii-opencode-state:/opencode/state
       - schemii-opencode-cache:/opencode/cache
     healthcheck:
-      test: ["CMD-SHELL", "credentials=$$(printf '%s:%s' \"$$OPENCODE_SERVER_USERNAME\" \"$$OPENCODE_SERVER_PASSWORD\" | base64 | tr -d '\\n'); wget -q --spider --header \"Authorization: Basic $$credentials\" http://127.0.0.1:4096/global/health"]
+      test: ["CMD-SHELL", "password=$$(cat /run/secrets/opencode_password); credentials=$$(printf '%s:%s' \"$$OPENCODE_SERVER_USERNAME\" \"$$password\" | base64 | tr -d '\\n'); wget -q --spider --header \"Authorization: Basic $$credentials\" http://127.0.0.1:4096/global/health"]
       interval: 2s
       timeout: 3s
       retries: 30

@@ -85,14 +85,16 @@ def is_wholesale_layout_change(existing_record: dict[str, Any], incoming_record:
 
 
 class SchemaStore:
-    def __init__(self, schema_dir: str | os.PathLike[str]):
+    def __init__(self, schema_dir: str | os.PathLike[str], *, read_only: bool = False):
         self.schema_dir = Path(schema_dir).expanduser()
+        self.read_only = read_only
         self._lock = threading.RLock()
         self._schema_locks: dict[str, threading.RLock] = {}
         self._lock_state = threading.local()
-        self.schema_dir.mkdir(parents=True, exist_ok=True)
         self.lock_dir = self.schema_dir / ".locks"
-        self.lock_dir.mkdir(mode=0o700, exist_ok=True)
+        if not read_only:
+            self.schema_dir.mkdir(parents=True, exist_ok=True)
+            self.lock_dir.mkdir(mode=0o700, exist_ok=True)
 
     def _schema_lock(self, schema_id: str) -> threading.RLock:
         with self._lock:
@@ -101,6 +103,8 @@ class SchemaStore:
     @contextmanager
     def _schema_guard(self, schema_id: str):
         """Serialize schema writes across threads and server processes."""
+        if self.read_only:
+            raise SchemaStoreError(403, "schema_store_read_only", "This schema store is read-only")
         with self._schema_lock(schema_id):
             depths = getattr(self._lock_state, "depths", {})
             depth = depths.get(schema_id, 0)
@@ -117,6 +121,15 @@ class SchemaStore:
                     depths[schema_id] = depth
                 else:
                     depths.pop(schema_id, None)
+
+    @contextmanager
+    def _schema_read_guard(self, schema_id: str):
+        if not self.read_only:
+            with self._schema_guard(schema_id):
+                yield
+            return
+        with self._schema_lock(schema_id):
+            yield
 
     @staticmethod
     def validate_id(schema_id: Any) -> str:
@@ -143,7 +156,8 @@ class SchemaStore:
 
     def _records(self) -> list[tuple[Path, dict[str, Any]]]:
         records = []
-        self.schema_dir.mkdir(parents=True, exist_ok=True)
+        if not self.read_only:
+            self.schema_dir.mkdir(parents=True, exist_ok=True)
         for path in sorted(self.schema_dir.glob("*.json")):
             try:
                 record = json.loads(path.read_text(encoding="utf-8"))
@@ -171,7 +185,7 @@ class SchemaStore:
 
     def get(self, schema_id: str) -> dict[str, Any]:
         schema_id = self.validate_id(schema_id)
-        with self._schema_guard(schema_id):
+        with self._schema_read_guard(schema_id):
             found = self._find(schema_id)
             if found is None:
                 raise SchemaStoreError(404, "not_found", "Schema was not found")
@@ -182,7 +196,7 @@ class SchemaStore:
         schema_id = self.validate_id(schema_id)
         if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 1:
             raise SchemaStoreError(400, "invalid_schema_binding", "expectedRevision is invalid")
-        with self._schema_guard(schema_id):
+        with self._schema_read_guard(schema_id):
             found = self._find(schema_id)
             if found is None:
                 raise SchemaStoreError(404, "not_found", "Schema was not found")
@@ -213,7 +227,7 @@ class SchemaStore:
     ) -> dict[str, Any]:
         """Load the exact server-owned desired schema for a migration preview."""
         schema_id = self.validate_id(schema_id)
-        with self._schema_guard(schema_id):
+        with self._schema_read_guard(schema_id):
             found = self._find(schema_id)
             if found is None:
                 raise SchemaStoreError(404, "not_found", "Schema was not found")
@@ -259,7 +273,7 @@ class SchemaStore:
         if operation not in {"upsert", "delete"}:
             raise SchemaStoreError(400, "invalid_schema_binding", "View operation is invalid")
         schema_id = self.validate_id(schema_id)
-        with self._schema_guard(schema_id):
+        with self._schema_read_guard(schema_id):
             found = self._find(schema_id)
             if found is None:
                 raise SchemaStoreError(404, "not_found", "Schema was not found")
@@ -492,7 +506,7 @@ class SchemaStore:
             raise SchemaStoreError(400, "invalid_schema_binding", "expectedRevision is invalid")
         if not isinstance(expected_layout_token, str) or not LAYOUT_TOKEN_PATTERN.fullmatch(expected_layout_token):
             raise SchemaStoreError(400, "invalid_schema_binding", "layoutToken is invalid")
-        with self._schema_guard(schema_id):
+        with self._schema_read_guard(schema_id):
             found = self._find(schema_id)
             if found is None:
                 raise SchemaStoreError(404, "not_found", "Schema was not found")

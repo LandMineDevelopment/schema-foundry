@@ -38,10 +38,11 @@ services:
       PGPORT: 5432
       PGDATABASE: ${SCHEMII_POSTGRES_DB:-schemii}
       PGUSER: ${SCHEMII_POSTGRES_USER:-schemii}
-      PGPASSWORD: ${SCHEMII_POSTGRES_PASSWORD:-schemii-local}
-    command: ["psql", "--set", "ON_ERROR_STOP=1", "--file", "/seed/001_bookstore.sql"]
+      SCHEMII_POSTGRES_PASSWORD: ${SCHEMII_POSTGRES_PASSWORD:-schemii-local}
+    command: ["/bin/sh", "/seed/seed.sh"]
     volumes:
       - ./examples/postgres/001_bookstore.sql:/seed/001_bookstore.sql:ro
+      - ./docker/postgres/seed.sh:/seed/seed.sh:ro
     read_only: true
     tmpfs:
       - /tmp:size=8m,mode=1777

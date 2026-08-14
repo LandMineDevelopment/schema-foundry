@@ -4,6 +4,7 @@ from typing import Any, Callable
 
 from .config import MetadataConfig
 from .errors import MetadataStoreError
+from ..secret_file import read_secret_file
 
 
 class MetadataConnectionFactory:
@@ -13,19 +14,22 @@ class MetadataConnectionFactory:
 
     def __call__(self):
         try:
-            if self._connect is not None:
-                return self._connect(
-                    self.config.dsn,
-                    connect_timeout=self.config.connect_timeout,
-                    application_name=self.config.application_name,
+            settings = {
+                "connect_timeout": self.config.connect_timeout,
+                "application_name": self.config.application_name,
+            }
+            if self.config.password_file:
+                settings["password"] = read_secret_file(
+                    self.config.password_file, "SCHEMII_METADATA_PASSWORD_FILE",
                 )
+            if self._connect is not None:
+                return self._connect(self.config.dsn, **settings)
             import psycopg
             from psycopg.rows import dict_row
 
             return psycopg.connect(
                 self.config.dsn,
-                connect_timeout=self.config.connect_timeout,
-                application_name=self.config.application_name,
+                **settings,
                 row_factory=dict_row,
             )
         except Exception as exc:

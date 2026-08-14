@@ -6,13 +6,13 @@ Durable working notes for `architecture/sustainable-boundaries`. Keep this file 
 
 - **Branch:** `architecture/sustainable-boundaries`
 - **Base checkpoint:** `main` at `692e6e6`, pushed to `origin/main`
-- **Current phase:** Phase 1 — metadata PostgreSQL foundation
-- **Next action:** finish authority lifecycle/recovery semantics, then replace JSON `AiAuthority`/`AiChatStore` usage in both servers
-- **Active files:** Compose/launcher files, metadata migration and repository modules, focused metadata tests
-- **Worktree:** Phase 0 architecture is committed; the metadata PostgreSQL foundation is implemented and under final verification
+- **Current phase:** Phase 8 complete
+- **Next action:** commit the final verified operational hardening and deliver the branch
+- **Active files:** credential deployment, read-only cross-domain dependency indexes, and final verification notes
+- **Worktree:** all rewrite phases are implemented; final verified operational fixes are awaiting one focused commit
 - **Invariants:** PostgreSQL, not SQLite, for transactional server metadata; browser and OpenCode never execute DB work; exact target/profile role; preserve schema/dashboard layout; stale conflicts fail closed; uncertain writes are never retried blindly
-- **Latest verification before branch creation:** 286 Python tests passed with 5 expected skips; all JavaScript tests and syntax checks passed; `git diff --check` passed; live Schemii container was rebuilt and healthy
-- **Blockers:** none; application startup is not yet wired to the repository, so this branch is not ready for cutover
+- **Latest verification:** 341 Python tests passed with 6 environment/platform skips; every JavaScript test and all three browser syntax checks passed; Python compile, POSIX shell syntax, eight Compose configurations, and `git diff --check` passed; disposable full-stack, target PostgreSQL, durable migration, and live metadata credential lifecycle checks passed
+- **Blockers:** none
 
 ## Decisions
 
@@ -113,7 +113,37 @@ Critical transaction boundaries:
 - Hardened repository validation, proposal expiry checks, policy/authorization lock ordering, active-chat result creation, payload scrubbing, and ambiguous commit reporting.
 - Application server integration, lease/reconciliation behavior, transition audit writes, and durable migration execution remain subsequent work.
 
+### Operational credential lifecycle
+
+- Replaced known metadata defaults and `PGPASSWORD` injection with per-instance cryptographically random, file-mounted Compose secrets.
+- Added metadata and OpenCode password-file consumers; OpenCode credentials now remain stable across launcher restarts.
+- Added fail-safe legacy-volume detection, explicit compatibility warnings, owner-only storage intent, and coordinated credential backup, restore, and rotation commands.
+- Expanded uninstall discovery to Schemer-only projects and included dashboard volumes, application images, and exact instance-marked credential directories.
+- Replaced migration-role `CREATEROLE` and runtime-role administration with one bootstrap-owned `SECURITY DEFINER` password-rotation function having fixed role targets, fixed `pg_catalog` search path, bounded inputs, and migration-role-only execution.
+- Added read-only cross-domain schema/dashboard indexes for profile-deletion impact. Compose mounts the other application's document volume read-only only when Schemer is enabled; neither application can mutate the other domain's records.
+
+### Phase 8 integration completion
+
+- Completed PostgreSQL-backed authority cutover for Schemii and Schemer; no JSON authority fallback remains.
+- Completed operation leasing, stale-worker reconciliation, transition audit, query-result delivery uncertainty, and idempotent operation ownership.
+- Completed durable normal/AI migration coordination with write-ahead target evidence and independent commit/synchronization outcomes.
+- Finalized legacy handling as archive-only inert evidence rather than executable authority import.
+
 ## Verification log
+
+- Final full Python verification: 341 passed, 6 skipped (four opt-in PostgreSQL tests, one opt-in Docker credential test, and one unavailable PowerShell-platform test). The opt-in Docker credential lifecycle was then run separately and passed.
+- Final JavaScript verification: every `tests/test_*.js` file passed; Schemii, Schemer, and shared assistant syntax checks passed.
+- Opt-in PostgreSQL 17 safety suite: 16 view/catalog/lock tests passed against disposable PostgreSQL 17, including cleanup assertions.
+- Opt-in metadata credential lifecycle: bootstrap privilege checks plus backup, rotate, restore, restart, and authentication passed.
+- Fresh full-stack Compose smoke: metadata migrations 1–4, Schemii `/`, `/api/session`, `/api/readiness`, Schemer `/`, `/api/session`, `/api/readiness`, target PostgreSQL seed, and both application health checks passed.
+- Durable HTTP migration smoke: exact saved schema preview produced zero unexpected steps/warnings; apply committed with xid evidence; plan status returned `succeeded/committed`; saved-schema synchronization returned `succeeded` after restart.
+- Fresh-stack review found and fixed two integration defects before delivery: the rotation SQL init mount/order and read-only cross-domain dependency stores. The complete fresh stack passed after both fixes.
+- Final security review additionally fixed recoverable credential file/database transitions, bind-mounted secret identity preservation, exact credential formatting, cross-process launcher locking, timestamp JSON serialization, metadata restore ownership guidance, and label-verified uninstall ownership. POSIX launcher/uninstaller tests include macOS Bash 3.2 compatibility guards.
+- Disposable target inspection found no remaining `schemii_*_test` namespaces. Final containers, networks, volumes, images, and generated credential files were removed.
+- POSIX shell syntax, Python compilation, eight Compose render combinations, and `git diff --check` passed. Native PowerShell parsing/runtime was unavailable in the final shell; CI retains Windows parser coverage.
+
+- Phase 8 final verification: 328 Python tests passed with 6 expected skips; all JavaScript suites and browser syntax checks passed; Python compile, shell syntax, both PowerShell parsers, eight Compose combinations, and `git diff --check` passed.
+- Phase 8 live credential verification: fresh metadata bootstrap proved migration `rolcreaterole=false`, bootstrap `rolcanlogin=false`, bootstrap function ownership, `SECURITY DEFINER`, fixed `search_path=pg_catalog`, no PUBLIC execute, migration-only execute, bounded-input rejection, and successful backup/rotate/restore with disposable resources removed.
 
 - Phase 7 focused verification: 107 AI action/registry/executor/server/PostgreSQL route/migration tests passed.
 - Phase 7 full verification: 324 Python tests passed with 5 expected skips; every `tests/test_*.js` file passed; Python compile, all three browser syntax checks, eight supported Compose config combinations, and `git diff --check` passed.
@@ -129,10 +159,6 @@ Critical transaction boundaries:
 
 ## Open risks
 
-- A dedicated metadata database adds startup, migration, backup, and failure-mode responsibilities.
-- Multiple app processes need one migration lock and application-scoped data isolation.
-- Metadata DB outage must not accidentally fall back to weaker JSON authority.
-- Prototype migration from existing JSON authority/chat state needs an explicit decision: import, archive, or reset.
-- Normal migration and AI migration consolidation must preserve layout synchronization and stale-catalog guarantees.
-- Runtime metadata credentials still use development defaults and environment injection; production-grade per-instance secret generation/storage is unresolved.
-- Operation lease takeover and uncertain token-returning commits need explicit idempotency/reconciliation design before authority cutover.
+- Legacy metadata volumes created before the scoped rotation function require a reviewed one-time bootstrap-owned installation before credential rotation or restore; launchers fail closed until it exists.
+- Windows ACL enforcement, parser validation, and the PowerShell live credential lifecycle still require a native Windows CI/runtime runner; `pwsh` was unavailable in the final local shell.
+- Metadata backups contain authority history and transient sensitive payloads and must remain protected and restore-tested independently from user target backups.

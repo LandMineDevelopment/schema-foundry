@@ -410,13 +410,15 @@ def mercury_dashboard_record() -> dict[str, Any]:
 
 
 class DashboardStore:
-    def __init__(self, dashboard_dir: str | os.PathLike[str]):
+    def __init__(self, dashboard_dir: str | os.PathLike[str], *, read_only: bool = False):
         self.dashboard_dir = Path(dashboard_dir).expanduser()
+        self.read_only = read_only
         self.marker_path = self.dashboard_dir / ".examples_initialized"
         self._lock = threading.RLock()
         self._lock_state = threading.local()
         self.lock_dir = self.dashboard_dir / ".locks"
-        self._ensure_directory()
+        if not read_only:
+            self._ensure_directory()
 
     def _ensure_directory(self) -> None:
         self.dashboard_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -448,6 +450,8 @@ class DashboardStore:
 
     @contextmanager
     def _guard(self, dashboard_id: str):
+        if self.read_only:
+            raise DashboardStoreError(403, "dashboard_store_read_only", "This dashboard store is read-only")
         with self._lock:
             depths = getattr(self._lock_state, "depths", {})
             depth = depths.get(dashboard_id, 0)
@@ -498,7 +502,11 @@ class DashboardStore:
 
     @contextmanager
     def guard_revision(self, dashboard_id: str, expected_revision: int):
-        with self._guard(dashboard_id):
+        if self.read_only:
+            guard = self._lock
+        else:
+            guard = self._guard(dashboard_id)
+        with guard:
             record = self.get(dashboard_id)
             if record["revision"] != expected_revision:
                 raise DashboardStoreError(409, "dashboard_changed", "Dashboard changed before the operation could run")

@@ -30,7 +30,7 @@ AI with the included PostgreSQL container:
 
 Windows PowerShell supports `ai` and `ai-docker-db` through `start.ps1`. On Windows or macOS, use `ai` and profile host `host.docker.internal` for a PostgreSQL server on the host.
 
-The launcher generates a new random OpenCode server password for the process environment. When running Compose directly, set `SCHEMII_OPENCODE_PASSWORD` to a strong random value and include `compose.ai.yaml`.
+The launcher generates one cryptographically random OpenCode server password per instance, stores it in the owner-only persistent instance credential directory, and reuses that file across restarts. The Compose model mounts it as `opencode_password`; it is not rendered into Compose or injected by the launcher as a password environment variable. For direct Compose, create the five secret files documented in `README.md`, set `SCHEMII_CREDENTIAL_DIR` to their absolute owner-only directory, and include `compose.ai.yaml`.
 
 The current launchers start Schemii only. To run Schemii and Schemer with the included PostgreSQL database and one shared AI sidecar, use the advanced Compose combination documented in `README.md` and `docs/AI_AGENT_SETUP.md`:
 

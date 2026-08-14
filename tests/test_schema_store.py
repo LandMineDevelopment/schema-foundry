@@ -28,6 +28,54 @@ def record(schema_id, project_name="Untitled schema"):
 
 
 class SchemaStoreTests(unittest.TestCase):
+    def test_read_only_store_does_not_create_paths_or_allow_writes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "missing"
+            store = SchemaStore(path, read_only=True)
+            self.assertEqual(store.list(), [])
+            self.assertFalse(path.exists())
+            with self.assertRaises(SchemaStoreError) as caught:
+                store.create_ai_project("operation", "Blocked")
+            self.assertEqual(caught.exception.payload["error"]["code"], "schema_store_read_only")
+
+    def test_read_only_store_get_and_safe_bindings_do_not_create_file_locks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "schemas"
+            path.mkdir()
+            stored = record("schema_one")
+            stored["revision"] = 1
+            stored["schema"].update({
+                "postgres": {"sourceProfileId": "local", "database": "demo", "namespace": "public"},
+                "views": [{"id": "view_summary", "name": "summary", "namespace": "public"}],
+            })
+            (path / "schema_one.json").write_text(json.dumps(stored), encoding="utf-8")
+            store = SchemaStore(path, read_only=True)
+            token = schema_layout_token(stored)
+
+            self.assertEqual(store.get("schema_one")["revision"], 1)
+            with store.guard_revision("schema_one", 1) as guarded:
+                self.assertEqual(guarded["id"], "schema_one")
+            store.require_migration_binding("schema_one", 1, token, "local", "demo", "public")
+            store.require_view_mutation_binding(
+                "schema_one", 1, token, "local", "demo", "public", "summary",
+                "upsert", {"kind": "view"}, "view_summary",
+            )
+            store.preview_ai_mutation("schema_one", 1, token, lambda current: (current, {"ok": True}))
+            self.assertFalse((path / ".locks").exists())
+
+            for reservation in (
+                lambda: store.reserve_ai_binding("schema_one", 1, token),
+                lambda: store.reserve_view_mutation_binding(
+                    "schema_one", 1, token, "local", "demo", "public", "summary",
+                    "upsert", {"kind": "view"}, "view_summary",
+                ),
+            ):
+                with self.subTest(reservation=reservation), self.assertRaises(SchemaStoreError) as caught:
+                    with reservation():
+                        pass
+                self.assertEqual(caught.exception.status, 403)
+                self.assertEqual(caught.exception.payload["error"]["code"], "schema_store_read_only")
+
     def setUp(self):
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.schema_dir = Path(self.temporary_directory.name)

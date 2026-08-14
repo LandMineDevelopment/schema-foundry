@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Mapping
 
 
@@ -15,6 +16,7 @@ class MetadataConfig:
     application_name: str = "schemii-metadata"
     connect_timeout: int = 5
     max_json_bytes: int = 1024 * 1024
+    password_file: str = ""
 
     def __post_init__(self) -> None:
         dsn = self.dsn.strip() if isinstance(self.dsn, str) else ""
@@ -29,6 +31,8 @@ class MetadataConfig:
         if isinstance(self.max_json_bytes, bool) or not 1024 <= self.max_json_bytes <= 1024 * 1024:
             raise ValueError("metadata max_json_bytes must be between 1024 and 1048576")
         object.__setattr__(self, "dsn", dsn)
+        if self.password_file and not Path(self.password_file).is_absolute():
+            raise ValueError("metadata password_file must be absolute")
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "MetadataConfig":
@@ -41,6 +45,7 @@ class MetadataConfig:
             raise ValueError("metadata numeric environment settings must be integers") from exc
         return cls(
             dsn=dsn,
+            password_file=values.get("SCHEMII_METADATA_PASSWORD_FILE", ""),
             application_name=values.get("SCHEMII_METADATA_APPLICATION_NAME", "schemii-metadata"),
             connect_timeout=timeout,
             max_json_bytes=max_json,

@@ -15,6 +15,7 @@ from .ai_tool_contracts import effective_schemii_contract
 from .ai_schema_mutations import apply_schema_actions, destructive_impact
 from .ai_http import AiHttpRouter, authority_call, issue_ai_proposals
 from .metadata import MetadataConfig, MetadataConnectionFactory, MetadataStore, MetadataStoreError
+from .secret_file import read_secret_file
 from .migration_execution import DurableMigrationCoordinator
 from .examples import ExampleInstaller, installer_from_environment
 from .http_common import CONTENT_SECURITY_POLICY, MAX_BODY_SIZE, is_local_request as _is_local_request, make_local_app_handler, metadata_profile_dependencies
@@ -980,10 +981,16 @@ def main() -> None:
         raise SystemExit(str(error)) from error
     for error in example_result["errors"]:
         print(f"Schemii example setup warning ({error['component']}): {error['message']}")
+    try:
+        opencode_password = read_secret_file(
+            os.environ.get("SCHEMII_OPENCODE_PASSWORD_FILE", ""), "SCHEMII_OPENCODE_PASSWORD_FILE",
+        ) or os.environ.get("SCHEMII_OPENCODE_PASSWORD", "")
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
     ai_service = OpenCodeService(
         os.environ.get("SCHEMII_OPENCODE_URL", ""),
         os.environ.get("SCHEMII_OPENCODE_USERNAME", "opencode"),
-        os.environ.get("SCHEMII_OPENCODE_PASSWORD", ""),
+        opencode_password,
         ai_timeout,
     )
     server_id = secrets.token_urlsafe(18)
@@ -994,7 +1001,10 @@ def main() -> None:
         secrets.token_urlsafe(32),
         server_id=server_id,
         ai_authority=SchemiiMetadataAuthority(metadata_store, worker_id=f"schemii-{server_id}"),
-        dependency_dashboard_store=DashboardStore(Path(os.environ.get("SCHEMER_DASHBOARD_DIR", "~/.local/share/schemer/dashboards")).expanduser().resolve()),
+        dependency_dashboard_store=DashboardStore(
+            Path(os.environ.get("SCHEMER_DASHBOARD_DIR", "~/.local/share/schemer/dashboards")).expanduser().resolve(),
+            read_only=True,
+        ),
         migration_coordinator=migration_coordinator,
         ai_service=ai_service,
         example_installer=example_installer,

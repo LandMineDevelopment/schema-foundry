@@ -3,8 +3,10 @@ services:
     environment:
       SCHEMER_OPENCODE_URL: http://opencode:4096
       SCHEMER_OPENCODE_USERNAME: ${SCHEMII_OPENCODE_USERNAME:-opencode}
-      SCHEMER_OPENCODE_PASSWORD: ${SCHEMII_OPENCODE_PASSWORD:?Set SCHEMII_OPENCODE_PASSWORD or use an AI launcher mode}
+      SCHEMER_OPENCODE_PASSWORD_FILE: /run/secrets/opencode_password
       SCHEMER_OPENCODE_TIMEOUT: ${SCHEMII_OPENCODE_TIMEOUT:-120}
+    secrets:
+      - opencode_password
     depends_on:
       opencode:
         condition: service_healthy

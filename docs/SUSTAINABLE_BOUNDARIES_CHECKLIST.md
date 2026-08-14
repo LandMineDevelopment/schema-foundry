@@ -153,16 +153,16 @@ Agents must not duplicate another active agent's scope. Research findings that a
 
 ## Phase 8 — final verification and delivery
 
-- [ ] Run focused tests for every changed boundary.
-- [ ] Run complete Python and JavaScript suites.
-- [ ] Run formatting/static/syntax checks and `git diff --check`.
-- [ ] Run Schemii and Schemer server/API smoke checks.
-- [ ] Run disposable metadata PostgreSQL bootstrap/migration/restart checks.
-- [ ] Run disposable target PostgreSQL read/write/migration/reconciliation checks.
-- [ ] Verify no test objects or data remain.
-- [ ] Verify saved layout snapshots remain equal for every pre-existing entry touched by synchronization tests.
-- [ ] Review security, permissions, retention, backup, deployment, and rollback documentation.
-- [ ] Review the complete branch diff and commits against `main`.
+- [x] Run focused tests for every changed boundary.
+- [x] Run complete Python and JavaScript suites.
+- [x] Run formatting/static/syntax checks and `git diff --check`.
+- [x] Run Schemii and Schemer server/API smoke checks.
+- [x] Run disposable metadata PostgreSQL bootstrap/migration/restart checks.
+- [x] Run disposable target PostgreSQL read/write/migration/reconciliation checks.
+- [x] Verify no test objects or data remain.
+- [x] Verify saved layout snapshots remain equal for every pre-existing entry touched by synchronization tests.
+- [x] Review security, permissions, retention, backup, deployment, and rollback documentation.
+- [x] Review the complete branch diff and commits against `main`.
 
 ## Completion criteria
 

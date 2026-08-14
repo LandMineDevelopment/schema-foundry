@@ -17,6 +17,7 @@ from .http_common import make_local_app_handler, metadata_profile_dependencies
 from .schema_store import SchemaStore
 from .opencode_service import OpenCodeService, OpenCodeServiceError
 from .metadata import MetadataConfig, MetadataConnectionFactory, MetadataStore, MetadataStoreError
+from .secret_file import read_secret_file
 from .postgres_http import (
     POSTGRES_CATALOG_CAPABILITY,
     POSTGRES_CONSOLE_CAPABILITY,
@@ -740,10 +741,16 @@ def main() -> None:
     dashboard_store.initialize_once(mercury_template)
     if mercury_template is not None:
         dashboard_store.upgrade_mercury_example(mercury_template)
+    try:
+        opencode_password = read_secret_file(
+            os.environ.get("SCHEMER_OPENCODE_PASSWORD_FILE", ""), "SCHEMER_OPENCODE_PASSWORD_FILE",
+        ) or os.environ.get("SCHEMER_OPENCODE_PASSWORD", "")
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
     ai_service = OpenCodeService(
         os.environ.get("SCHEMER_OPENCODE_URL", ""),
         os.environ.get("SCHEMER_OPENCODE_USERNAME", "opencode"),
-        os.environ.get("SCHEMER_OPENCODE_PASSWORD", ""),
+        opencode_password,
         ai_timeout,
         workspace="/workspace-schemer",
         custom_tools=set(SCHEMER_AI_TOOL_ACTION_TYPES),
@@ -759,7 +766,10 @@ def main() -> None:
         secrets.token_urlsafe(32),
         server_id=server_id,
         ai_authority=SchemerMetadataAuthority(metadata_store, worker_id=f"schemer-{server_id}"),
-        dependency_schema_store=SchemaStore(Path(os.environ.get("SCHEMII_SCHEMA_DIR", "~/.local/share/schemii/schemas")).expanduser().resolve()),
+        dependency_schema_store=SchemaStore(
+            Path(os.environ.get("SCHEMII_SCHEMA_DIR", "~/.local/share/schemii/schemas")).expanduser().resolve(),
+            read_only=True,
+        ),
         ai_service=ai_service,
         behind_loopback_proxy=behind_loopback_proxy,
     )

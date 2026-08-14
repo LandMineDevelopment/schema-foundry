@@ -27,14 +27,16 @@ jobs:
         run: |
           $tokens = $null
           $errors = $null
-          [void][System.Management.Automation.Language.Parser]::ParseFile(
-            (Resolve-Path "start.ps1"),
-            [ref]$tokens,
-            [ref]$errors
-          )
-          if ($errors.Count -gt 0) {
-            $errors | ForEach-Object { Write-Error $_.Message }
-            exit 1
+          foreach ($script in @("start.ps1", "uninstall.ps1")) {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $script), [ref]$tokens, [ref]$errors
+            )
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Error "$script`: $($_.Message)" }
+              exit 1
+            }
           }
 
   javascript:
@@ -51,11 +53,17 @@ jobs:
   docker:
     name: Docker
     runs-on: ubuntu-latest
-    env:
-      SCHEMII_OPENCODE_PASSWORD: ci-only-opencode-password
     steps:
       - uses: actions/checkout@v4
-      - run: bash -n start.sh
+      - name: Create Compose test secret files
+        run: |
+          install -d -m 700 "$RUNNER_TEMP/schemii-credentials"
+          for name in metadata_bootstrap_password metadata_migration_password metadata_schemii_password metadata_schemer_password opencode_password; do
+            install -m 600 /dev/null "$RUNNER_TEMP/schemii-credentials/$name"
+            openssl rand -hex 32 > "$RUNNER_TEMP/schemii-credentials/$name"
+          done
+          echo "SCHEMII_CREDENTIAL_DIR=$RUNNER_TEMP/schemii-credentials" >> "$GITHUB_ENV"
+      - run: bash -n start.sh uninstall.sh docker/runtime-secret-entrypoint.sh docker/metadata/001_roles.sh docker/metadata/secret-entrypoint.sh docker/postgres/seed.sh ai/secret-entrypoint.sh
       - run: docker compose config
       - run: docker compose -f compose.yaml -f compose.local-db.yaml config
       - run: docker compose -f compose.yaml -f compose.postgres.yaml config
@@ -72,6 +80,10 @@ jobs:
           docker run --rm -v "$PWD/ai/workspace:/workspace:ro" -w /workspace schemii-opencode:1.18.15-local debug agent build > /dev/null
           docker run --rm -v "$PWD/ai/schemer-workspace:/workspace-schemer:ro" -w /workspace-schemer schemii-opencode:1.18.15-local debug agent build > /dev/null
       - run: docker compose build
+      - name: Test metadata credential privileges and lifecycle
+        env:
+          SCHEMII_RUN_DOCKER_INTEGRATION: "1"
+        run: python -m unittest tests.test_metadata_credentials_live
       - name: Smoke test container health
         run: |
           docker compose up -d
