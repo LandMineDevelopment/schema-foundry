@@ -5,6 +5,7 @@ import re
 from typing import Any, Callable
 
 from .ai_authority import AiAuthorityError
+from .metadata import MetadataStoreError
 from .opencode_service import OpenCodeService, OpenCodeServiceError
 
 
@@ -14,11 +15,11 @@ AI_SESSION_PATH = re.compile(r"^/api/ai/sessions/([A-Za-z0-9][A-Za-z0-9_.:-]{0,1
 AI_ACTIVITY_PATH = re.compile(r"^/api/ai/sessions/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})/activity$")
 AI_PROPOSAL_PATH = re.compile(
     r"^/api/ai/sessions/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})/proposals/"
-    r"(proposal_[A-Za-z0-9_-]{16,128})/(claim|finalize|release|execute|reconcile)$"
+    r"([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})/(claim|finalize|release|execute|reconcile)$"
 )
 AI_OPERATION_PATH = re.compile(
     r"^/api/ai/sessions/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})/operations/"
-    r"(operation_[A-Za-z0-9_-]{16,128})/status$"
+    r"([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})/status$"
 )
 AI_POLICY_PATH = re.compile(r"^/api/ai/sessions/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})/policy$")
 
@@ -77,6 +78,7 @@ class AiHttpRouter:
         activity_handler: Callable[[Any, OpenCodeService, str], Any] | None = None,
         delete_session_handler: Callable[[Any, OpenCodeService, str], Any] | None = None,
         policy_handler: Callable[[Any, OpenCodeService, str, dict[str, Any] | None], Any] | None = None,
+        proposal_operations: frozenset[str] | None = None,
     ):
         self.service = service
         self.message_handler = message_handler
@@ -87,6 +89,7 @@ class AiHttpRouter:
         self.activity_handler = activity_handler
         self.delete_session_handler = delete_session_handler
         self.policy_handler = policy_handler
+        self.proposal_operations = proposal_operations or frozenset({"claim", "finalize", "release", "execute", "reconcile"})
 
     @staticmethod
     def _authorize(handler) -> bool:
@@ -182,7 +185,7 @@ class AiHttpRouter:
                 self.session_handler(handler, service, body)
         else:
             proposal_match = AI_PROPOSAL_PATH.fullmatch(path)
-            if proposal_match and self.proposal_handler is not None:
+            if proposal_match and self.proposal_handler is not None and proposal_match.group(3) in self.proposal_operations:
                 self.proposal_handler(
                     handler, service, proposal_match.group(1), proposal_match.group(2), proposal_match.group(3), body,
                 )
@@ -264,16 +267,16 @@ def issue_ai_proposals(authority, response, *, application, session_id, resource
     for action in actions:
         diagnostics = preflight(action) if preflight is not None else None
         binding = policy_binding(action) if policy_binding is not None else {}
-        proposal = authority.register_proposal(
-            application=application,
-            session_id=session_id,
-            resource=resource,
-            access=access,
-            action=action,
-            authorization_target=authorization_target,
-            schema_concurrency=schema_concurrency,
-            policy_binding=binding,
-        )
+        if hasattr(authority, "create_proposal"):
+            proposal = authority.create_proposal(
+                session_id, action, binding, authorization_target, schema_concurrency,
+            )
+        else:
+            proposal = authority.register_proposal(
+                application=application, session_id=session_id, resource=resource, access=access,
+                action=action, authorization_target=authorization_target,
+                schema_concurrency=schema_concurrency, policy_binding=binding,
+            )
         envelope = {"proposalId": proposal["id"], "action": proposal["action"], "policyBinding": proposal["policyBinding"]}
         if diagnostics is not None:
             envelope["preflight"] = diagnostics
@@ -287,7 +290,7 @@ def issue_ai_proposals(authority, response, *, application, session_id, resource
 def authority_call(handler, callback, status: int = 200):
     try:
         handler.send_json(status, callback())
-    except AiAuthorityError as error:
+    except (AiAuthorityError, MetadataStoreError) as error:
         handler.send_json(error.status, error.to_dict())
 
 

@@ -69,6 +69,13 @@ class AiPermissionContractTests(unittest.TestCase):
         self.assertIn("enable its matching checkbox", instructions)
         self.assertIn("Do not say the capability is unsupported", instructions)
 
+    def test_schemii_runtime_has_no_json_authority_fallback(self):
+        source = (ROOT / "src/schemii/server.py").read_text()
+        self.assertNotIn("AiAuthority(", source)
+        self.assertNotIn("AiChatStore(", source)
+        self.assertIn("SchemiiMetadataAuthority(metadata_store", source)
+        self.assertIn("metadata_store.health()", source)
+
     def test_compose_keeps_workspace_read_only_and_opencode_private_by_default(self):
         ai_compose = (ROOT / "compose.ai.yaml").read_text()
         local_override = (ROOT / "compose.ai.local-db.yaml").read_text()

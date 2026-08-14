@@ -182,7 +182,7 @@ class MetadataStoreTests(unittest.TestCase):
             for migration in migrations
         ]])
         store = MetadataStore(lambda: connection)
-        self.assertEqual(store.health(), {"ok": True, "version": 2, "expectedVersion": 2})
+        self.assertEqual(store.health(), {"ok": True, "version": 3, "expectedVersion": 3})
         self.assertEqual(connection.commits, 0)
         self.assertEqual(connection.rollbacks, 1)
         self.assertTrue(connection.closed)
@@ -214,6 +214,7 @@ class MetadataStoreTests(unittest.TestCase):
             "capability": "write",
             "policy_revision": 4,
             "state": "ready",
+            "binding": {"policyBinding": {"effectiveMode": "once_per_chat"}},
             "current": True,
         }, {"state": "active"}, {
             "grant_mode": "once_per_chat",
@@ -237,6 +238,7 @@ class MetadataStoreTests(unittest.TestCase):
             "capability": "write",
             "policy_revision": 4,
             "state": "ready",
+            "binding": {"policyBinding": {"effectiveMode": "automatic"}},
             "current": True,
         }, {"state": "active"}, {
             "grant_mode": "automatic",

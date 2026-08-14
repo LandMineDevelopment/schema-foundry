@@ -66,7 +66,7 @@ TARGET = {
 class MetadataRepositoryMigrationTests(unittest.TestCase):
     def test_0002_is_additive_and_adds_repository_evidence(self):
         migrations = packaged_migrations()
-        self.assertEqual([migration.version for migration in migrations], [1, 2])
+        self.assertEqual([migration.version for migration in migrations], [1, 2, 3])
         sql = resources.files("schemii.metadata.migrations").joinpath("0002_authority_repository.sql").read_text()
         self.assertIn("ADD COLUMN binding jsonb", sql)
         self.assertIn("lease_expires_at", sql)

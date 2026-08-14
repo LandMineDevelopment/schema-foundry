@@ -1,0 +1,295 @@
+from __future__ import annotations
+
+import copy
+import hashlib
+import json
+import os
+from pathlib import Path
+from typing import Any
+
+from .metadata import MetadataStore, MetadataStoreError
+
+
+CAPABILITIES = ("schema", "structured", "write", "rawread", "rawwrite")
+APPROVAL_MODES = {"every_action": "approval", "once_per_chat": "once_per_chat", "automatic": "automatic"}
+
+
+class SchemiiMetadataAuthority:
+    """Schemii authority coordinator backed exclusively by transactional metadata."""
+
+    def __init__(self, store: MetadataStore, *, worker_id: str):
+        self.store = store
+        self.worker_id = worker_id
+
+    def health(self) -> dict[str, Any]:
+        return self.store.health()
+
+    def provision_chat(self, schema_id: str) -> dict[str, Any]:
+        return self.store.provision_chat("schemii", "schema", schema_id)
+
+    def bind_external_session(self, chat_id: str, external_session_id: str, title: str) -> dict[str, Any]:
+        return self.store.bind_chat_external_session(chat_id, external_session_id, title)
+
+    def activate_chat(
+        self,
+        chat_id: str,
+        target: dict[str, Any],
+        capabilities: list[str],
+        approvals: dict[str, str],
+    ) -> dict[str, Any]:
+        enabled = self._capabilities(capabilities)
+        configured = self._approvals(approvals)
+        modes = {
+            capability: APPROVAL_MODES[configured[capability]] if capability in enabled else "deny"
+            for capability in CAPABILITIES
+        }
+        modes["metadata"] = "approval"
+        policy = {"version": 1, "capabilities": sorted(enabled), "approvals": configured}
+        self.store.activate_chat(
+            chat_id,
+            self._metadata_target(target) if target else None,
+            policy=policy,
+            capabilities=modes,
+        )
+        return self.get_chat(chat_id)
+
+    def fail_chat(self, chat_id: str, reason: str) -> dict[str, Any]:
+        return self.store.fail_chat(chat_id, reason)
+
+    def get_chat(self, chat_id: str) -> dict[str, Any]:
+        chat = self.store.get_chat(chat_id)
+        if chat["state"] != "active":
+            raise MetadataStoreError("chat_inactive", "AI chat is not active", status=409)
+        current = self.store.get_current_policy(chat_id)
+        policy = current["policy"]
+        grants = {
+            item["capability"]: {"policyRevision": item["policyRevision"]}
+            for item in self.store.list_grants(chat_id, active_only=True)
+        }
+        target = chat["target"]
+        return {
+            "id": chat["chatId"],
+            "schemaId": chat["resourceId"],
+            "externalSessionId": chat["externalSessionId"],
+            "title": chat["displayTitle"],
+            "target": {} if target is None else {
+                "profileId": target["profileId"],
+                "database": target["databaseName"],
+                "namespace": target["namespaceName"],
+                "profileFingerprint": target["profileFingerprint"],
+            },
+            "capabilities": list(policy["capabilities"]),
+            "approvals": dict(policy["approvals"]),
+            "policyRevision": current["revision"],
+            "grants": grants,
+        }
+
+    def list_chats(self, schema_id: str, target: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        records = self.store.list_chats(resource_kind="schema", resource_id=schema_id, states=["active"])
+        chats = [self.get_chat(item["chatId"]) for item in records]
+        return chats if target is None else [chat for chat in chats if chat["target"] == target]
+
+    def update_policy(self, chat_id: str, capabilities: Any, approvals: Any, expected_revision: Any) -> dict[str, Any]:
+        enabled = self._capabilities(capabilities)
+        configured = self._approvals(approvals)
+        chat = self.get_chat(chat_id)
+        if not chat["target"] and any(item != "schema" for item in enabled):
+            raise MetadataStoreError("chat_target_required", "Start a new target-bound chat to enable data capabilities", status=409)
+        modes = {
+            capability: APPROVAL_MODES[configured[capability]] if capability in enabled else "deny"
+            for capability in CAPABILITIES
+        }
+        modes["metadata"] = "approval"
+        self.store.update_policy(
+            chat_id,
+            expected_revision,
+            {"version": 1, "capabilities": sorted(enabled), "approvals": configured},
+            modes,
+        )
+        return self.get_chat(chat_id)
+
+    def begin_delete(self, chat_id: str) -> dict[str, Any]:
+        chat = self.store.get_chat(chat_id)
+        self.store.begin_chat_deletion(chat_id)
+        return chat
+
+    def finish_delete(self, chat_id: str) -> dict[str, Any]:
+        return self.store.mark_chat_deleted(chat_id)
+
+    def create_proposal(
+        self,
+        chat_id: str,
+        action: dict[str, Any],
+        policy_binding: dict[str, Any],
+        authorization_target: dict[str, Any],
+        schema_concurrency: dict[str, Any],
+    ) -> dict[str, Any]:
+        capability = policy_binding.get("capability") or "metadata"
+        binding = {
+            "policyBinding": copy.deepcopy(policy_binding),
+            "authorizationTarget": copy.deepcopy(authorization_target),
+            "schemaConcurrency": copy.deepcopy(schema_concurrency),
+        }
+        created = self.store.create_proposal(
+            chat_id, capability, policy_binding["policyRevision"], binding, action,
+        )
+        return self.proposal(created["proposalId"], chat_id)
+
+    def proposal(self, proposal_id: str, chat_id: str) -> dict[str, Any]:
+        record = self.store.get_proposal(proposal_id)
+        self._owned(record, chat_id)
+        binding = record["binding"]
+        return {
+            "id": record["proposalId"], "chatId": record["chatId"], "state": record["state"],
+            "action": record["action"], "policyBinding": binding["policyBinding"],
+            "authorizationTarget": binding["authorizationTarget"],
+            "schemaConcurrency": binding["schemaConcurrency"],
+        }
+
+    def pending_proposals(self, chat_id: str) -> list[dict[str, Any]]:
+        return [self.proposal(item["proposalId"], chat_id) for item in self.store.list_proposals(chat_id, states=["ready", "authorized"])]
+
+    def authorize_and_claim(
+        self,
+        proposal_id: str,
+        chat_id: str,
+        policy_revision: Any,
+        confirmation: Any,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        proposal = self.proposal(proposal_id, chat_id)
+        policy = proposal["policyBinding"]
+        mode = policy["effectiveMode"]
+        approved = False
+        if mode != "automatic":
+            expected_mode = "once_per_chat" if mode == "once_per_chat" else "every_action"
+            approved = isinstance(confirmation, dict) and confirmation == {"accepted": True, "mode": expected_mode}
+            if not approved and mode == "every_action":
+                raise MetadataStoreError("approval_required", "This AI action requires approval", status=400)
+        elif confirmation is not None:
+            raise MetadataStoreError("invalid_metadata", "Automatic approval is server-owned", status=400)
+        created = self.store.authorize_and_create_operation(
+            proposal_id,
+            expected_policy_revision=policy_revision,
+            approved=approved,
+            worker_id=self.worker_id,
+            lease_seconds=3600,
+        )
+        operation = self.operation(created["operationId"], chat_id)
+        operation.update({
+            "executionOwner": created["executionOwner"],
+            "attemptId": created.get("attemptId"),
+            "claimToken": created.get("claimToken"),
+        })
+        approval = {
+            "capability": policy.get("capability"), "configuredMode": policy["configuredMode"],
+            "effectiveMode": mode, "source": "automatic" if mode == "automatic" else "explicit",
+            "policyRevision": policy["policyRevision"],
+        }
+        return operation, approval
+
+    def operation(self, operation_id: str, chat_id: str) -> dict[str, Any]:
+        record = self.store.get_operation(operation_id)
+        self._owned(record, chat_id)
+        outcome = record["outcome"] or {}
+        return {
+            "id": record["operationId"], "proposalId": record["proposalId"], "state": record["state"],
+            "result": outcome.get("result"), "error": outcome.get("error"),
+        }
+
+    def operation_for_proposal(self, proposal_id: str, chat_id: str) -> dict[str, Any] | None:
+        for operation in self.store.list_operations(chat_id):
+            if operation["proposalId"] == proposal_id:
+                return self.operation(operation["operationId"], chat_id)
+        return None
+
+    def finish_operation(self, attempt_id: str, claim_token: str, state: str, *, result=None, error=None) -> dict[str, Any]:
+        try:
+            finished = self.store.finish_operation(attempt_id, claim_token, state, result=result, error=error)
+        except MetadataStoreError as failure:
+            if failure.code != "metadata_commit_uncertain":
+                raise
+            # The exact token and outcome make this metadata-only retry idempotent.
+            finished = self.store.finish_operation(attempt_id, claim_token, state, result=result, error=error)
+        return {"id": finished["operationId"], "state": finished["state"], "result": result, "error": error}
+
+    def resolve_operation(self, operation_id: str, chat_id: str, state: str, *, result=None, error=None) -> dict[str, Any]:
+        self.operation(operation_id, chat_id)
+        self.store.resolve_uncertain_operation(operation_id, state, result=result, error=error)
+        return self.operation(operation_id, chat_id)
+
+    def create_result(self, chat_id: str, binding: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        result = self.store.create_result(chat_id, binding, payload)
+        return {"id": result["resultRefId"]}
+
+    def reserve_result(self, result_id: str, chat_id: str, binding: dict[str, Any]) -> dict[str, Any]:
+        return self.store.reserve_result(result_id, chat_id, binding)
+
+    def begin_result_delivery(self, delivery_id: str, token: str) -> dict[str, Any]:
+        return self.store.begin_result_delivery(delivery_id, token)
+
+    def consume_result(self, delivery_id: str, token: str) -> dict[str, Any]:
+        return self.store.consume_result(delivery_id, token)
+
+    def release_result(self, delivery_id: str, token: str) -> dict[str, Any]:
+        return self.store.release_result(delivery_id, token)
+
+    def uncertain_result(self, delivery_id: str, token: str) -> dict[str, Any]:
+        return self.store.mark_result_uncertain(delivery_id, token)
+
+    @staticmethod
+    def _owned(record: dict[str, Any], chat_id: str) -> None:
+        if record["chatId"] != chat_id:
+            raise MetadataStoreError("authority_binding_mismatch", "Authority record belongs to another chat", status=403)
+
+    @staticmethod
+    def _metadata_target(target: dict[str, Any]) -> dict[str, Any]:
+        fingerprint = target["profileFingerprint"]
+        connected = hashlib.sha256(json.dumps(
+            [target["profileId"], target["database"], target["namespace"], fingerprint],
+            ensure_ascii=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+        return {
+            "profileId": target["profileId"], "databaseName": target["database"],
+            "namespaceName": target["namespace"], "profileFingerprint": fingerprint,
+            "connectedTargetFingerprint": connected,
+        }
+
+    @staticmethod
+    def _capabilities(value: Any) -> set[str]:
+        if not isinstance(value, list) or len(value) != len(set(value)) or any(item not in CAPABILITIES for item in value):
+            raise MetadataStoreError("invalid_metadata", "AI capabilities are invalid", status=400)
+        return set(value)
+
+    @staticmethod
+    def _approvals(value: Any) -> dict[str, str]:
+        if not isinstance(value, dict) or set(value) != set(CAPABILITIES) or any(mode not in APPROVAL_MODES for mode in value.values()):
+            raise MetadataStoreError("invalid_metadata", "AI approval settings are invalid", status=400)
+        return dict(value)
+
+
+def retire_legacy_schemii_authority(config_dir: Path) -> list[str]:
+    """Archive legacy executable JSON without importing or interpreting any record."""
+    retired = config_dir / "retired-json-authority"
+    retired.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(retired, 0o700)
+    sources = {
+        "ai-chats-v1": config_dir / "ai_chats" / "v1",
+        "ai-authority-v1-schemii": config_dir / "ai_authority" / "v1" / "schemii",
+    }
+    moved = []
+    for name, source in sources.items():
+        destination = retired / name
+        if source.exists() and not destination.exists():
+            try:
+                os.replace(source, destination)
+                moved.append(name)
+            except FileNotFoundError:
+                pass
+    marker = retired / "README.txt"
+    if not marker.exists():
+        marker.write_text(
+            "Legacy Schemii JSON authority was retired without import. Records in this directory are inert and must never be executed.\n",
+            encoding="ascii",
+        )
+        os.chmod(marker, 0o600)
+    return moved

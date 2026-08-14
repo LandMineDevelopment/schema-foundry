@@ -9,11 +9,11 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from .ai_authority import AiAuthority, AiAuthorityError
-from .ai_chat_store import AiChatStore, AiChatStoreError
+from .ai_metadata_authority import SchemiiMetadataAuthority, retire_legacy_schemii_authority
 from .ai_actions import normalize_schemii_action, schemii_action_approval_floor, schemii_action_capability
 from .ai_schema_mutations import apply_schema_actions, destructive_impact
-from .ai_http import AiHttpRouter, authority_call, bounded_ai_query_result, issue_ai_proposals, require_ai_session_binding
+from .ai_http import AiHttpRouter, authority_call, bounded_ai_query_result, issue_ai_proposals
+from .metadata import MetadataConfig, MetadataConnectionFactory, MetadataStore, MetadataStoreError
 from .examples import ExampleInstaller, installer_from_environment
 from .http_common import CONTENT_SECURITY_POLICY, MAX_BODY_SIZE, is_local_request as _is_local_request, make_local_app_handler
 from .opencode_service import OpenCodeService, OpenCodeServiceError
@@ -281,8 +281,7 @@ def make_handler(
     session_token: str,
     *,
     server_id: str,
-    ai_authority: AiAuthority,
-    ai_chat_store: AiChatStore,
+    ai_authority: SchemiiMetadataAuthority,
     ai_service: OpenCodeService | None = None,
     example_installer: ExampleInstaller | None = None,
     behind_loopback_proxy: bool = False,
@@ -304,6 +303,7 @@ def make_handler(
         lambda handler, current_service, session_id: handler._ai_activity(current_service, session_id),
         lambda handler, current_service, session_id: handler._ai_delete_session(current_service, session_id),
         lambda handler, current_service, session_id, body: handler._ai_policy(current_service, session_id, body),
+        proposal_operations=frozenset({"execute", "reconcile"}),
     )
 
     class SchemiiHandler(PostgresHttpMixin, base_handler):
@@ -343,49 +343,29 @@ def make_handler(
                         "profileId": profile_id, "database": database, "namespace": namespace,
                         "profileFingerprint": service.profile_context_fingerprint(profile_id),
                     }
-                created = current_ai_service.create_session(_safe_context_text(record["schema"].get("projectName"), 80), body.get("model"))
+                title = _safe_context_text(record["schema"].get("projectName"), 80) or "Schema chat"
+                provisioned = ai_authority.provision_chat(schema_id)
+                chat_id = provisioned["chatId"]
                 try:
-                    chat = ai_chat_store.create(created["id"], schema_id, target, _ai_capabilities(access), body.get("approvals", _ai_approvals()))
-                except Exception:
+                    created = current_ai_service.create_session(title, body.get("model"))
+                    ai_authority.bind_external_session(chat_id, created["id"], created.get("title") or title)
+                    chat = ai_authority.activate_chat(chat_id, target, _ai_capabilities(access), body.get("approvals", _ai_approvals()))
+                except Exception as error:
                     try:
-                        current_ai_service.delete_session(created["id"])
+                        ai_authority.fail_chat(chat_id, "provider_or_activation_failed")
                     except Exception:
                         pass
+                    if "created" in locals():
+                        try:
+                            current_ai_service.delete_session(created["id"])
+                        except Exception:
+                            pass
                     raise
-                return {**created, "schemaId": chat["schemaId"], "target": chat["target"], "capabilities": chat["capabilities"], "approvals": chat["approvals"], "policyRevision": chat["policyRevision"]}
+                return {"id": chat["id"], "title": chat["title"], "schemaId": chat["schemaId"], "target": chat["target"], "capabilities": chat["capabilities"], "approvals": chat["approvals"], "policyRevision": chat["policyRevision"]}
             return self._ai_call(create, 201)
 
         def _ai_chat(self, current_ai_service, session_id, supplied=None):
-            try:
-                chat = ai_chat_store.get(session_id)
-            except AiChatStoreError as error:
-                if error.code != "chat_not_found" or not isinstance(supplied, dict):
-                    raise
-                access = supplied.get("accessLevel")
-                schema_id = supplied.get("schemaId")
-                if access not in AI_ACCESS_LEVELS:
-                    raise
-                store.get(schema_id)
-                capabilities = _ai_capabilities(access)
-                has_target = any(permission in capabilities for permission in ("structured", "write", "rawread", "rawwrite"))
-                target = {}
-                fingerprint_parts = None
-                if has_target:
-                    profile_id = supplied.get("profileId")
-                    database = PostgresService._validate_database(supplied.get("database"))
-                    namespace = PostgresService._validate_namespace(supplied.get("namespace"))
-                    profile = next((item for item in service.list_profiles() if item.get("id") == profile_id), None)
-                    if profile is None:
-                        raise OpenCodeServiceError(404, "not_found", "Profile was not found")
-                    if profile.get("dbname") != database:
-                        raise OpenCodeServiceError(409, "database_changed", "The saved profile database does not match the requested database")
-                    target = {
-                        "profileId": profile_id, "database": database, "namespace": namespace,
-                        "profileFingerprint": service.profile_context_fingerprint(profile_id),
-                    }
-                    fingerprint_parts = [profile_id, database, namespace, target["profileFingerprint"]]
-                require_ai_session_binding(current_ai_service, session_id, "SCHEMII_CONTEXT", schema_id, access, fingerprint_parts)
-                chat = ai_chat_store.create(session_id, schema_id, target, capabilities, _ai_approvals())
+            chat = ai_authority.get_chat(session_id)
             if isinstance(supplied, dict):
                 expected = {
                     "schemaId": chat["schemaId"],
@@ -402,16 +382,16 @@ def make_handler(
         def _ai_activity(self, current_ai_service, session_id):
             try:
                 self._ai_chat(current_ai_service, session_id)
-            except (AiChatStoreError, OpenCodeServiceError) as error:
+            except (MetadataStoreError, OpenCodeServiceError) as error:
                 payload = error.payload if hasattr(error, "payload") else error.to_dict()
                 return self.send_json(error.status, payload)
-            return AiHttpRouter._activity_stream(self, current_ai_service, session_id)
+            return AiHttpRouter._activity_stream(self, current_ai_service, ai_authority.get_chat(session_id)["externalSessionId"])
 
         def _ai_delete_session(self, current_ai_service, session_id):
             def delete():
-                self._ai_chat(current_ai_service, session_id)
-                result = current_ai_service.delete_session(session_id)
-                ai_chat_store.delete(session_id)
+                chat = ai_authority.begin_delete(session_id)
+                result = current_ai_service.delete_session(chat["externalSessionId"])
+                ai_authority.finish_delete(session_id)
                 return result
             return self._ai_call(delete)
 
@@ -420,8 +400,8 @@ def make_handler(
                 chat = self._ai_chat(current_ai_service, session_id)
                 if body is not None:
                     if set(body) != {"capabilities", "approvals", "expectedPolicyRevision"}:
-                        raise AiChatStoreError(400, "validation_error", "AI policy fields are invalid")
-                    chat = ai_chat_store.update_policy(
+                        raise MetadataStoreError("validation_error", "AI policy fields are invalid", status=400)
+                    chat = ai_authority.update_policy(
                         session_id, body["capabilities"], body["approvals"], body["expectedPolicyRevision"],
                     )
                 return chat
@@ -432,9 +412,7 @@ def make_handler(
                 self.send_json(status, callback())
             except PostgresServiceError as error:
                 self.send_json(error.status, error.to_dict())
-            except AiChatStoreError as error:
-                self.send_json(error.status, error.to_dict())
-            except AiAuthorityError as error:
+            except MetadataStoreError as error:
                 self.send_json(error.status, error.to_dict())
             except SchemaStoreError as error:
                 self.send_json(error.status, error.payload)
@@ -454,7 +432,7 @@ def make_handler(
                 self.send_json(error.status, error.payload)
             except PostgresServiceError as error:
                 self.send_json(error.status, error.to_dict())
-            except AiChatStoreError as error:
+            except MetadataStoreError as error:
                 self.send_json(error.status, error.to_dict())
 
         def _schema_id(self) -> str | None:
@@ -465,6 +443,11 @@ def make_handler(
         def do_GET(self):
             parsed = urlparse(self.path)
             path = parsed.path
+            if path == "/api/readiness":
+                try:
+                    return self.send_json(200, {"ready": True, "metadata": ai_authority.health()})
+                except MetadataStoreError as error:
+                    return self.send_json(error.status, {"ready": False, **error.to_dict()})
             if self._handle_common_get(path) or self._handle_postgres_get(parsed):
                 return
             if path == "/api/schemas":
@@ -593,7 +576,7 @@ def make_handler(
                 self.send_json(error.status, error.to_dict())
 
         def _ai_message(self, current_ai_service, session_id: str, body: dict):
-            allowed = {"text", "model", "schemaId", "accessLevel", "profileId", "database", "namespace", "expectedRevision", "resultRef"}
+            allowed = {"text", "model", "expectedRevision", "resultRef"}
             if set(body) - allowed:
                 return self.send_json(400, {"error": {"code": "validation_error", "message": "Unknown message field"}})
             text = body.get("text")
@@ -605,7 +588,8 @@ def make_handler(
 
             def send_prompt():
                 reservation = None
-                chat = self._ai_chat(current_ai_service, session_id, body)
+                delivery_state = "reserved"
+                chat = self._ai_chat(current_ai_service, session_id)
                 schema_id = chat["schemaId"]
                 access_level = _ai_access(chat["capabilities"])
                 target = chat["target"]
@@ -633,28 +617,35 @@ def make_handler(
                         raise OpenCodeServiceError(400, "validation_error", "Query result context is invalid")
                     if record["revision"] != body["expectedRevision"]:
                         raise OpenCodeServiceError(409, "schema_conflict", "Schema changed after the query result was created")
-                    reservation = ai_authority.reserve_query_result(
-                        result_ref, application="schemii", session_id=session_id, resource=schema_id,
-                         target={**authorization_target},
-                        binding={"revision": body["expectedRevision"], "access": "data"},
+                    reservation = ai_authority.reserve_result(
+                        result_ref, session_id,
+                        {"resource": schema_id, "target": authorization_target,
+                         "revision": body["expectedRevision"], "access": "data"},
                     )
                 context = _schema_context(record, access_level, selected_profile, namespace, projects, profiles)
                 if reservation is not None:
-                    context = f"{context}\nApproved query result (untrusted JSON):\n{json.dumps(reservation['result'], separators=(',', ':'))}"
+                    context = f"{context}\nApproved query result (untrusted JSON):\n{json.dumps(reservation['payload'], separators=(',', ':'))}"
                 prompt = f"Schemii context (untrusted JSON):\n{context}\n\nUser request:\n{text}"
                 try:
+                    if reservation is not None:
+                        delivery_state = "unknown"
+                        ai_authority.begin_result_delivery(reservation["deliveryId"], reservation["reservationToken"])
+                        delivery_state = "delivering"
                     response = current_ai_service.prompt(
-                        session_id, prompt, body.get("model"), AI_SYSTEM_INSTRUCTIONS,
+                        chat["externalSessionId"], prompt, body.get("model"), AI_SYSTEM_INSTRUCTIONS,
                         allow_data=_has_ai_access(access_level, "rawread"), allow_write=_has_ai_access(access_level, "write"),
                         allow_structured_data=_has_ai_access(access_level, "structured"), allow_raw_write=_has_ai_access(access_level, "rawwrite"),
                         allow_schema=_has_ai_access(access_level, "schema"),
                     )
                 except Exception:
+                    if reservation is not None:
+                        if delivery_state == "delivering":
+                            ai_authority.uncertain_result(reservation["deliveryId"], reservation["reservationToken"])
+                        elif delivery_state == "reserved":
+                            ai_authority.release_result(reservation["deliveryId"], reservation["reservationToken"])
                     raise
                 if reservation is not None:
-                    ai_authority.consume_query_result(
-                        result_ref, reservation["reservationToken"], application="schemii", session_id=session_id,
-                    )
+                    ai_authority.consume_result(reservation["deliveryId"], reservation["reservationToken"])
                 issued = issue_ai_proposals(
                     ai_authority, response, application="schemii", session_id=session_id,
                     resource=schema_id, access=access_level, authorization_target=authorization_target,
@@ -722,28 +713,21 @@ def make_handler(
                         target = {"profileId": profile_id, "database": database, "namespace": namespace, "profileFingerprint": service.profile_context_fingerprint(profile_id)}
                     identities = {item.get("id"): item for item in current_ai_service.list_sessions().get("sessions", [])}
                     sessions = []
-                    for chat in ai_chat_store.list(schema_id, target):
-                        if set(chat["capabilities"]) != set(_ai_capabilities(access_level)) or chat["id"] not in identities:
+                    for chat in ai_authority.list_chats(schema_id, target):
+                        identity = identities.get(chat["externalSessionId"])
+                        if set(chat["capabilities"]) != set(_ai_capabilities(access_level)) or identity is None:
                             continue
-                        identity = identities[chat["id"]]
-                        sessions.append({**identity, "schemaId": chat["schemaId"], "target": chat["target"], "capabilities": chat["capabilities"], "approvals": chat["approvals"], "policyRevision": chat["policyRevision"]})
+                        sessions.append({**identity, "id": chat["id"], "title": chat["title"], "schemaId": chat["schemaId"], "target": chat["target"], "capabilities": chat["capabilities"], "approvals": chat["approvals"], "policyRevision": chat["policyRevision"]})
                     return {"sessions": sessions}
                 chat = self._ai_chat(current_ai_service, session_id, supplied)
                 schema_id = chat["schemaId"]
                 access_level = _ai_access(chat["capabilities"])
-                result = current_ai_service.session_messages(session_id)
+                result = current_ai_service.session_messages(chat["externalSessionId"])
                 pending = []
-                for proposal in ai_authority.list_resource_proposals(application="schemii", session_id=session_id, resource=schema_id, access=access_level):
-                    if proposal["action"].get("type") not in {"migration_apply", "postgres_write_apply"} or proposal["state"] not in {"ready", "claimed", "uncertain"}:
-                        continue
-                    operation = None
-                    try:
-                        operation = ai_authority.operation_for_proposal(proposal["id"], application="schemii", session_id=session_id)
-                    except AiAuthorityError as error:
-                        if error.status != 404:
-                            raise
+                for proposal in ai_authority.pending_proposals(session_id):
+                    operation = ai_authority.operation_for_proposal(proposal["id"], session_id)
                     if operation is None or operation["state"] in {"running", "uncertain"}:
-                        pending.append({"proposalId": proposal["id"], "sessionId": session_id, "action": proposal["action"]})
+                        pending.append({"proposalId": proposal["id"], "sessionId": session_id, "action": proposal["action"], "policyBinding": proposal["policyBinding"]})
                 return {**result, "pendingProposals": pending}
 
             return self._ai_call(history)
@@ -751,21 +735,34 @@ def make_handler(
         def _ai_proposal(self, current_ai_service, session_id: str, proposal_id: str, operation: str, body: dict):
             if operation == "reconcile":
                 def reconcile():
-                    self._ai_chat(current_ai_service, session_id)
-                    current = ai_authority.operation_for_proposal(proposal_id, application="schemii", session_id=session_id)
+                    chat = self._ai_chat(current_ai_service, session_id)
+                    current = ai_authority.operation_for_proposal(proposal_id, session_id)
+                    if current is None:
+                        raise MetadataStoreError("operation_not_started", "Proposal operation has not started", status=404)
                     if current["state"] != "uncertain":
                         return {"operation": current}
-                    operation_record = ai_authority.operation_record(current["id"], application="schemii", session_id=session_id)
-                    action = operation_record["action"]
-                    if action.get("type") not in {"migration_apply", "postgres_write_apply"}:
-                        return {"operation": current}
+                    proposal = ai_authority.proposal(proposal_id, session_id)
+                    action = proposal["action"]
                     try:
-                        result = service.reconcile_ai_migration(action["planId"], action["profileId"]) if action["type"] == "migration_apply" else service.reconcile_ai_postgres_write(action["planId"], action["profileId"])
+                        if action.get("type") == "migration_apply":
+                            result = service.reconcile_ai_migration(action["planId"], action["profileId"])
+                        elif action.get("type") == "postgres_write_apply":
+                            result = service.reconcile_ai_postgres_write(action["planId"], action["profileId"])
+                        elif action.get("type") in AI_SCHEMA_MUTATION_TYPES | {"schema_batch"}:
+                            result = store.get(chat["schemaId"]).get("aiOperationReceipts", {}).get(current["id"])
+                            if result is None:
+                                raise SchemaStoreError(409, "operation_not_applied", "No saved-design receipt exists for this operation")
+                        elif action.get("type") == "create_project":
+                            result = next((item.get("aiOperationReceipts", {}).get(current["id"]) for item in store.list() if current["id"] in item.get("aiOperationReceipts", {})), None)
+                            if result is None:
+                                raise SchemaStoreError(409, "operation_not_applied", "No created-project receipt exists for this operation")
+                        else:
+                            return {"operation": current}
                         if action["type"] == "migration_apply" and "schemaSync" not in result:
-                            operation_binding = operation_record["schemaConcurrency"]
+                            operation_binding = proposal["schemaConcurrency"]
                             try:
                                 result["schemaSync"] = store.sync_ai_migration_result(
-                                    operation_record["resource"], operation_binding["revision"], operation_binding["layoutToken"], result["refreshedSchema"],
+                                    chat["schemaId"], operation_binding["revision"], operation_binding["layoutToken"], result["refreshedSchema"],
                                 )
                             except SchemaStoreError as error:
                                 raise PostgresServiceError(
@@ -775,10 +772,10 @@ def make_handler(
                             result.pop("refreshedSchema", None)
                             result = service.update_ai_migration_result(action["planId"], result)
                         elif action["type"] == "postgres_write_apply" and action["writeKind"] == "create_view" and "schemaSync" not in result:
-                            operation_binding = operation_record["schemaConcurrency"]
+                            operation_binding = proposal["schemaConcurrency"]
                             descriptor = result["descriptor"]
                             result["schemaSync"] = store.sync_view_after_mutation(
-                                operation_record["resource"], operation_binding["revision"], operation_binding["layoutToken"],
+                                chat["schemaId"], operation_binding["revision"], operation_binding["layoutToken"],
                                 action["profileId"], action["database"], action["namespace"], action["relation"],
                                 descriptor["kind"], result["desiredDefinition"], result.get("queryDefinition"), descriptor["fingerprint"],
                                 operation="upsert", expected_absent=True, saved_view_id=None, receipt_id=action["planId"],
@@ -795,56 +792,33 @@ def make_handler(
                             error_code = error.code
                         terminal_codes = {"apply_not_committed", "profile_changed", "database_changed", "plan_consumed", "not_found", "relation_changed"}
                         state = "uncertain" if error_code == "execution_outcome_unknown" else "failed" if error_code in terminal_codes or error_status < 500 else "uncertain"
-                        resolved = ai_authority.resolve_operation(
-                            current["id"], application="schemii", session_id=session_id, state=state, error=error_payload,
-                        )
+                        resolved = current if state == "uncertain" else ai_authority.resolve_operation(current["id"], session_id, state, error=error_payload)
                     else:
-                        resolved = ai_authority.resolve_operation(
-                            current["id"], application="schemii", session_id=session_id, state="succeeded", result=result,
-                        )
+                        resolved = ai_authority.resolve_operation(current["id"], session_id, "succeeded", result=result)
                     return {"operation": resolved}
                 return authority_call(self, reconcile)
             try:
                 chat = self._ai_chat(current_ai_service, session_id, body)
-            except (AiChatStoreError, OpenCodeServiceError, SchemaStoreError, PostgresServiceError) as error:
+            except (MetadataStoreError, OpenCodeServiceError, SchemaStoreError, PostgresServiceError) as error:
                 payload = error.payload if hasattr(error, "payload") else error.to_dict()
                 return self.send_json(error.status, payload)
             if operation == "execute":
                 return self._ai_execute_proposal(current_ai_service, session_id, proposal_id, body)
-            if operation in {"finalize", "release"}:
-                if set(body) != {"claimToken"}:
-                    return self.send_json(400, {"error": {"code": "validation_error", "message": "Proposal completion fields are invalid"}})
-                callback = ai_authority.finalize_proposal if operation == "finalize" else ai_authority.release_proposal
-                return authority_call(self, lambda: callback(
-                    proposal_id, body.get("claimToken"), application="schemii", session_id=session_id,
-                ))
-            allowed = {"schemaId", "accessLevel", "profileId", "namespace"}
-            if set(body) - allowed or body.get("accessLevel") not in AI_ACCESS_LEVELS:
-                return self.send_json(400, {"error": {"code": "validation_error", "message": "Proposal claim fields are invalid"}})
-            schema_id = chat["schemaId"]
-            access = _ai_access(chat["capabilities"])
-            record = store.get(schema_id)
-            schema_concurrency = {"revision": record["revision"], "layoutToken": record["layoutToken"]}
-            authorization_target = dict(chat["target"])
-            return authority_call(self, lambda: ai_authority.claim_proposal(
-                proposal_id, application="schemii", session_id=session_id, resource=schema_id,
-                access=access, authorization_target=authorization_target,
-                schema_concurrency=schema_concurrency,
-            ))
+            return self.send_json(404, {"error": "Unknown API path"})
 
         def _ai_operation_status(self, current_ai_service, session_id: str, operation_id: str):
             def status():
                 self._ai_chat(current_ai_service, session_id)
-                return {"operation": ai_authority.operation(operation_id, application="schemii", session_id=session_id)}
+                return {"operation": ai_authority.operation(operation_id, session_id)}
             return authority_call(self, status)
 
         def _ai_execute_proposal(self, current_ai_service, session_id: str, proposal_id: str, body: dict):
-            allowed = {"schemaId", "accessLevel", "profileId", "database", "namespace", "confirmation", "policyRevision"}
+            allowed = {"confirmation", "policyRevision"}
             if set(body) - allowed:
                 return self.send_json(400, {"error": {"code": "validation_error", "message": "Proposal execution fields are invalid"}})
             try:
-                chat = self._ai_chat(current_ai_service, session_id, body)
-            except (AiChatStoreError, OpenCodeServiceError, SchemaStoreError, PostgresServiceError) as error:
+                chat = self._ai_chat(current_ai_service, session_id)
+            except (MetadataStoreError, OpenCodeServiceError, SchemaStoreError, PostgresServiceError) as error:
                 payload = error.payload if hasattr(error, "payload") else error.to_dict()
                 return self.send_json(error.status, payload)
             status, payload = self._run_ai_proposal(session_id, proposal_id, chat, body.get("policyRevision"), body.get("confirmation"))
@@ -867,50 +841,38 @@ def make_handler(
                 if profile.get("dbname") != authorization_target["database"] or service.profile_context_fingerprint(profile["id"]) != authorization_target["profileFingerprint"]:
                     return 409, {"error": {"code": "session_context_changed", "message": "The saved connection changed; create a new AI chat"}}
             try:
-                proposal_record = ai_authority.proposal_record(proposal_id, application="schemii", session_id=session_id)
+                proposal_record = ai_authority.proposal(proposal_id, session_id)
                 policy = proposal_record["policyBinding"]
-                if not policy:
-                    policy = {**_ai_policy_binding(chat, proposal_record["action"]), "effectiveMode": "every_action"}
                 expected_policy = _ai_policy_binding(chat, proposal_record["action"], origin=policy.get("origin", "model"))
                 if policy != expected_policy:
-                    raise AiChatStoreError(409, "chat_policy_changed", "Proposal approval policy no longer matches this chat")
-                operation, approval = ai_chat_store.authorize(
-                    session_id, policy["capability"], policy_revision, policy["effectiveMode"], confirmation,
-                    lambda: ai_authority.create_operation(
-                        proposal_id, application="schemii", session_id=session_id, resource=schema_id,
-                        access=access, authorization_target=authorization_target, schema_concurrency=schema_concurrency,
-                    ),
+                    raise MetadataStoreError("chat_policy_changed", "Proposal approval policy no longer matches this chat", status=409)
+                operation, approval = ai_authority.authorize_and_claim(
+                    proposal_id, session_id, policy_revision, confirmation,
                 )
-            except (AiAuthorityError, AiChatStoreError) as error:
+            except MetadataStoreError as error:
                 return error.status, error.to_dict()
             execution_owner = operation.pop("executionOwner", False)
             if not execution_owner:
                 return 200, {"operation": operation, "approval": approval}
-            operation_record = ai_authority.operation_record(operation["id"], application="schemii", session_id=session_id)
-            action = operation_record["action"]
+            action = proposal_record["action"]
+            attempt_id = operation.pop("attemptId")
+            claim_token = operation.pop("claimToken")
             try:
                 result = self._execute_schemii_action(
                     action, session_id, schema_id, record, profile, authorization_target,
                     schema_concurrency, operation["id"], access,
                 )
-            except (OpenCodeServiceError, SchemaStoreError, PostgresServiceError, AiAuthorityError) as error:
+            except (OpenCodeServiceError, SchemaStoreError, PostgresServiceError, MetadataStoreError) as error:
                 payload = error.payload if hasattr(error, "payload") else error.to_dict()
                 action_type = action.get("type")
                 uncertain = payload["error"].get("code") == "execution_outcome_unknown"
-                finished = ai_authority.finish_operation(
-                    operation["id"], application="schemii", session_id=session_id,
-                    state="uncertain" if uncertain else "failed", error=payload["error"],
-                )
+                finished = ai_authority.finish_operation(attempt_id, claim_token, "uncertain" if uncertain else "failed", error=payload["error"])
                 return getattr(error, "status", 400), {"operation": finished, "approval": approval}
             except Exception:
-                finished = ai_authority.finish_operation(
-                    operation["id"], application="schemii", session_id=session_id, state="uncertain",
-                    error={"code": "execution_outcome_unknown", "message": "Operation outcome is uncertain; reload authoritative state"},
-                )
+                finished = ai_authority.finish_operation(attempt_id, claim_token, "uncertain",
+                    error={"code": "execution_outcome_unknown", "message": "Operation outcome is uncertain; reload authoritative state"})
                 return 500, {"operation": finished, "approval": approval}
-            finished = ai_authority.finish_operation(
-                operation["id"], application="schemii", session_id=session_id, state="succeeded", result=result,
-            )
+            finished = ai_authority.finish_operation(attempt_id, claim_token, "succeeded", result=result)
             return 200, {"operation": finished, "approval": approval}
 
         def _ai_proposal_envelope(self, proposal, session_id, chat):
@@ -937,10 +899,10 @@ def make_handler(
                     expected_profile_fingerprint=service.profile_context_fingerprint(profile["id"]),
                     allow_explain=False, max_rows=100, max_columns=50, max_result_bytes=256 * 1024,
                 )
-                reference = ai_authority.register_query_result(
-                    application="schemii", session_id=session_id, resource=schema_id,
-                    target=authorization_target, binding={"revision": record["revision"], "access": "data"},
-                    result=bounded_ai_query_result(result, max_rows=50, max_columns=50, max_bytes=24 * 1024),
+                reference = ai_authority.create_result(
+                    session_id, {"resource": schema_id, "target": authorization_target,
+                                 "revision": record["revision"], "access": "data"},
+                    bounded_ai_query_result(result, max_rows=50, max_columns=50, max_bytes=24 * 1024),
                 )
                 return {"kind": "sql_result", "display": result, "resultRef": reference["id"], "schemaConcurrency": schema_concurrency, "authorizationTarget": authorization_target}
             if action_type == "data_read":
@@ -953,10 +915,10 @@ def make_handler(
                     "rows": [[row.get(name) for name in names] for row in result["rows"]],
                     "rowCount": len(result["rows"]), "truncated": result["hasMore"],
                 }
-                reference = ai_authority.register_query_result(
-                    application="schemii", session_id=session_id, resource=schema_id,
-                    target=authorization_target, binding={"revision": record["revision"], "access": "data"},
-                    result=bounded_ai_query_result(display, max_rows=50, max_columns=50, max_bytes=24 * 1024),
+                reference = ai_authority.create_result(
+                    session_id, {"resource": schema_id, "target": authorization_target,
+                                 "revision": record["revision"], "access": "data"},
+                    bounded_ai_query_result(display, max_rows=50, max_columns=50, max_bytes=24 * 1024),
                 )
                 return {"kind": "data_result", "display": display, "resultRef": reference["id"], "schemaConcurrency": schema_concurrency, "authorizationTarget": authorization_target}
             if action_type == "raw_write":
@@ -995,13 +957,12 @@ def make_handler(
                     "namespace": action["namespace"], "planId": plan["applyPlanId"], "destructive": plan["destructive"],
                     "requiresConfirmation": True,
                 }
-                proposal = ai_authority.register_proposal(
-                    application="schemii", session_id=session_id, resource=schema_id, access=access,
-                    action=apply_action, authorization_target=authorization_target,
-                    schema_concurrency=schema_concurrency,
-                    policy_binding=_ai_policy_binding(ai_chat_store.get(session_id), apply_action, origin="server_apply"),
+                current_chat = ai_authority.get_chat(session_id)
+                proposal = ai_authority.create_proposal(
+                    session_id, apply_action, _ai_policy_binding(current_chat, apply_action, origin="server_apply"),
+                    authorization_target, schema_concurrency,
                 )
-                return {"kind": "migration_plan", "plan": plan, "target": {"profileId": selected["id"], "database": selected["dbname"], "namespace": action["namespace"], "profileFingerprint": action["profileFingerprint"]}, "schemaBinding": schema_binding, "applyProposal": self._ai_proposal_envelope(proposal, session_id, ai_chat_store.get(session_id))}
+                return {"kind": "migration_plan", "plan": plan, "target": {"profileId": selected["id"], "database": selected["dbname"], "namespace": action["namespace"], "profileFingerprint": action["profileFingerprint"]}, "schemaBinding": schema_binding, "applyProposal": self._ai_proposal_envelope(proposal, session_id, current_chat)}
             if action_type in {"insert_rows_preview", "create_view_preview"}:
                 selected = next((item for item in service.list_profiles() if item.get("id") == action.get("profileId")), None)
                 if selected is None or selected.get("dbname") != action.get("database") or service.profile_context_fingerprint(selected["id"]) != action.get("profileFingerprint") or any(action.get(key) != authorization_target.get(key) for key in ("profileId", "database", "namespace", "profileFingerprint")):
@@ -1029,16 +990,15 @@ def make_handler(
                     "rowCount": plan.get("rowCount"), "reviewedPlan": plan,
                     "requiresConfirmation": True,
                 }
-                proposal = ai_authority.register_proposal(
-                    application="schemii", session_id=session_id, resource=schema_id, access=access,
-                    action=apply_action, authorization_target=authorization_target,
-                    schema_concurrency=schema_concurrency,
-                    policy_binding=_ai_policy_binding(ai_chat_store.get(session_id), apply_action, origin="server_apply"),
+                current_chat = ai_authority.get_chat(session_id)
+                proposal = ai_authority.create_proposal(
+                    session_id, apply_action, _ai_policy_binding(current_chat, apply_action, origin="server_apply"),
+                    authorization_target, schema_concurrency,
                 )
                 return {
                     "kind": "postgres_write_plan", "writeKind": write_kind, "plan": plan,
                     "target": {"profileId": selected["id"], "database": selected["dbname"], "namespace": action["namespace"], "relation": action["relation"], "profileFingerprint": action["profileFingerprint"]},
-                    "schemaBinding": schema_binding, "applyProposal": self._ai_proposal_envelope(proposal, session_id, ai_chat_store.get(session_id)),
+                    "schemaBinding": schema_binding, "applyProposal": self._ai_proposal_envelope(proposal, session_id, current_chat),
                 }
             if action_type == "migration_apply":
                 with store.reserve_ai_binding(schema_id, schema_concurrency["revision"], schema_concurrency["layoutToken"]):
@@ -1151,18 +1111,16 @@ def make_handler(
                     "database": authorization_target["database"], "namespace": authorization_target["namespace"],
                     "planId": plan["applyPlanId"], "destructive": plan["destructive"], "requiresConfirmation": True,
                 }
-                chat = ai_chat_store.get(session_id)
-                proposal = ai_authority.register_proposal(
-                    application="schemii", session_id=session_id, resource=receipt["schemaId"], access=access,
-                    action=apply_action, authorization_target=authorization_target,
-                    schema_concurrency={"revision": receipt["revision"], "layoutToken": receipt["layoutToken"]},
-                    policy_binding=_ai_policy_binding(chat, apply_action, origin="server_apply"),
+                chat = ai_authority.get_chat(session_id)
+                proposal = ai_authority.create_proposal(
+                    session_id, apply_action, _ai_policy_binding(chat, apply_action, origin="server_apply"),
+                    authorization_target, {"revision": receipt["revision"], "layoutToken": receipt["layoutToken"]},
                 )
                 receipt["migrationPreview"] = {
                     "status": "ready", "kind": "migration_plan", "plan": plan, "target": authorization_target,
                     "schemaBinding": binding, "applyProposal": self._ai_proposal_envelope(proposal, session_id, chat),
                 }
-            except (PostgresServiceError, AiAuthorityError, AiChatStoreError) as error:
+            except (PostgresServiceError, MetadataStoreError) as error:
                 payload = error.payload if hasattr(error, "payload") else error.to_dict()
                 receipt["migrationPreview"] = {"status": "unavailable", "error": payload["error"]}
             return receipt
@@ -1220,6 +1178,15 @@ def main() -> None:
     service = PostgresService(config_dir)
     store = SchemaStore(schema_dir)
     try:
+        metadata_config = MetadataConfig.from_env()
+        metadata_store = MetadataStore(
+            MetadataConnectionFactory(metadata_config), max_json_bytes=metadata_config.max_json_bytes,
+        )
+        metadata_store.health()
+    except (ValueError, MetadataStoreError) as error:
+        raise SystemExit(f"Schemii metadata readiness failed: {error}") from error
+    retire_legacy_schemii_authority(config_dir)
+    try:
         example_installer = installer_from_environment(service, store, config_dir)
         example_result = example_installer.initialize_once()
     except ValueError as error:
@@ -1232,14 +1199,14 @@ def main() -> None:
         os.environ.get("SCHEMII_OPENCODE_PASSWORD", ""),
         ai_timeout,
     )
+    server_id = secrets.token_urlsafe(18)
     handler = make_handler(
         web_dir,
         service,
         store,
         secrets.token_urlsafe(32),
-        server_id=secrets.token_urlsafe(18),
-        ai_authority=AiAuthority(config_dir / "ai_authority" / "v1", "schemii"),
-        ai_chat_store=AiChatStore(config_dir / "ai_chats" / "v1"),
+        server_id=server_id,
+        ai_authority=SchemiiMetadataAuthority(metadata_store, worker_id=f"schemii-{server_id}"),
         ai_service=ai_service,
         example_installer=example_installer,
         behind_loopback_proxy=behind_loopback_proxy,

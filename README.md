@@ -68,6 +68,8 @@ The first start downloads several container images and build dependencies. It re
 
 No account is required to start Schemii. Anonymous AI models may be available, but AI use can require provider authentication when anonymous models are unavailable. No model request is made until the user sends a chat message.
 
+Schemii requires the dedicated metadata PostgreSQL schema to be current before it serves requests. `/api/readiness` reports metadata connectivity and schema version independently of OpenCode availability. AI chat UUIDs, policies, grants, proposals, operation attempts, and bounded one-use query-result references are stored there; OpenCode session IDs are opaque external references and titles are display-only. Legacy Schemii JSON chat and authority directories are moved idempotently under `retired-json-authority` and are never imported as executable records.
+
 ### Default Stack
 
 The no-argument launcher starts:
@@ -377,8 +379,11 @@ Most users do not need configuration. These launcher and Compose variables are t
 | `SCHEMII_POSTGRES_USER` | Included PostgreSQL user |
 | `SCHEMII_POSTGRES_PASSWORD` | Included PostgreSQL password |
 | `SCHEMII_OPENCODE_TIMEOUT` | AI request timeout, default `300` seconds; accepted range `1`–`300` |
+| `SCHEMII_METADATA_DSN` | Required native PostgreSQL metadata connection string; Compose supplies the scoped runtime role |
+| `SCHEMII_METADATA_CONNECT_TIMEOUT` | Metadata connection timeout, default `5` seconds; accepted range `1`–`60` |
+| `SCHEMII_METADATA_MAX_JSON_BYTES` | Metadata JSON payload ceiling, default and maximum `1048576` bytes |
 
-Native Schemii variables include `SCHEMII_HOST`, `SCHEMII_PORT`, `SCHEMII_CONFIG_DIR`, `SCHEMII_SCHEMA_DIR`, and `SCHEMII_BEHIND_LOOPBACK_PROXY`. Native Schemer variables include `SCHEMER_HOST`, `SCHEMER_PORT`, `SCHEMER_CONFIG_DIR`, `SCHEMER_DASHBOARD_DIR`, `SCHEMER_BEHIND_LOOPBACK_PROXY`, `SCHEMER_OPENCODE_URL`, `SCHEMER_OPENCODE_USERNAME`, `SCHEMER_OPENCODE_PASSWORD`, and `SCHEMER_OPENCODE_TIMEOUT`. `SCHEMER_DASHBOARD_DIR` defaults to `~/.local/share/schemer/dashboards`; the AI timeout defaults to 120 seconds and accepts `1`–`300`. `compose.schemer.ai.yaml` intentionally maps Schemer's OpenCode connection and timeout from the shared `SCHEMII_OPENCODE_*` Compose values.
+Native Schemii variables include `SCHEMII_HOST`, `SCHEMII_PORT`, `SCHEMII_CONFIG_DIR`, `SCHEMII_SCHEMA_DIR`, `SCHEMII_BEHIND_LOOPBACK_PROXY`, and `SCHEMII_METADATA_APPLICATION_NAME`. Native Schemer variables include `SCHEMER_HOST`, `SCHEMER_PORT`, `SCHEMER_CONFIG_DIR`, `SCHEMER_DASHBOARD_DIR`, `SCHEMER_BEHIND_LOOPBACK_PROXY`, `SCHEMER_OPENCODE_URL`, `SCHEMER_OPENCODE_USERNAME`, `SCHEMER_OPENCODE_PASSWORD`, and `SCHEMER_OPENCODE_TIMEOUT`. `SCHEMER_DASHBOARD_DIR` defaults to `~/.local/share/schemer/dashboards`; the AI timeout defaults to 120 seconds and accepts `1`–`300`. `compose.schemer.ai.yaml` intentionally maps Schemer's OpenCode connection and timeout from the shared `SCHEMII_OPENCODE_*` Compose values.
 
 Direct Compose operation is advanced. It does not derive an instance or free port. Always set a stable, unique `SCHEMII_INSTANCE`, choose collision-free `SCHEMII_HOST_PORT` and `SCHEMER_HOST_PORT` values for enabled applications, and include the complete file set for the intended mode. Set distinct image names with `SCHEMII_IMAGE` and `SCHEMER_IMAGE` when projects should not share build tags. AI Compose also requires a strong, stable `SCHEMII_OPENCODE_PASSWORD`. Prefer the launchers for routine Schemii installation, updates, and mode changes.
 

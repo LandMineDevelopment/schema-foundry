@@ -82,16 +82,52 @@ class MetadataStore:
                             "state": _row_value(existing, "state", 3), "provisioningOwner": False}
             cursor.execute(
                 """INSERT INTO metadata_chats
-                   (chat_id, application_id, resource_kind, resource_id, external_session_id, state)
-                   VALUES (%s, %s, %s, %s, %s, 'provisioning')""",
+                   (chat_id, application_id, resource_kind, resource_id, external_session_id, display_title, state)
+                   VALUES (%s, %s, %s, %s, %s, 'Untitled chat', 'provisioning')""",
                 (chat, application, kind, resource, external),
             )
             self._audit(cursor, application, "chat", chat, None, "provisioning", "provision_requested")
         return {"chatId": str(chat), "state": "provisioning", "provisioningOwner": True}
 
-    def activate_chat(self, chat_id: str, target: dict[str, Any]) -> dict[str, Any]:
+    def bind_chat_external_session(self, chat_id: str, external_session_id: str, display_title: str) -> dict[str, Any]:
         chat = _uuid(chat_id, "chat_id")
-        safe = _target(target)
+        external = _bounded_text(external_session_id, "external_session_id", 512)
+        title = _bounded_text(display_title, "display_title", 256)
+        with self._transaction() as cursor:
+            row = self._lock_chat(cursor, chat)
+            if _row_value(row, "state", 1) != "provisioning":
+                raise MetadataStoreError("chat_transition_invalid", "External session can only be bound while provisioning", status=409)
+            cursor.execute(
+                "SELECT external_session_id, display_title FROM metadata_chats WHERE chat_id = %s FOR UPDATE",
+                (chat,),
+            )
+            current = cursor.fetchone()
+            current_external = _row_value(current, "external_session_id", 0)
+            if current_external is not None and current_external != external:
+                raise MetadataStoreError("external_session_conflict", "Chat is bound to another external session", status=409)
+            cursor.execute(
+                """UPDATE metadata_chats SET external_session_id = %s, display_title = %s,
+                          updated_at = clock_timestamp() WHERE chat_id = %s""",
+                (external, title, chat),
+            )
+        return {"chatId": str(chat), "externalSessionId": external, "displayTitle": title}
+
+    def activate_chat(
+        self,
+        chat_id: str,
+        target: dict[str, Any] | None,
+        *,
+        policy: dict[str, Any] | None = None,
+        capabilities: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        chat = _uuid(chat_id, "chat_id")
+        safe = None if target is None else _target(target)
+        document = None if policy is None else bounded_json(policy, "policy", self.max_json_bytes)
+        modes = None if capabilities is None else {identity(name, "capability"): mode for name, mode in capabilities.items()}
+        if (document is None) != (modes is None):
+            raise MetadataStoreError("invalid_metadata", "Initial policy and capabilities must be supplied together", status=400)
+        if modes is not None and any(mode not in {"deny", "approval", "once_per_chat", "automatic"} for mode in modes.values()):
+            raise MetadataStoreError("invalid_metadata", "capability grant mode is invalid", status=400)
         with self._transaction() as cursor:
             row = self._lock_chat(cursor, chat)
             state = _row_value(row, "state", 1)
@@ -103,9 +139,7 @@ class MetadataStore:
                     (chat,),
                 )
                 existing = cursor.fetchone()
-                if existing is None:
-                    raise MetadataStoreError("metadata_invariant", "Active chat has no target")
-                stored = {
+                stored = None if existing is None else {
                     "profileId": _row_value(existing, "profile_id", 1),
                     "databaseName": _row_value(existing, "database_name", 2),
                     "namespaceName": _row_value(existing, "namespace_name", 3),
@@ -117,18 +151,34 @@ class MetadataStore:
                 return {"chatId": str(chat), "state": "active", "activationOwner": False}
             if state != "provisioning":
                 raise MetadataStoreError("chat_transition_invalid", "Chat cannot be activated from its current state", status=409)
-            target_id = uuid.uuid4()
-            cursor.execute(
-                """INSERT INTO metadata_targets
-                   (target_id, chat_id, profile_id, database_name, namespace_name,
-                    profile_fingerprint, connected_target_fingerprint)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-                (target_id, chat, safe["profileId"], safe["databaseName"], safe["namespaceName"],
-                 safe["profileFingerprint"], safe["connectedTargetFingerprint"]),
-            )
+            cursor.execute("SELECT external_session_id FROM metadata_chats WHERE chat_id = %s", (chat,))
+            if _row_value(cursor.fetchone(), "external_session_id", 0) is None:
+                raise MetadataStoreError("external_session_required", "Chat has no external provider session", status=409)
+            target_id = None
+            if safe is not None:
+                target_id = uuid.uuid4()
+                cursor.execute(
+                    """INSERT INTO metadata_targets
+                       (target_id, chat_id, profile_id, database_name, namespace_name,
+                        profile_fingerprint, connected_target_fingerprint)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                    (target_id, chat, safe["profileId"], safe["databaseName"], safe["namespaceName"],
+                     safe["profileFingerprint"], safe["connectedTargetFingerprint"]),
+                )
+            if document is not None:
+                policy_id = uuid.uuid4()
+                cursor.execute(
+                    "INSERT INTO metadata_policy_versions (policy_version_id, chat_id, revision, policy) VALUES (%s, %s, 1, %s::jsonb)",
+                    (policy_id, chat, _json(document)),
+                )
+                for capability, mode in sorted(modes.items()):
+                    cursor.execute(
+                        "INSERT INTO metadata_capabilities (capability_id, policy_version_id, capability, grant_mode) VALUES (%s, %s, %s, %s)",
+                        (uuid.uuid4(), policy_id, capability, mode),
+                    )
             cursor.execute("UPDATE metadata_chats SET state = 'active', updated_at = clock_timestamp() WHERE chat_id = %s", (chat,))
             self._audit(cursor, _row_value(row, "application_id", 0), "chat", chat, state, "active", "provision_succeeded")
-        return {"chatId": str(chat), "targetId": str(target_id), "state": "active", "activationOwner": True}
+        return {"chatId": str(chat), "targetId": None if target_id is None else str(target_id), "state": "active", "activationOwner": True}
 
     def fail_chat(self, chat_id: str, reason: str) -> dict[str, Any]:
         return self._transition_chat(chat_id, {"provisioning"}, "failed", reason)
@@ -146,7 +196,7 @@ class MetadataStore:
                 """SELECT c.chat_id, c.application_id, c.resource_kind, c.resource_id,
                           c.external_session_id, c.state, c.created_at, c.updated_at, c.deleted_at,
                           t.target_id, t.profile_id, t.database_name, t.namespace_name,
-                          t.profile_fingerprint, t.connected_target_fingerprint
+                          t.profile_fingerprint, t.connected_target_fingerprint, c.display_title
                    FROM metadata_chats c LEFT JOIN metadata_targets t USING (chat_id)
                    WHERE c.chat_id = %s""",
                 (chat,),
@@ -173,7 +223,7 @@ class MetadataStore:
                 """SELECT c.chat_id, c.application_id, c.resource_kind, c.resource_id,
                           c.external_session_id, c.state, c.created_at, c.updated_at, c.deleted_at,
                           t.target_id, t.profile_id, t.database_name, t.namespace_name,
-                          t.profile_fingerprint, t.connected_target_fingerprint
+                          t.profile_fingerprint, t.connected_target_fingerprint, c.display_title
                    FROM metadata_chats c LEFT JOIN metadata_targets t USING (chat_id)
                    WHERE (%s IS NULL OR c.resource_kind = %s)
                      AND (%s IS NULL OR c.resource_id = %s)
@@ -345,15 +395,21 @@ class MetadataStore:
         *,
         expected_policy_revision: int,
         approved: bool = False,
+        worker_id: str | None = None,
+        lease_seconds: int = 60,
     ) -> dict[str, Any]:
         proposal = _uuid(proposal_id, "proposal_id")
         if isinstance(expected_policy_revision, bool) or not isinstance(expected_policy_revision, int) or expected_policy_revision <= 0:
             raise MetadataStoreError("invalid_metadata", "expected_policy_revision is invalid", status=400)
         if type(approved) is not bool:
             raise MetadataStoreError("invalid_metadata", "approved must be a boolean", status=400)
+        worker = None if worker_id is None else identity(worker_id, "worker_id")
+        lease = _seconds(lease_seconds, "lease_seconds", maximum=3600)
+        claim_token = secrets.token_urlsafe(32) if worker is not None else None
+        attempt_id = uuid.uuid4() if worker is not None else None
         with self._transaction() as cursor:
             cursor.execute(
-                """SELECT chat_id, capability, policy_revision, state,
+                """SELECT chat_id, capability, policy_revision, state, binding,
                           expires_at > clock_timestamp() AS current
                    FROM metadata_proposals WHERE proposal_id = %s FOR UPDATE""",
                 (proposal,),
@@ -370,7 +426,7 @@ class MetadataStore:
                 return {"operationId": str(_row_value(existing, "operation_id", 0)), "state": _row_value(existing, "state", 1), "executionOwner": False}
             if state != "ready":
                 raise MetadataStoreError("proposal_unavailable", "Proposal is not ready", status=409)
-            if not _row_value(row, "current", 4):
+            if not _row_value(row, "current", 5):
                 raise MetadataStoreError("proposal_expired", "Proposal has expired", status=409)
             chat_id = _row_value(row, "chat_id", 0)
             capability = _row_value(row, "capability", 1)
@@ -398,10 +454,20 @@ class MetadataStore:
                 raise MetadataStoreError("policy_changed", "Proposal policy binding is stale", status=409)
             mode = _row_value(authority, "grant_mode", 0)
             grant_id = _row_value(authority, "grant_id", 2)
-            if mode == "deny" or (mode == "approval" and not approved) or (mode == "once_per_chat" and grant_id is None and not approved):
+            binding = _json_value(_row_value(row, "binding", 4))
+            effective = binding.get("policyBinding", {}).get("effectiveMode") if isinstance(binding, dict) else None
+            if effective not in {"every_action", "once_per_chat", "automatic"}:
+                raise MetadataStoreError("policy_changed", "Proposal approval policy binding is invalid", status=409)
+            compatible = (
+                effective == "every_action" or
+                (effective == "once_per_chat" and mode == "once_per_chat") or
+                (effective == "automatic" and mode == "automatic")
+            )
+            requires_approval = effective == "every_action" or (effective == "once_per_chat" and grant_id is None)
+            if mode == "deny" or not compatible or (requires_approval and not approved):
                 raise MetadataStoreError("approval_required", "Proposal requires explicit approval", status=403)
-            decision = "automatic" if mode == "automatic" else "grant" if grant_id is not None else "explicit"
-            if mode == "once_per_chat" and grant_id is None:
+            decision = "automatic" if effective == "automatic" else "grant" if grant_id is not None else "explicit"
+            if effective == "once_per_chat" and grant_id is None:
                 cursor.execute(
                     "INSERT INTO metadata_grants (grant_id, chat_id, capability, policy_revision) VALUES (%s, %s, %s, %s)",
                     (uuid.uuid4(), chat_id, capability, revision),
@@ -416,9 +482,18 @@ class MetadataStore:
                 (uuid.uuid4(), operation_id, revision, decision),
             )
             cursor.execute("UPDATE metadata_proposals SET state = 'authorized' WHERE proposal_id = %s", (proposal,))
+            if worker is not None:
+                cursor.execute(
+                    """INSERT INTO metadata_operation_attempts
+                       (attempt_id, operation_id, worker_id, claim_token_hash, lease_expires_at)
+                       VALUES (%s, %s, %s, %s, clock_timestamp() + (%s * interval '1 second'))""",
+                    (attempt_id, operation_id, worker, _token_hash(claim_token), lease),
+                )
+                cursor.execute("UPDATE metadata_operations SET state = 'running', updated_at = clock_timestamp() WHERE operation_id = %s", (operation_id,))
             self._audit(cursor, self._application_for_chat(cursor, chat_id), "proposal", proposal, "ready", "authorized", "proposal_authorized")
             self._audit(cursor, self._application_for_chat(cursor, chat_id), "operation", operation_id, None, "ready", "operation_created")
-        return {"operationId": str(operation_id), "state": "ready", "executionOwner": True}
+        return {"operationId": str(operation_id), "state": "running" if worker is not None else "ready", "executionOwner": True,
+                **({"attemptId": str(attempt_id), "claimToken": claim_token} if worker is not None else {})}
 
     def get_operation(self, operation_id: str) -> dict[str, Any]:
         operation = _uuid(operation_id, "operation_id")
@@ -1242,7 +1317,8 @@ def _chat_record(row: Any) -> dict[str, Any]:
             "resourceKind": _row_value(row, "resource_kind", 2), "resourceId": _row_value(row, "resource_id", 3),
             "externalSessionId": _row_value(row, "external_session_id", 4), "state": _row_value(row, "state", 5),
             "createdAt": _row_value(row, "created_at", 6), "updatedAt": _row_value(row, "updated_at", 7),
-            "deletedAt": _row_value(row, "deleted_at", 8), "target": target}
+            "deletedAt": _row_value(row, "deleted_at", 8), "target": target,
+            "displayTitle": _row_value(row, "display_title", 15)}
 
 
 def _proposal_record(row: Any) -> dict[str, Any]:

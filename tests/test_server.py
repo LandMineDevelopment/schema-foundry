@@ -2,6 +2,7 @@ import json
 import sys
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 
 
@@ -9,12 +10,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from schemii.schema_store import SchemaStore, SchemaStoreError
-from schemii.ai_authority import AiAuthority
-from schemii.ai_chat_store import AiChatStore
 from schemii.postgres_service import PostgresService, PostgresServiceError
 from schemii.server import CONTENT_SECURITY_POLICY, _is_local_request, make_handler
 from tests.http_test_support import FakePostgresService, RunningHttpServer
 from tests.test_ai_postgres_writes import TARGET, WriteConnection
+from tests.fake_metadata_authority import FakeSchemiiAuthority
 
 
 class FakeAIService:
@@ -96,12 +96,11 @@ class ServerTests(unittest.TestCase):
         self.ai_service = FakeAIService()
         self.example_installer = FakeExampleInstaller()
         self.store = SchemaStore(Path(self.temporary_directory.name) / "schemas")
-        self.chat_store = AiChatStore(Path(self.temporary_directory.name) / "chats")
+        self.authority = FakeSchemiiAuthority()
         handler = make_handler(
             ROOT / "src" / "schemii" / "web", self.service, self.store, "session-token",
             server_id="server-start-id",
-            ai_authority=AiAuthority(Path(self.temporary_directory.name) / "authority", "schemii"),
-            ai_chat_store=self.chat_store,
+            ai_authority=self.authority,
             ai_service=self.ai_service,
             example_installer=self.example_installer,
         )
@@ -114,6 +113,12 @@ class ServerTests(unittest.TestCase):
         self.temporary_directory.cleanup()
 
     def request(self, path, method="GET", payload=None, content_type="application/json", authorized=False, headers=None):
+        if payload and "/api/ai/sessions/" in path and path.endswith("/messages"):
+            chat_id = path.split("/")[4]
+            self.authority.configure(chat_id, payload, self.service)
+            payload = {key: value for key, value in payload.items() if key in {"text", "model", "expectedRevision", "resultRef"}}
+        elif payload and "/proposals/" in path:
+            payload = {key: value for key, value in payload.items() if key in {"policyRevision", "confirmation"}}
         return self.http.request(path, method, payload, content_type, authorized, headers)
 
     def test_static_and_session_routes(self):
@@ -127,6 +132,31 @@ class ServerTests(unittest.TestCase):
         status, body, _ = self.request("/api/session")
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body), {"token": "session-token", "serverId": "server-start-id"})
+
+        status, body, _ = self.request("/api/readiness")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["metadata"]["version"], 3)
+
+    def test_ai_chat_uuid_is_distinct_from_external_opencode_session(self):
+        self.store.save(
+            "schema_one", {"id": "schema_one", "schema": {"projectName": "Display title", "tables": [], "relationships": [], "functions": []}},
+            expected_layout_token=None, layout_protocol=None,
+        )
+        status, body, _ = self.request(
+            "/api/ai/sessions", "POST",
+            {"schemaId": "schema_one", "accessLevel": "metadata", "model": {}}, authorized=True,
+        )
+        chat = json.loads(body)
+        self.assertEqual(status, 201)
+        uuid.UUID(chat["id"])
+        self.assertNotEqual(chat["id"], "ses_1")
+
+        status, _, _ = self.request(
+            f"/api/ai/sessions/{chat['id']}/messages", "POST", {"text": "Describe it", "model": {}}, authorized=True,
+        )
+        self.assertEqual(status, 200)
+        prompt = next(call for call in reversed(self.ai_service.calls) if call[0] == "prompt")
+        self.assertEqual(prompt[1], "ses_1")
 
     def test_example_restore_requires_session_and_returns_inert_install_summary(self):
         self.assertEqual(self.request("/api/examples/restore", "POST")[0], 403)
@@ -502,9 +532,7 @@ class ServerTests(unittest.TestCase):
     def test_ai_activity_stream_requires_session_and_returns_only_normalized_events(self):
         path = "/api/ai/sessions/ses_1/activity"
         self.assertEqual(self.request(path)[0], 403)
-        self.chat_store.create("ses_1", "schema_one", {}, ["schema"], {
-            permission: "every_action" for permission in ("schema", "structured", "write", "rawread", "rawwrite")
-        })
+        self.authority.put_chat("ses_1", "schema_one", "ses_1")
 
         status, body, headers = self.request(path, authorized=True)
 
@@ -582,9 +610,9 @@ class ServerTests(unittest.TestCase):
         self.assertFalse(call[8])
         self.assertTrue(call[9])
 
-        payload["accessLevel"] = "data"
-        payload.update({"profileId": "local", "database": "demo", "namespace": "public"})
-        self.assertEqual(self.request("/api/ai/sessions/ses_1/messages", "POST", payload, authorized=True)[0], 409)
+        self.assertEqual(self.http.request(
+            "/api/ai/sessions/ses_1/messages", "POST", {**payload, "schemaId": "schema_one"}, authorized=True,
+        )[0], 400)
 
     def test_ai_proposal_execution_is_idempotent_and_one_use(self):
         self.store.save(
@@ -644,7 +672,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual([column["name"] for column in after["schema"]["tables"][0]["columns"]], ["id", "name", "description"])
         self.assertEqual((after["schema"]["tables"][0]["x"], after["schema"]["tables"][0]["y"], after["schema"]["tables"][0]["color"]), (10, 20, "#f4b942"))
 
-    def test_ai_proposal_claim_rejects_changed_schema_revision(self):
+    def test_obsolete_ai_proposal_claim_route_is_removed(self):
         original = self.store.save(
             "schema_one",
             {"id": "schema_one", "schema": {"projectName": "Demo", "tables": [], "relationships": [], "functions": []}},
@@ -662,8 +690,7 @@ class ServerTests(unittest.TestCase):
         self.store.save("schema_one", changed, expected_layout_token=None, layout_protocol=None)
         path = f"/api/ai/sessions/ses_1/proposals/{proposal_id}/claim"
         status, body, _ = self.request(path, "POST", {"schemaId": "schema_one", "accessLevel": "schema"}, authorized=True)
-        self.assertEqual(status, 403)
-        self.assertEqual(json.loads(body)["error"]["code"], "proposal_binding_mismatch")
+        self.assertEqual(status, 404)
 
     def test_schema_preflight_does_not_persist_and_post_save_preview_uses_new_binding(self):
         saved = self.store.save(
@@ -720,7 +747,7 @@ class ServerTests(unittest.TestCase):
 
         from schemii.ai_http import ai_context_fingerprint
         fingerprint = self.service.profile_context_fingerprint("local")
-        self.chat_store.delete("ses_1")
+        self.authority.chats.pop("ses_1", None)
         self.ai_service.session_title = f"SCHEMII_CONTEXT:schema_one:schema-read-write:{ai_context_fingerprint(['local', 'demo', 'public', fingerprint])} Demo chat"
         message = {
             "text": "Preview migration", "model": {}, "schemaId": "schema_one", "accessLevel": "schema-read-write",
@@ -908,7 +935,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(self.request("/api/ai/sessions/ses_1/messages", "POST", payload, authorized=True)[0], 200)
         self.assertNotIn("secret_table", self.ai_service.calls[-1][2])
         payload["schemaId"] = "missing"
-        self.assertEqual(self.request("/api/ai/sessions/ses_1/messages", "POST", payload, authorized=True)[0], 409)
+        self.assertEqual(self.request("/api/ai/sessions/ses_1/messages", "POST", payload, authorized=True)[0], 404)
 
 
 class RealAiWriteHttpTests(unittest.TestCase):
@@ -946,11 +973,11 @@ class RealAiWriteHttpTests(unittest.TestCase):
         self.service = PostgresService(self.root / "config", connect_factory=self._connect)
         self.service._inspect_ai_insert_target = lambda *args: TARGET
         self.store = SchemaStore(self.root / "schemas")
-        self.authority = AiAuthority(self.root / "authority", "schemii")
+        if not hasattr(self, "authority"):
+            self.authority = FakeSchemiiAuthority()
         handler = make_handler(
             ROOT / "src" / "schemii" / "web", self.service, self.store, "session-token",
-            server_id="real-ai-write", ai_authority=self.authority,
-            ai_chat_store=AiChatStore(self.root / "chats"), ai_service=self.ai_service,
+            server_id="real-ai-write", ai_authority=self.authority, ai_service=self.ai_service,
             example_installer=FakeExampleInstaller(),
         )
         self.http = RunningHttpServer(handler)
@@ -961,6 +988,12 @@ class RealAiWriteHttpTests(unittest.TestCase):
         self._start()
 
     def request(self, path, method="GET", payload=None):
+        if payload and path.endswith("/messages"):
+            chat_id = path.split("/")[4]
+            self.authority.configure(chat_id, payload, self.service)
+            payload = {key: value for key, value in payload.items() if key in {"text", "model", "expectedRevision", "resultRef"}}
+        elif payload and "/proposals/" in path:
+            payload = {key: value for key, value in payload.items() if key in {"policyRevision", "confirmation"}}
         return self.http.request(path, method, payload, authorized=True)
 
     def test_real_durable_insert_plan_applies_after_http_restart(self):
