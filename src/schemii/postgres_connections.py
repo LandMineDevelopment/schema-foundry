@@ -86,6 +86,15 @@ class PostgresConnectionMixin:
             if close:
                 close()
 
+    def _require_namespace(self, connection: Any, namespace: str) -> None:
+        rows = self._execute_rows(connection, """
+            SELECT EXISTS (
+                SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = %s
+            ) AS namespace_exists
+        """, (namespace,))
+        if not rows or not rows[0].get("namespace_exists"):
+            raise PostgresServiceError(404, "namespace_not_found", f"PostgreSQL namespace {namespace} was not found")
+
     _json_cell = staticmethod(_json_cell)
 
     def test_profile(self, profile_id: str) -> dict[str, Any]:

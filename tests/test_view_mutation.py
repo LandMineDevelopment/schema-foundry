@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from schemii.postgres_service import ConflictError, PostgresService, PostgresServiceError, ValidationError
+from schemii.postgres_safety import namespace_lock_keys
 from schemii.schema_store import SchemaStore, SchemaStoreError
 from tests.test_postgres_service import Connection, PROFILE
 
@@ -196,6 +197,42 @@ class ViewMutationServiceTests(unittest.TestCase):
         self.assertEqual(error.exception.code, "view_recreation_unsupported")
         self.assertIn("triggers", error.exception.details["concerns"])
 
+    def test_existing_materialized_recreation_inventories_catalog_metadata_before_mutation(self):
+        self.connections.clear()
+
+        def connect(**kwargs):
+            connection = Connection(responses={
+                "SELECT c.oid, pg_catalog.pg_get_userbyid(c.relowner)": [{
+                    "oid": 1, "owner": "developer", "is_owner": True, "can_set_owner_role": True,
+                    "explicit_acl": False, "relation_comment": None, "reloptions": None,
+                    "tablespace": None, "access_method": "heap", "populated": True,
+                    "triggers": False, "rules": False, "security_labels": False, "storage": False,
+                    "policies": True, "extended_statistics": True, "publications": True,
+                    "extension_membership": True, "extension_dependencies": True,
+                    "owned_sequences": True, "generated_or_identity": True,
+                    "relrowsecurity": True, "relforcerowsecurity": False, "relreplident": "f",
+                }],
+            })
+            self.connections.append(connection)
+            return connection
+
+        self.service._connect_factory = connect
+        self.service._inspect_relation_connection = lambda *args: descriptor("materialized_view")
+        with self.assertRaises(PostgresServiceError) as error:
+            self.service.preview_view_mutation(
+                "local", "demo", "public", "summary", "upsert",
+                {"kind": "materialized_view", "fingerprint": FINGERPRINT},
+                {"kind": "materialized_view", "definition": 'CREATE MATERIALIZED VIEW "public"."summary" AS SELECT 2'},
+                True, self.binding(),
+            )
+        self.assertEqual(error.exception.code, "view_recreation_unsupported")
+        for concern in (
+            "policies", "extended_statistics", "publications", "extension_membership", "extension_dependencies",
+            "owned_sequences", "generated_or_identity", "row level security", "replica identity",
+        ):
+            self.assertIn(concern, error.exception.details["concerns"])
+        self.assertFalse(any("DROP MATERIALIZED VIEW" in sql for sql, _ in self.connections[-1].executed))
+
     def test_apply_rechecks_expectation_uses_transaction_controls_and_rolls_back(self):
         states = [descriptor(), descriptor(fingerprint="b" * 64)]
 
@@ -221,7 +258,7 @@ class ViewMutationServiceTests(unittest.TestCase):
         advisory = next(item for item in connection.executed if "pg_advisory_xact_lock" in item[0])
         self.assertEqual(
             advisory,
-            ("SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext(%s)::bigint)", ("schemii:public",)),
+            ("SELECT pg_catalog.pg_advisory_xact_lock(%s, %s)", namespace_lock_keys("demo", "public")),
         )
         lock_index = sql.index('SELECT * FROM "public"."summary" LIMIT 0')
         inspection_index = sql.index("MOCK INSPECT RELATION", lock_index)
@@ -385,6 +422,32 @@ class ViewMutationServiceTests(unittest.TestCase):
                         sql.index('REFRESH MATERIALIZED VIEW "public"."summary" WITH NO DATA'),
                         sql.index('DROP MATERIALIZED VIEW "public"."summary";'),
                     )
+
+    def test_committed_delete_history_failure_is_a_structured_warning(self):
+        from schemii.postgres_service import NotFoundError
+
+        states = [descriptor(), descriptor()]
+
+        def inspect(*args):
+            if states:
+                return copy.deepcopy(states.pop(0))
+            raise NotFoundError("deleted")
+
+        self.service._inspect_relation_connection = inspect
+        plan = self.service.preview_view_mutation(
+            "local", "demo", "public", "summary", "delete",
+            {"kind": "view", "fingerprint": FINGERPRINT}, None, True, self.binding(),
+        )
+        self.service._append_history = lambda entry: (_ for _ in ()).throw(
+            PostgresServiceError(500, "history_store_error", "failed")
+        )
+        result = self.service.apply_view_mutation("local", plan["id"], True)
+        self.assertTrue(result["applied"])
+        self.assertEqual(result["warnings"], [{
+            "code": "history_store_error",
+            "message": "Migration committed, but its local history entry could not be written",
+        }])
+        self.assertEqual(self.connections[-1].commits, 1)
 
     def test_materialized_recreation_restores_metadata_and_rolls_back_failed_restore(self):
         self.connections.clear()
@@ -560,6 +623,44 @@ class ViewMutationStoreTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("SCHEMII_TEST_PG17_DSN"), "SCHEMII_TEST_PG17_DSN is not configured")
 class Postgres17ViewLockIntegrationTests(unittest.TestCase):
+    def test_full_introspection_missing_namespace_and_cleanup(self):
+        try:
+            import psycopg
+        except ImportError as exc:
+            self.skipTest(str(exc))
+        dsn = os.environ["SCHEMII_TEST_PG17_DSN"]
+        setup = psycopg.connect(dsn, autocommit=True)
+        schema = "schemii_introspection_safety_test"
+        temporary_directory = tempfile.TemporaryDirectory()
+        try:
+            database = setup.execute("SELECT current_database()").fetchone()[0]
+            setup.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+            setup.execute(f'CREATE SCHEMA "{schema}"')
+            setup.execute(f'CREATE TABLE "{schema}".sample (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY)')
+            service = PostgresService(
+                temporary_directory.name,
+                connect_factory=lambda **kwargs: psycopg.connect(dsn, row_factory=psycopg.rows.dict_row),
+            )
+            service.save_profile("live", {
+                **PROFILE, "dbname": database, "password": "unused",
+            })
+            schema_result = service.introspect("live", schema)
+            self.assertEqual([table["name"] for table in schema_result["tables"]], ["sample"])
+            setup.execute(f'DROP SCHEMA "{schema}" CASCADE')
+            with self.assertRaises(PostgresServiceError) as error:
+                service.introspect("live", schema)
+            self.assertEqual(error.exception.code, "namespace_not_found")
+            self.assertFalse(setup.execute(
+                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = %s)", (schema,),
+            ).fetchone()[0])
+        finally:
+            setup.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+            self.assertFalse(setup.execute(
+                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = %s)", (schema,),
+            ).fetchone()[0])
+            setup.close()
+            temporary_directory.cleanup()
+
     def test_materialized_no_data_refresh_holds_access_exclusive_and_rolls_back(self):
         try:
             import psycopg
@@ -593,7 +694,7 @@ class Postgres17ViewLockIntegrationTests(unittest.TestCase):
             for connection in (locker, observer, setup):
                 connection.close()
 
-    def test_app_and_mercury_seed_namespace_lock_identities_contend(self):
+    def test_database_scoped_namespace_lock_identities_contend(self):
         try:
             import psycopg
         except ImportError as exc:
@@ -606,10 +707,9 @@ class Postgres17ViewLockIntegrationTests(unittest.TestCase):
             version = int(observer.execute("SHOW server_version_num").fetchone()[0])
             self.assertGreaterEqual(version, 170000)
             self.assertLess(version, 180000)
-            app.execute(
-                "SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext(%s)::bigint)",
-                ("schemii:bookstore",),
-            )
+            database = observer.execute("SELECT current_database()").fetchone()[0]
+            lock_keys = namespace_lock_keys(database, "bookstore")
+            app.execute("SELECT pg_catalog.pg_advisory_xact_lock(%s, %s)", lock_keys)
             lock = observer.execute("""
                 SELECT locktype, database, classid, objid, objsubid, mode, granted
                 FROM pg_catalog.pg_locks
@@ -622,11 +722,7 @@ class Postgres17ViewLockIntegrationTests(unittest.TestCase):
             seed.execute("SET LOCAL lock_timeout = '200ms'")
             seed.execute("SET LOCAL statement_timeout = '2s'")
             with self.assertRaises(psycopg.errors.LockNotAvailable):
-                seed.execute("""
-                    SELECT pg_catalog.pg_advisory_xact_lock(
-                        pg_catalog.hashtext('schemii:bookstore')::bigint
-                    )
-                """)
+                seed.execute("SELECT pg_catalog.pg_advisory_xact_lock(%s, %s)", lock_keys)
             seed.rollback()
         finally:
             app.rollback()

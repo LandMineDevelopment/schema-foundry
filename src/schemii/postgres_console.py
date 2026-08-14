@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 import threading
 from dataclasses import dataclass
@@ -8,6 +7,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from .postgres_common import NotFoundError, PostgresServiceError, ValidationError, postgres_error_diagnostic, quote_identifier
+from .result_limits import ResultLimitError, ResultLimiter, ResultLimits, json_utf8_size
 
 
 MAX_STATEMENTS = 20
@@ -15,6 +15,10 @@ MAX_SCRIPT_CHARS = 100_000
 MAX_ROWS_PER_RESULT = 500
 MAX_COLUMNS_PER_RESULT = 100
 MAX_RESPONSE_BYTES = 1024 * 1024
+MAX_CELL_BYTES = 64 * 1024
+MAX_ROW_BYTES = 256 * 1024
+MAX_CELL_NESTING = 8
+MAX_COLLECTION_ITEMS = 1000
 MAX_NOTICES = 50
 MAX_NOTICE_BYTES = 8 * 1024
 MAX_ACTIVE_EXECUTIONS = 4
@@ -296,10 +300,15 @@ class PostgresConsole:
         self.service = service
         self.registry = ConsoleExecutionRegistry()
         self.write_grants = ConsoleWriteGrantRegistry(service._clock)
+        self.result_limiter = ResultLimiter(ResultLimits(
+            max_cell_bytes=MAX_CELL_BYTES, max_row_bytes=MAX_ROW_BYTES,
+            max_result_bytes=MAX_RESPONSE_BYTES, max_nesting=MAX_CELL_NESTING,
+            max_collection_items=MAX_COLLECTION_ITEMS,
+        ))
 
     @staticmethod
     def _encoded_size(value: Any) -> int:
-        return len(json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8"))
+        return json_utf8_size(value)
 
     @staticmethod
     def _command(cursor: Any) -> str:
@@ -428,6 +437,8 @@ class PostgresConsole:
             limits = {
                 "maxStatements": MAX_STATEMENTS, "maxRowsPerResult": MAX_ROWS_PER_RESULT,
                 "maxColumnsPerResult": MAX_COLUMNS_PER_RESULT, "maxResponseBytes": MAX_RESPONSE_BYTES,
+                "maxCellBytes": MAX_CELL_BYTES, "maxRowBytes": MAX_ROW_BYTES,
+                "maxCellNesting": MAX_CELL_NESTING, "maxCollectionItems": MAX_COLLECTION_ITEMS,
                 "statementTimeoutMs": policy.statement_timeout_ms,
             }
             result = {
@@ -466,13 +477,27 @@ class PostgresConsole:
                     }
                     for row in raw_rows[:MAX_ROWS_PER_RESULT]:
                         values = [row.get(name) for name in names] if isinstance(row, dict) else list(row)
-                        candidate = [self.service._json_cell(value) for value in values]
+                        try:
+                            candidate, limit_events = self.result_limiter.row(values, row_index=len(entry["rows"]))
+                        except ResultLimitError as exc:
+                            raise PostgresServiceError(
+                                422, f"sql_{exc.code}", exc.message,
+                                {"statementIndex": statement_index, **exc.details},
+                            ) from exc
                         entry["rows"].append(candidate)
                         entry["rowCount"] = len(entry["rows"])
-                        if self._encoded_size({**result, "statements": [*result["statements"], entry]}) > MAX_RESPONSE_BYTES:
+                        if limit_events:
+                            entry["truncated"] = True
+                            entry.setdefault("limitEvents", []).extend(limit_events)
+                        candidate_size = self._encoded_size({**result, "statements": [*result["statements"], entry]})
+                        if candidate_size > MAX_RESPONSE_BYTES:
                             entry["rows"].pop()
                             entry["rowCount"] -= 1
                             entry["truncated"] = True
+                            entry.setdefault("limitEvents", []).append({
+                                "code": "result_total_bytes_truncated", "policy": "truncate", "path": "$",
+                                "limit": MAX_RESPONSE_BYTES, "actual": candidate_size,
+                            })
                             break
                 result["statements"].append(entry)
                 if self._encoded_size(result) > MAX_RESPONSE_BYTES:

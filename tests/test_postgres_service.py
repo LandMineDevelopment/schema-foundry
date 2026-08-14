@@ -22,6 +22,7 @@ from schemii.postgres_service import (
     canonical_fingerprint,
     quote_identifier,
 )
+from schemii.postgres_safety import namespace_lock_keys
 
 
 PROFILE = {
@@ -45,6 +46,10 @@ class Cursor:
         self.connection.executed.append((sql, params))
         if self.connection.fail_on and self.connection.fail_on in sql:
             raise self.connection.failure or RuntimeError("database detail that must not escape")
+        if "AS namespace_exists" in sql and not any(marker in sql for marker in self.connection.responses):
+            self.rows = [{"namespace_exists": True}]
+            self.description = [Column("namespace_exists")]
+            return
         for marker, response in self.connection.responses.items():
             if marker in sql:
                 if isinstance(response, dict) and "rows" in response:
@@ -300,6 +305,7 @@ class PostgresServiceTests(unittest.TestCase):
     def test_relation_catalog_verifies_database_and_lists_supported_kinds(self):
         connection = Connection(responses={
             "SELECT current_database() AS database": [{"database": "demo"}],
+            "AS namespace_exists": [{"namespace_exists": True}],
             "c.relname AS relation_name": [
                 {"relation_name": "orders", "relation_kind": "table"},
                 {"relation_name": "order_summary", "relation_kind": "view"},
@@ -328,6 +334,34 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertFalse(any("c.relname AS relation_name" in sql for sql, _ in connection.executed))
         self.assertEqual(connection.rollbacks, 1)
         self.assertTrue(connection.closed)
+
+    def test_full_introspection_uses_one_read_only_snapshot_and_reports_missing_namespace(self):
+        connection = Connection()
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connection)
+        service._introspect_connection = lambda *args: empty_schema()
+        self.assertEqual(service.introspect("local", "public")["postgres"]["fingerprint"], "live")
+        self.assertEqual(connection.executed[0][0], "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        self.assertEqual(connection.rollbacks, 1)
+        self.assertTrue(connection.closed)
+
+        missing = Connection(responses={
+            "current_setting('server_version')": [{
+                "database": "demo", "server_version": "16", "server_version_num": "160000", "timezone": "UTC",
+            }],
+            "AS namespace_exists": [{"namespace_exists": False}],
+        })
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: missing)
+        with self.assertRaises(PostgresServiceError) as error:
+            service.introspect("local", "missing")
+        self.assertEqual((error.exception.status, error.exception.code), (404, "namespace_not_found"))
+        self.assertFalse(any("c.oid AS table_oid" in sql for sql, _ in missing.executed))
+
+    def test_namespace_lock_identity_is_domain_separated_database_scoped_and_stable(self):
+        first = namespace_lock_keys("demo", "public")
+        self.assertEqual(first, namespace_lock_keys("demo", "public"))
+        self.assertNotEqual(first, namespace_lock_keys("other", "public"))
+        self.assertNotEqual(first, namespace_lock_keys("demo", "other"))
+        self.assertTrue(all(-(2 ** 31) <= item < 2 ** 31 for item in first))
 
     def test_relation_inspection_returns_ordered_columns_and_stable_fingerprint(self):
         responses = {
@@ -391,7 +425,8 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertEqual(result["owner"], {"status": "available", "name": "reporter"})
         self.assertEqual(result["permissions"], {
             "status": "available", "role": "reader", "advisory": True,
-            "canSelect": True, "canAlter": False, "canRefresh": False,
+            "canSelect": True, "isOwner": False, "inheritsOwner": False, "canSetRole": False,
+            "canAlter": False, "canRefresh": False,
         })
         self.assertEqual(result["columnProvenance"], {"status": "unavailable", "reason": "not_supported"})
         self.assertEqual(result["materialized"], {"status": "unavailable", "reason": "not_applicable"})
@@ -1118,7 +1153,7 @@ class PostgresServiceTests(unittest.TestCase):
         advisory = next(item for item in connection.executed if "pg_advisory_xact_lock" in item[0])
         self.assertEqual(
             advisory,
-            ("SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext(%s)::bigint)", ("schemii:public",)),
+            ("SELECT pg_catalog.pg_advisory_xact_lock(%s, %s)", namespace_lock_keys("demo", "public")),
         )
         self.assertEqual(result["postgres"]["fingerprint"], "refreshed")
         self.assertNotIn(plan["id"], service._plans)

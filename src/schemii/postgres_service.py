@@ -35,6 +35,7 @@ from .postgres_common import (
 )
 from .postgres_catalog import PostgresCatalogMixin
 from .postgres_connections import PostgresConnectionMixin
+from .postgres_safety import namespace_lock_keys
 from .postgres_console import ConsolePolicy, PostgresConsole, single_sql_statement, top_level_semicolons
 from .relation_source import RelationSourceValidationError, normalize_relation_source
 from .widget_query import (
@@ -94,6 +95,7 @@ def _utc_now() -> str:
 SERIES_BUCKET_SECONDS = (60, 300, 900, 3600, 21600, 86400, 604800, 2419200, 31536000)
 SERIES_WINDOW_BUCKETS = 48
 SERIES_MAX_TIMELINE_BUCKETS = 5000
+MAX_RECONSTRUCTION_METADATA_ITEMS = 1000
 
 
 def _series_datetime(value: Any) -> datetime:
@@ -1361,12 +1363,17 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         namespace = self._validate_namespace(namespace)
         connection = self._connect(profile_id)
         try:
+            self._execute_statement(connection, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             schema = self._introspect_connection(connection, profile_id, namespace)
         except PostgresServiceError:
             raise
         except Exception as exc:
             raise PostgresServiceError(502, "introspection_failed", "PostgreSQL schema introspection failed") from exc
         finally:
+            try:
+                connection.rollback()
+            except Exception:
+                pass
             self._close(connection)
         return schema
 
@@ -1390,6 +1397,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                    current_setting('server_version_num') AS server_version_num,
                    current_setting('TimeZone') AS timezone
         """)[0]
+        self._require_namespace(connection, namespace)
         table_rows = self._execute_rows(connection, """
             SELECT c.oid AS table_oid, c.relname AS table_name, c.relkind AS relation_kind,
                    c.relispartition AS is_partition,
@@ -2074,7 +2082,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         try:
             cursor = connection.cursor()
             cursor.execute("BEGIN")
-            self._acquire_namespace_mutation_lock(cursor, plan["namespace"])
+            self._acquire_namespace_mutation_lock(cursor, plan["namespace"], plan["database"])
             if plan["kind"] == "insert_rows":
                 qualified = f"{quote_identifier(plan['namespace'])}.{quote_identifier(plan['relation'])}"
                 cursor.execute(f"LOCK TABLE {qualified} IN ROW EXCLUSIVE MODE")
@@ -2253,7 +2261,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             cursor = connection.cursor()
             try:
                 cursor.execute("BEGIN")
-                self._acquire_namespace_mutation_lock(cursor, plan["namespace"])
+                self._acquire_namespace_mutation_lock(cursor, plan["namespace"], plan["database"])
                 current = self._introspect_connection(connection, plan["profileId"], plan["namespace"])
                 if current.get("postgres", {}).get("database") != plan["database"]:
                     raise ConflictError("database_changed", "Connected PostgreSQL database does not match the migration plan")
@@ -2513,12 +2521,18 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         return re.sub(r"\s+AS\b", f" {' '.join(clauses)} AS", definition, count=1, flags=re.I)
 
     def _view_recreation_preservation(self, connection: Any, namespace: str, relation: str) -> dict[str, Any]:
+        # PostgreSQL 16 added the explicit SET role privilege. USAGE is the
+        # closest ownership feasibility signal on older supported servers.
+        set_role_capability = "CASE WHEN current_setting('server_version_num')::integer >= 160000 THEN pg_catalog.pg_has_role(c.relowner, 'SET') ELSE pg_catalog.pg_has_role(c.relowner, 'MEMBER') END"
         rows = self._execute_rows(connection, """
             SELECT c.oid, pg_catalog.pg_get_userbyid(c.relowner) AS owner,
+                   current_user = pg_catalog.pg_get_userbyid(c.relowner) AS is_owner,
+                   {set_role_capability} AS can_set_owner_role,
                    c.relacl IS NOT NULL AS explicit_acl,
                    pg_catalog.obj_description(c.oid, 'pg_class') AS relation_comment,
                    c.reloptions, ts.spcname AS tablespace, am.amname AS access_method,
-                   c.relispopulated AS populated,
+                   c.relispopulated AS populated, c.relrowsecurity, c.relforcerowsecurity,
+                   c.relreplident,
                    EXISTS (
                        SELECT 1 FROM pg_catalog.pg_trigger t
                        WHERE t.tgrelid = c.oid AND NOT t.tgisinternal
@@ -2531,13 +2545,52 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                        SELECT 1 FROM pg_catalog.pg_seclabel s
                        WHERE s.classoid = 'pg_catalog.pg_class'::pg_catalog.regclass AND s.objoid = c.oid
                    ) AS security_labels,
+                   EXISTS (SELECT 1 FROM pg_catalog.pg_policy p WHERE p.polrelid = c.oid) AS policies,
+                   EXISTS (SELECT 1 FROM pg_catalog.pg_statistic_ext s WHERE s.stxrelid = c.oid) AS extended_statistics,
+                   EXISTS (SELECT 1 FROM pg_catalog.pg_publication_rel p WHERE p.prrelid = c.oid) AS publications,
+                   EXISTS (
+                       SELECT 1 FROM pg_catalog.pg_depend d
+                       WHERE d.classid = 'pg_catalog.pg_class'::pg_catalog.regclass
+                         AND d.objid = c.oid AND d.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass
+                         AND d.deptype = 'e'
+                   ) AS extension_membership,
+                   EXISTS (
+                       SELECT 1
+                       FROM pg_catalog.pg_depend dependency
+                       JOIN pg_catalog.pg_depend extension_object
+                         ON extension_object.classid = dependency.refclassid
+                        AND extension_object.objid = dependency.refobjid
+                        AND extension_object.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass
+                        AND extension_object.deptype = 'e'
+                       WHERE (
+                           dependency.classid = 'pg_catalog.pg_class'::pg_catalog.regclass
+                           AND dependency.objid = c.oid
+                       ) OR (
+                           dependency.classid = 'pg_catalog.pg_rewrite'::pg_catalog.regclass
+                           AND dependency.objid IN (
+                               SELECT rewrite.oid FROM pg_catalog.pg_rewrite rewrite WHERE rewrite.ev_class = c.oid
+                           )
+                       )
+                   ) AS extension_dependencies,
+                   EXISTS (
+                       SELECT 1 FROM pg_catalog.pg_depend d
+                       WHERE d.refclassid = 'pg_catalog.pg_class'::pg_catalog.regclass
+                         AND d.refobjid = c.oid AND d.classid = 'pg_catalog.pg_class'::pg_catalog.regclass
+                         AND d.deptype IN ('a', 'i')
+                         AND EXISTS (SELECT 1 FROM pg_catalog.pg_class seq WHERE seq.oid = d.objid AND seq.relkind = 'S')
+                   ) AS owned_sequences,
+                   EXISTS (
+                       SELECT 1 FROM pg_catalog.pg_attribute a
+                       WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+                         AND (a.attidentity <> '' OR a.attgenerated <> '')
+                   ) AS generated_or_identity,
                    c.relpersistence <> 'p' AS storage
             FROM pg_catalog.pg_class c
             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
             LEFT JOIN pg_catalog.pg_tablespace ts ON ts.oid = NULLIF(c.reltablespace, 0)
             LEFT JOIN pg_catalog.pg_am am ON am.oid = c.relam
             WHERE n.nspname = %s AND c.relname = %s AND c.relkind IN ('v', 'm')
-        """, (namespace, relation))
+        """.format(set_role_capability=set_role_capability), (namespace, relation))
         if len(rows) != 1:
             raise ConflictError("relation_changed", "The PostgreSQL relation changed during preview")
         row = rows[0]
@@ -2549,7 +2602,8 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             FROM pg_catalog.pg_class c
             CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) x
             WHERE c.oid = %s ORDER BY 1, 2, 3
-        """, (oid,)) if row.get("explicit_acl") else []
+            LIMIT %s
+        """, (oid, MAX_RECONSTRUCTION_METADATA_ITEMS + 1)) if row.get("explicit_acl") else []
         default_grantees = self._execute_rows(connection, """
             SELECT DISTINCT CASE WHEN x.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(x.grantee) END AS grantee
             FROM pg_catalog.pg_default_acl d
@@ -2557,26 +2611,49 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             WHERE d.defaclrole = (SELECT c.relowner FROM pg_catalog.pg_class c WHERE c.oid = %s)
               AND d.defaclnamespace = (SELECT c.relnamespace FROM pg_catalog.pg_class c WHERE c.oid = %s)
               AND d.defaclobjtype = 'r'
-        """, (oid, oid))
+            LIMIT %s
+        """, (oid, oid, MAX_RECONSTRUCTION_METADATA_ITEMS + 1))
         comments = self._execute_rows(connection, """
             SELECT a.attname AS column_name, d.description
             FROM pg_catalog.pg_description d
             JOIN pg_catalog.pg_attribute a ON a.attrelid = d.objoid AND a.attnum = d.objsubid
             WHERE d.classoid = 'pg_catalog.pg_class'::pg_catalog.regclass AND d.objoid = %s AND d.objsubid > 0
             ORDER BY a.attnum
-        """, (oid,))
+            LIMIT %s
+        """, (oid, MAX_RECONSTRUCTION_METADATA_ITEMS + 1))
         indexes = self._execute_rows(connection, """
             SELECT ci.relname AS name, pg_catalog.pg_get_indexdef(i.indexrelid) AS definition,
                    pg_catalog.obj_description(i.indexrelid, 'pg_class') AS comment,
                    i.indisvalid, i.indisready
             FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class ci ON ci.oid = i.indexrelid
             WHERE i.indrelid = %s ORDER BY ci.relname
-        """, (oid,))
-        unsupported = [name for name in ("triggers", "rules", "security_labels", "storage") if row.get(name)]
+            LIMIT %s
+        """, (oid, MAX_RECONSTRUCTION_METADATA_ITEMS + 1))
+        unsupported = [name for name in (
+            "triggers", "rules", "security_labels", "policies", "extended_statistics",
+            "publications", "extension_membership", "extension_dependencies", "owned_sequences",
+            "generated_or_identity", "storage",
+        ) if row.get(name)]
+        if row.get("relrowsecurity") or row.get("relforcerowsecurity"):
+            unsupported.append("row level security")
+        if row.get("relreplident") not in {None, "d"}:
+            unsupported.append("replica identity")
+        if row.get("owner") and row.get("is_owner") is False and row.get("can_set_owner_role") is False:
+            unsupported.append("owner role cannot be assumed")
         if any(grant.get("grantor") != row.get("owner") for grant in grants):
             unsupported.append("non-owner grantors")
         if any(not item.get("indisvalid") or not item.get("indisready") for item in indexes):
             unsupported.append("invalid indexes")
+        bounded = {
+            "ACL entries": grants,
+            "default ACL grantees": default_grantees,
+            "column comments": comments,
+            "indexes": indexes,
+        }
+        for label, items in bounded.items():
+            if len(items) > MAX_RECONSTRUCTION_METADATA_ITEMS:
+                unsupported.append(f"truncated {label}")
+                del items[MAX_RECONSTRUCTION_METADATA_ITEMS:]
         manifest = {
             "owner": row.get("owner"), "explicitAcl": bool(row.get("explicit_acl")),
             "grants": grants, "defaultGrantees": [item["grantee"] for item in default_grantees],
@@ -3441,12 +3518,14 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
 
     # ---- apply ----------------------------------------------------------
 
-    def _acquire_namespace_mutation_lock(self, cursor: Any, namespace: str) -> None:
+    def _acquire_namespace_mutation_lock(self, cursor: Any, namespace: str, database: str | None = None) -> None:
         cursor.execute(f"SET LOCAL lock_timeout = '{self._lock_timeout_ms}ms'")
         cursor.execute(f"SET LOCAL statement_timeout = '{self._statement_timeout_ms}ms'")
+        database = database or cursor.connection.info.dbname
+        lock_keys = namespace_lock_keys(database, namespace)
         cursor.execute(
-            "SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext(%s)::bigint)",
-            (f"schemii:{namespace}",),
+            "SELECT pg_catalog.pg_advisory_xact_lock(%s, %s)",
+            lock_keys,
         )
 
     def view_mutation_binding(self, profile_id: str, plan_id: str) -> dict[str, Any]:
@@ -3496,7 +3575,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             cursor = connection.cursor()
             try:
                 cursor.execute("BEGIN")
-                self._acquire_namespace_mutation_lock(cursor, plan["namespace"])
+                self._acquire_namespace_mutation_lock(cursor, plan["namespace"], plan["database"])
                 expectation = plan["expectation"]
                 if set(expectation) != {"absent"}:
                     relation_sql = f"{quote_identifier(plan['namespace'])}.{quote_identifier(plan['relation'])}"
@@ -3619,7 +3698,12 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                 "steps": copy.deepcopy(plan["steps"]),
             })
         except PostgresServiceError:
-            descriptor["historyWarning"] = "Migration committed, but its local history entry could not be written"
+            history_warning = {
+                "code": "history_store_error",
+                "message": "Migration committed, but its local history entry could not be written",
+            }
+        else:
+            history_warning = None
         result = {
             "applied": True, "planId": plan_id, "operation": plan["operation"],
             "schemaBinding": plan["schemaBinding"], "expectedAbsent": set(plan["expectation"]) == {"absent"},
@@ -3631,6 +3715,8 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                 "profileId": profile_id, "database": plan["database"], "namespace": plan["namespace"],
                 "relation": plan["relation"], "kind": plan["expectation"]["kind"],
             }
+        if history_warning:
+            result["warnings"] = [history_warning]
         return result
 
     def apply(self, profile_id: str, plan_id: str, confirm_destructive: bool = False) -> dict[str, Any]:
@@ -3659,7 +3745,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             cursor = connection.cursor()
             try:
                 cursor.execute("BEGIN")
-                self._acquire_namespace_mutation_lock(cursor, plan["namespace"])
+                self._acquire_namespace_mutation_lock(cursor, plan["namespace"], plan["database"])
                 current = self._introspect_connection(connection, profile_id, plan["namespace"])
                 if current["postgres"]["fingerprint"] != plan["liveFingerprint"]:
                     raise ConflictError("stale_plan", "Database schema changed after preview")
@@ -3713,7 +3799,10 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                 "steps": copy.deepcopy(plan["steps"]),
             })
         except PostgresServiceError:
-            refreshed.setdefault("postgres", {})["historyWarning"] = "Migration committed, but its local history entry could not be written"
+            refreshed.setdefault("postgres", {}).setdefault("warnings", []).append({
+                "code": "history_store_error",
+                "message": "Migration committed, but its local history entry could not be written",
+            })
         return refreshed
 
 

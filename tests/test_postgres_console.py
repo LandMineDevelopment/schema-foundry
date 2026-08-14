@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from schemii.postgres_common import PostgresServiceError, ValidationError, postgres_error_diagnostic
 from schemii.postgres_console import ConsoleExecutionRegistry, ConsolePolicy, split_console_statements
 from schemii.postgres_service import PostgresService
+from schemii.result_limits import ResultLimiter, ResultLimits
 
 
 PROFILE = {
@@ -370,6 +371,24 @@ class PostgresConsoleTests(unittest.TestCase):
         with self.assertRaises(PostgresServiceError) as error:
             service.execute_console("local", self.request("SELECT wide"), "binding", "server")
         self.assertEqual(error.exception.code, "sql_result_too_wide")
+
+    def test_limits_nested_collection_cells_and_rejects_excessive_nesting(self):
+        self.connection.results = {
+            "SELECT collection": (["value"], [([1, 2, 3],)], "SELECT 1", 1),
+        }
+        self.service._console.result_limiter = ResultLimiter(ResultLimits(max_collection_items=2))
+        result = self.service.execute_console("local", self.request("SELECT collection"), "binding", "server")
+        statement = result["statements"][0]
+        self.assertEqual(statement["rows"], [[[1, 2]]])
+        self.assertTrue(statement["truncated"])
+        self.assertEqual(statement["limitEvents"][0]["code"], "result_collection_truncated")
+
+        self.connection.results = {"SELECT nested": (["value"], [([[[1]]],)], "SELECT 1", 1)}
+        self.service._console.result_limiter = ResultLimiter(ResultLimits(max_nesting=2))
+        with self.assertRaises(PostgresServiceError) as error:
+            self.service.execute_console("local", self.request("SELECT nested"), "binding", "server")
+        self.assertEqual(error.exception.code, "sql_result_nesting_too_deep")
+        self.assertEqual(error.exception.details["policy"], "reject")
 
     def test_collects_and_bounds_notices_across_statements(self):
         self.connection.results = {

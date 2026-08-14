@@ -15,6 +15,7 @@ from schemii.widget_query import (
     normalize_detail_request,
     normalize_query,
     normalize_temporal_series,
+    limit_widget_rows,
 )
 from schemii.postgres_service import quote_identifier
 
@@ -51,6 +52,15 @@ def query():
 
 
 class WidgetQueryTests(unittest.TestCase):
+    def test_widget_row_limiter_uses_aliases_and_structured_truncation(self):
+        result = limit_widget_rows(
+            [{"a": "🙂" * 10, "b": [1, 2]}, {"a": "second", "b": []}],
+            ["a", "b"], max_rows=1,
+        )
+        self.assertEqual(result["rows"], [["🙂" * 10, [1, 2]]])
+        self.assertTrue(result["truncated"])
+        self.assertEqual(result["limitEvents"][-1]["code"], "result_row_count_truncated")
+
     def test_temporal_series_compiles_utc_manifest_and_half_open_aligned_window(self):
         columns = [*COLUMNS, {"name": "ordered_at", "type": "timestamp without time zone", "nullable": False, "ordinal": 10}]
         value = query()

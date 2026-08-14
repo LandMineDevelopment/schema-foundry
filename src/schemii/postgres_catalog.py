@@ -21,6 +21,7 @@ class PostgresCatalogMixin:
             current = self._execute_rows(connection, "SELECT current_database() AS database")[0]["database"]
             if current != database:
                 raise PostgresServiceError(409, "database_changed", "The connected PostgreSQL database does not match the requested database")
+            self._require_namespace(connection, namespace)
             rows = self._execute_rows(connection, """
                 SELECT c.relname AS relation_name,
                        CASE WHEN c.relkind IN ('r', 'p') THEN 'table'
@@ -98,11 +99,18 @@ class PostgresCatalogMixin:
         current = connection_row["database"]
         if current != database:
             raise PostgresServiceError(409, "database_changed", "The connected PostgreSQL database does not match the requested database")
+        self._require_namespace(connection, namespace)
         supports_maintain = int(connection_row.get("server_version_num") or 0) >= 170000
+        supports_set_role = int(connection_row.get("server_version_num") or 0) >= 160000
         refresh_capability = (
             "pg_catalog.has_table_privilege(c.oid, 'MAINTAIN')"
             if supports_maintain
             else "pg_catalog.pg_has_role(c.relowner, 'USAGE')"
+        )
+        set_role_capability = (
+            "pg_catalog.pg_has_role(c.relowner, 'SET')"
+            if supports_set_role
+            else "pg_catalog.pg_has_role(c.relowner, 'MEMBER')"
         )
         relation_rows = self._execute_rows(connection, f"""
                 SELECT c.oid AS live_oid,
@@ -113,7 +121,9 @@ class PostgresCatalogMixin:
                        CASE WHEN c.relkind IN ('v', 'm') THEN pg_catalog.pg_get_viewdef(c.oid, true) END AS view_definition,
                        pg_catalog.pg_get_userbyid(c.relowner) AS owner_name,
                        current_user AS current_role,
-                       pg_catalog.pg_has_role(c.relowner, 'USAGE') AS can_alter,
+                       current_user = pg_catalog.pg_get_userbyid(c.relowner) AS is_owner,
+                       pg_catalog.pg_has_role(c.relowner, 'USAGE') AS inherits_owner,
+                       {set_role_capability} AS can_set_role,
                        pg_catalog.has_table_privilege(c.oid, 'SELECT') AS can_select,
                        {refresh_capability} AS can_refresh,
                        c.relispopulated AS materialized_populated
@@ -193,7 +203,10 @@ class PostgresCatalogMixin:
             "role": current_role if isinstance(current_role, str) and current_role else None,
             "advisory": True,
             "canSelect": bool(relation_row.get("can_select")),
-            "canAlter": bool(relation_row.get("can_alter")),
+            "isOwner": bool(relation_row.get("is_owner")),
+            "inheritsOwner": bool(relation_row.get("inherits_owner")),
+            "canSetRole": bool(relation_row.get("can_set_role")),
+            "canAlter": bool(relation_row.get("is_owner") or relation_row.get("can_set_role")),
             "canRefresh": descriptor["kind"] == "materialized_view" and bool(relation_row.get("can_refresh")),
         }
         descriptor["columnProvenance"] = {"status": "unavailable", "reason": "not_supported"}

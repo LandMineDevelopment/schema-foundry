@@ -4,6 +4,8 @@ import math
 import re
 from typing import Any, Callable
 
+from .result_limits import ResultLimiter, ResultLimits
+
 
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 NUMERIC_TYPE_RE = re.compile(r"^(?:smallint|integer|bigint|numeric(?:\([^)]*\))?|decimal(?:\([^)]*\))?|real|double precision)$", re.I)
@@ -25,6 +27,31 @@ SERIES_TEMPORAL_TYPE_RE = re.compile(r"^(?:date|timestamp(?:\(\d+\))?(?: with(?:
 
 class QueryValidationError(ValueError):
     pass
+
+
+WIDGET_RESULT_LIMITS = ResultLimits(
+    max_cell_bytes=64 * 1024,
+    max_row_bytes=256 * 1024,
+    max_result_bytes=1024 * 1024,
+    max_nesting=8,
+    max_collection_items=1000,
+)
+
+
+def limit_widget_rows(
+    rows: list[Any], aliases: list[str], *, max_rows: int,
+    max_result_bytes: int = WIDGET_RESULT_LIMITS.max_result_bytes,
+    envelope: Callable[[list[list[Any]]], Any] | None = None,
+) -> dict[str, Any]:
+    """Bound raw widget rows before they cross an HTTP response boundary."""
+    limits = ResultLimits(
+        max_cell_bytes=WIDGET_RESULT_LIMITS.max_cell_bytes,
+        max_row_bytes=WIDGET_RESULT_LIMITS.max_row_bytes,
+        max_result_bytes=max_result_bytes,
+        max_nesting=WIDGET_RESULT_LIMITS.max_nesting,
+        max_collection_items=WIDGET_RESULT_LIMITS.max_collection_items,
+    )
+    return ResultLimiter(limits).rows(rows, aliases, max_rows=max_rows, envelope=envelope)
 
 
 def _text(value: Any, field: str, maximum: int = 128) -> str:
