@@ -9,13 +9,52 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from schemii.postgres_http import PostgresHttpMixin
-from schemii.ai_http import ai_context_fingerprint
-from schemii.ai_authority import AiAuthority
 from schemii.dashboard_store import DashboardStore
 from schemii.schemer_examples import MERCURY_PROFILE_ID
 from schemii.schemer_server import _ai_catalog_sources, make_handler
 from tests.http_test_support import FakePostgresService, RunningHttpServer
+from tests.fake_metadata_authority import FakeSchemiiAuthority
 from tests.test_server import FakeAIService
+
+
+class FakeSchemerAuthority(FakeSchemiiAuthority):
+    def __init__(self):
+        super().__init__()
+        self.chats.clear()
+        self.put_chat("ses_1", "dashboard_mercury", "ses_1", access_level="dashboard")
+
+    def put_chat(self, chat_id, dashboard_id, external_id, target=None, access_level="dashboard"):
+        capabilities = {
+            "metadata": ["metadata"],
+            "dashboard": ["metadata", "dashboard"],
+            "data": ["metadata", "dashboard", "data"],
+        }[access_level]
+        self.chats[chat_id] = {
+            "id": chat_id, "dashboardId": dashboard_id, "externalSessionId": external_id,
+            "title": "Dashboard chat", "target": target or {}, "accessLevel": access_level,
+            "capabilities": capabilities, "policyRevision": 1, "state": "active",
+        }
+        return self.get_chat(chat_id)
+
+    def provision_chat(self, dashboard_id):
+        chat_id = str(__import__("uuid").uuid4())
+        self.chats[chat_id] = {"id": chat_id, "dashboardId": dashboard_id, "state": "provisioning"}
+        return {"chatId": chat_id}
+
+    def bind_external_session(self, chat_id, external_id, title):
+        self.chats[chat_id].update({"externalSessionId": external_id, "title": title})
+
+    def activate_chat(self, chat_id, target, access_level):
+        current = self.chats[chat_id]
+        return self.put_chat(chat_id, current["dashboardId"], current["externalSessionId"], target, access_level)
+
+    def list_chats(self, dashboard_id=None):
+        return [self.get_chat(key) for key, value in self.chats.items() if value.get("state") == "active" and (dashboard_id is None or value["dashboardId"] == dashboard_id)]
+
+    @staticmethod
+    def policy_binding(chat, action):
+        capability = "data" if action.get("type") == "read_query" else "metadata" if action.get("type") in {"dashboard_create", "dashboard_open"} else "dashboard"
+        return {"capability": capability, "configuredMode": "every_action", "effectiveMode": "every_action", "policyRevision": chat["policyRevision"], "origin": "model"}
 
 
 class SchemerServerTests(unittest.TestCase):
@@ -40,13 +79,14 @@ class SchemerServerTests(unittest.TestCase):
         self.dashboard_store = DashboardStore(Path(self.temporary_directory.name) / "dashboards")
         self.dashboard_store.initialize_once()
         self.ai_service = FakeAIService()
+        self.authority = FakeSchemerAuthority()
         handler = make_handler(
             ROOT / "src" / "schemii" / "schemer_web",
             self.service,
             self.dashboard_store,
             "session-token",
             server_id="schemer-server",
-            ai_authority=AiAuthority(Path(self.temporary_directory.name) / "authority", "schemer"),
+            ai_authority=self.authority,
             ai_service=self.ai_service,
         )
         self.assertTrue(issubclass(handler, PostgresHttpMixin))
@@ -62,13 +102,12 @@ class SchemerServerTests(unittest.TestCase):
     def test_ai_widget_rename_executes_server_side_and_reconciles(self):
         record = self.dashboard_store.get("dashboard_mercury")
         widget = record["dashboard"]["widgets"][0]
-        self.ai_service.session_title = "SCHEMER_CONTEXT:dashboard_mercury:dashboard Demo"
         self.ai_service.prompt_response = {"text": "Review.", "parts": [], "actions": [{"type": "widget_rename", "dashboardId": record["id"], "expectedRevision": record["revision"], "widgetId": widget["id"], "currentTitle": widget["title"], "title": "Renamed", "requiresConfirmation": True}]}
-        message = {"text": "Rename it", "model": {}, "dashboardId": record["id"], "accessLevel": "dashboard"}
+        message = {"text": "Rename it", "model": {}}
         _, body, _ = self.request("/api/ai/sessions/ses_1/messages", "POST", message, authorized=True)
         proposal = json.loads(body)["proposals"][0]
         path = f"/api/ai/sessions/ses_1/proposals/{proposal['proposalId']}"
-        execute = {"dashboardId": record["id"], "accessLevel": "dashboard", "confirmation": {"accepted": True, "mode": "explicit"}}
+        execute = {"confirmation": {"accepted": True, "mode": "every_action"}}
         operation = json.loads(self.request(path + "/execute", "POST", execute, authorized=True)[1])["operation"]
         self.assertEqual(operation["result"]["kind"], "dashboard_saved")
         self.assertEqual(self.dashboard_store.get(record["id"])["dashboard"]["widgets"][0]["title"], "Renamed")
@@ -76,13 +115,13 @@ class SchemerServerTests(unittest.TestCase):
         self.assertEqual(reconciled["id"], operation["id"])
 
     def test_ai_dashboard_create_uses_deterministic_server_identity(self):
-        self.ai_service.session_title = "SCHEMER_CONTEXT:dashboard_mercury:metadata Demo"
+        self.authority.put_chat("ses_1", "dashboard_mercury", "ses_1", access_level="metadata")
         self.ai_service.prompt_response = {"text": "Review.", "parts": [], "actions": [{"type": "dashboard_create", "title": "Operations", "requiresConfirmation": True}]}
-        message = {"text": "Create it", "model": {}, "dashboardId": "dashboard_mercury", "accessLevel": "metadata"}
+        message = {"text": "Create it", "model": {}}
         _, body, _ = self.request("/api/ai/sessions/ses_1/messages", "POST", message, authorized=True)
         proposal = json.loads(body)["proposals"][0]
         path = f"/api/ai/sessions/ses_1/proposals/{proposal['proposalId']}/execute"
-        execute = {"dashboardId": "dashboard_mercury", "accessLevel": "metadata", "confirmation": {"accepted": True, "mode": "explicit"}}
+        execute = {"confirmation": {"accepted": True, "mode": "every_action"}}
         operation = json.loads(self.request(path, "POST", execute, authorized=True)[1])["operation"]
         self.assertTrue(operation["result"]["dashboardId"].startswith("dashboard_"))
         self.assertEqual(self.dashboard_store.get(operation["result"]["dashboardId"])["dashboard"]["title"], "Operations")
@@ -108,6 +147,9 @@ class SchemerServerTests(unittest.TestCase):
         status, body, _ = self.request("/api/session")
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body), {"token": "session-token", "serverId": "schemer-server"})
+        status, body, _ = self.request("/api/readiness")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["metadata"]["ok"], True)
 
     def test_shared_connection_routes_match_schemii_contract(self):
         self.assertEqual(self.request("/api/postgres/profiles")[0], 403)
@@ -255,15 +297,15 @@ class SchemerServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(json.loads(body)["enabled"])
         status, body, _ = self.request("/api/ai/sessions", "POST", {
-            "title": "SCHEMER_CONTEXT:dashboard_mercury:dashboard Mercury overview chat", "model": {"providerId": "openai", "modelId": "gpt"},
+            "dashboardId": "dashboard_mercury", "accessLevel": "dashboard", "model": {"providerId": "openai", "modelId": "gpt"},
         }, True)
         self.assertEqual(status, 201)
-        self.assertEqual(json.loads(body)["id"], "ses_1")
+        chat_id = json.loads(body)["id"]
+        self.assertNotEqual(chat_id, "ses_1")
         message = {
             "text": "Rename a widget", "model": {"providerId": "openai", "modelId": "gpt"},
-            "dashboardId": "dashboard_mercury", "accessLevel": "dashboard",
         }
-        status, body, _ = self.request("/api/ai/sessions/ses_1/messages", "POST", message, True)
+        status, body, _ = self.request(f"/api/ai/sessions/{chat_id}/messages", "POST", message, True)
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["text"], "Proposed.")
         prompt_call = next(call for call in self.ai_service.calls if call[0] == "prompt")
@@ -275,7 +317,7 @@ class SchemerServerTests(unittest.TestCase):
         self.assertNotIn('"host"', context_text.lower())
         self.assertNotIn("SCHEMII_ACTION", prompt_call[4])
         self.assertIn("schemer_*", prompt_call[4])
-        self.assertEqual(self.request("/api/ai/sessions/ses_1/messages", "POST", {**message, "schemaId": "schema_one"}, True)[0], 400)
+        self.assertEqual(self.request(f"/api/ai/sessions/{chat_id}/messages", "POST", {**message, "schemaId": "schema_one"}, True)[0], 400)
 
     def test_ai_catalog_sources_are_hydrated_from_postgres(self):
         record = self.dashboard_store.get("dashboard_mercury")
@@ -293,14 +335,10 @@ class SchemerServerTests(unittest.TestCase):
         path = "/api/ai/sessions/ses_1/messages"
         base = {
             "text": "Count orders", "model": {"providerId": "openai", "modelId": "gpt"},
-            "dashboardId": "dashboard_mercury", "accessLevel": "data",
         }
-        self.assertEqual(self.request(path, "POST", base, True)[0], 400)
         target = {"profileId": "shared", "database": "schemii", "namespace": "bookstore"}
-        profile_fingerprint = ai_context_fingerprint(["shared", "postgres", 5432, "schemii", "schemii", "disable"])
-        target_fingerprint = ai_context_fingerprint(["shared", "schemii", "bookstore", profile_fingerprint])
-        self.ai_service.session_title = f"SCHEMER_CONTEXT:dashboard_mercury:data:{target_fingerprint} Mercury chat"
-        status, _, _ = self.request(path, "POST", {**base, **target}, True)
+        self.authority.put_chat("ses_1", "dashboard_mercury", "ses_1", {**target, "profileFingerprint": self.service.profile_context_fingerprint("shared")}, "data")
+        status, _, _ = self.request(path, "POST", base, True)
         self.assertEqual(status, 200)
         prompt_call = next(call for call in reversed(self.ai_service.calls) if call[0] == "prompt")
         self.assertTrue(prompt_call[-1])
@@ -310,12 +348,7 @@ class SchemerServerTests(unittest.TestCase):
             "profileId": "shared", "database": "schemii", "namespace": "bookstore", "columns": [{"name": "count"}], "rows": [[1]],
             "rowCount": 1, "truncated": False, "maxRows": 100, "maxColumns": 50, "maxResultBytes": 256 * 1024,
         }
-        self.assertEqual(self.request(path, "POST", {**base, **target, "queryResult": query_result}, True)[0], 400)
-        self.assertEqual(self.request(path, "POST", {**base, **target, "queryResult": {**query_result, "database": "other"}}, True)[0], 400)
-        dashboard_message = {**base, "accessLevel": "dashboard", "queryResult": query_result}
-        for key in target:
-            dashboard_message.pop(key, None)
-        self.assertEqual(self.request(path, "POST", dashboard_message, True)[0], 400)
+        self.assertEqual(self.request(path, "POST", {**base, "queryResult": query_result}, True)[0], 400)
 
     def test_profile_writes_use_shared_router_and_redact_password(self):
         profile = {

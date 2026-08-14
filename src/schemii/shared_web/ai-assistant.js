@@ -64,8 +64,8 @@
   function createAiAssistant(options) {
     const {
       sessionClient, root, trigger, settingsDialog, historyDialog, storageKey, getContext,
-      buildMessagePayload, buildSessionPayload, createSessionTitle, contextKey = () => null, parseSession = session => ({ title: session.title || "Untitled chat", key: null }),
-      buildProposalClaimPayload, buildHistoryQuery, renderAction, validateAction, handleOperationResult, toolLabels = {}, skillLabels = {}, labels = {},
+      buildMessagePayload, buildSessionPayload, contextKey = () => null, parseSession = session => ({ title: session.title || "Untitled chat", key: null }),
+      buildProposalClaimPayload, buildProposalExecutionPayload, buildHistoryQuery, renderAction, validateAction, handleOperationResult, toolLabels = {}, skillLabels = {}, labels = {},
       onOpenChange = () => {}, onAccessChange = () => {}, onNewChat = () => {}, state: suppliedState,
       canViewSession = () => true, extraBusyControls = [],
     } = options;
@@ -456,7 +456,10 @@
       const context = buildProposalClaimPayload ? buildProposalClaimPayload(capture, elements.access.value) : {};
       const policy = proposal.policyBinding ?? {};
       const mode = policy.effectiveMode === "once_per_chat" ? "once_per_chat" : "every_action";
-      const body = { ...context, policyRevision: policy.policyRevision, confirmation: { accepted: true, mode } };
+      const confirmation = { accepted: true, mode };
+      const body = buildProposalExecutionPayload
+        ? buildProposalExecutionPayload({ proposal, confirmation })
+        : { ...context, policyRevision: policy.policyRevision, confirmation };
       try {
         const response = await proposalRequest(proposal, "execute", body);
         if (response.operation?.state === "running") return waitForOperation(proposal, response.operation);
@@ -539,9 +542,8 @@
     async function ensureSession(model, capture, key) {
       if (state.sessionId && state.contextKey === key) return state.sessionId;
       state.sessionId = null;
-      const payload = buildSessionPayload
-        ? buildSessionPayload(capture, elements.access.value, model)
-        : { title: boundedUtf8Text(createSessionTitle ? createSessionTitle(capture, elements.access.value) : labels.sessionTitle || "Assistant chat", 256), model };
+      if (typeof buildSessionPayload !== "function") throw new Error("The application session contract is unavailable");
+      const payload = buildSessionPayload(capture, elements.access.value, model);
       const session = await request("/api/ai/sessions", { method: "POST", body: JSON.stringify(payload) });
       state.sessionId = session.id; state.contextKey = key;
       return session.id;

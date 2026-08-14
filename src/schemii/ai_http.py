@@ -33,37 +33,6 @@ def ai_context_fingerprint(parts: list[Any]) -> str:
     return f"{value:016x}"
 
 
-def require_ai_session_binding(
-    service: OpenCodeService,
-    session_id: str,
-    prefix: str,
-    resource_id: str,
-    access_level: str,
-    fingerprint_parts: list[Any] | None = None,
-) -> None:
-    expected = ai_session_prefix(prefix, resource_id, access_level, fingerprint_parts)
-    if not service.session_identity(session_id)["title"].startswith(expected):
-        raise OpenCodeServiceError(
-            409,
-            "session_context_changed",
-            "The AI conversation belongs to a different resource, disclosure level, or data target",
-        )
-
-
-def ai_session_prefix(prefix: str, resource_id: str, access_level: str, fingerprint_parts: list[Any] | None = None) -> str:
-    suffix = f":{ai_context_fingerprint(fingerprint_parts)}" if fingerprint_parts is not None else ""
-    return f"{prefix}:{resource_id}:{access_level}{suffix} "
-
-
-def list_bound_ai_sessions(service: OpenCodeService, expected_prefix: str) -> dict[str, Any]:
-    sessions = []
-    for session in service.list_sessions().get("sessions", []):
-        title = session.get("title", "")
-        if isinstance(title, str) and title.startswith(expected_prefix):
-            sessions.append({**session, "title": title[len(expected_prefix):] or "Untitled chat"})
-    return {"sessions": sessions}
-
-
 class AiHttpRouter:
     """Shared same-origin router for the fixed embedded OpenCode surface."""
 

@@ -68,7 +68,7 @@ The first start downloads several container images and build dependencies. It re
 
 No account is required to start Schemii. Anonymous AI models may be available, but AI use can require provider authentication when anonymous models are unavailable. No model request is made until the user sends a chat message.
 
-Schemii requires the dedicated metadata PostgreSQL schema to be current before it serves requests. `/api/readiness` reports metadata connectivity and schema version independently of OpenCode availability. AI chat UUIDs, policies, grants, proposals, operation attempts, and bounded one-use query-result references are stored there; OpenCode session IDs are opaque external references and titles are display-only. Legacy Schemii JSON chat and authority directories are moved idempotently under `retired-json-authority` and are never imported as executable records.
+Schemii and Schemer require the dedicated metadata PostgreSQL schema to be current before either serves requests. Each app's `/api/readiness` reports metadata connectivity and schema version independently of OpenCode availability. AI chat UUIDs, policies, grants, proposals, operation attempts, and bounded one-use query-result references are stored there; OpenCode session IDs are opaque server-only external references and titles are display-only. Legacy Schemii JSON chat authority and Schemer JSON/title authority are moved or marked idempotently under `retired-json-authority` and are never imported as executable records.
 
 ### Default Stack
 
