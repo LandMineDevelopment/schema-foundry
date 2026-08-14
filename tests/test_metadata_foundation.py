@@ -176,16 +176,19 @@ class MetadataSqlContractTests(unittest.TestCase):
 
 class MetadataStoreTests(unittest.TestCase):
     def test_health_requires_exact_packaged_version(self):
-        migration = packaged_migrations()[0]
-        connection = FakeConnection(rows=[[{"version": 1, "name": migration.name, "checksum": migration.checksum}]])
+        migrations = packaged_migrations()
+        connection = FakeConnection(rows=[[
+            {"version": migration.version, "name": migration.name, "checksum": migration.checksum}
+            for migration in migrations
+        ]])
         store = MetadataStore(lambda: connection)
-        self.assertEqual(store.health(), {"ok": True, "version": 1, "expectedVersion": 1})
+        self.assertEqual(store.health(), {"ok": True, "version": 2, "expectedVersion": 2})
         self.assertEqual(connection.commits, 0)
         self.assertEqual(connection.rollbacks, 1)
         self.assertTrue(connection.closed)
 
     def test_policy_update_is_transactional_and_increments_locked_revision(self):
-        connection = FakeConnection(rows=[{"state": "active"}, {"revision": 2}])
+        connection = FakeConnection(rows=[{"state": "active"}, {"revision": 2}, {"application_id": "schemii"}])
         store = MetadataStore(lambda: connection)
         result = store.update_policy(str(uuid.uuid4()), 2, {"version": 1}, {"write": "approval"})
         self.assertEqual(result["revision"], 3)
@@ -197,7 +200,7 @@ class MetadataStoreTests(unittest.TestCase):
 
     def test_claim_operation_creates_hashed_single_attempt(self):
         operation_id = uuid.uuid4()
-        connection = FakeConnection(rows=[{"state": "ready"}])
+        connection = FakeConnection(rows=[{"state": "ready", "chat_id": uuid.uuid4()}, {"application_id": "schemii"}])
         result = MetadataStore(lambda: connection).claim_operation(str(operation_id), "worker-1")
         self.assertEqual(result["state"], "running")
         insert = next(item for item in connection.cursor_value.executions if "INSERT INTO metadata_operation_attempts" in item[0])
@@ -216,7 +219,7 @@ class MetadataStoreTests(unittest.TestCase):
             "grant_mode": "once_per_chat",
             "current_revision": 4,
             "grant_id": None,
-        }])
+        }, {"application_id": "schemii"}, {"application_id": "schemii"}])
         result = MetadataStore(lambda: connection).authorize_and_create_operation(
             str(uuid.uuid4()), expected_policy_revision=4, approved=True,
         )
@@ -254,14 +257,14 @@ class MetadataStoreTests(unittest.TestCase):
         token_hash = __import__("hashlib").sha256(token.encode()).hexdigest()
         release_connection = FakeConnection(rows=[{
             "result_ref_id": result_ref_id, "state": "reserved", "reservation_token_hash": token_hash,
-        }])
+        }, {"application_id": "schemii"}])
         released = MetadataStore(lambda: release_connection).release_result(str(delivery_id), token)
         self.assertEqual(released["state"], "released")
-        self.assertIn("state = %s", release_connection.cursor_value.executions[-1][0])
+        self.assertTrue(any("state = %s" in sql for sql, _ in release_connection.cursor_value.executions))
 
         uncertain_connection = FakeConnection(rows=[{
             "result_ref_id": result_ref_id, "state": "delivering", "reservation_token_hash": token_hash,
-        }])
+        }, {"application_id": "schemii"}])
         uncertain = MetadataStore(lambda: uncertain_connection).mark_result_uncertain(str(delivery_id), token)
         self.assertEqual(uncertain["state"], "uncertain")
         sql = "\n".join(item[0] for item in uncertain_connection.cursor_value.executions)

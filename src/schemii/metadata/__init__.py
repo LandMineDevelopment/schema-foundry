@@ -4,7 +4,7 @@ from .config import MetadataConfig
 from .connection import MetadataConnectionFactory
 from .errors import MetadataStoreError
 from .migrator import MetadataMigrator, Migration
-from .store import MetadataStore
+from .store import MetadataStore, canonical_review_digest
 
 __all__ = [
     "MetadataConfig",
@@ -13,4 +13,5 @@ __all__ = [
     "MetadataStore",
     "MetadataStoreError",
     "Migration",
+    "canonical_review_digest",
 ]
