@@ -273,7 +273,16 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(captured["dbname"], "demo")
         self.assertEqual(captured["password"], "secret")
+        self.assertEqual(captured["application_name"], "schemii")
         self.assertNotIn("password", result)
+
+        captured.clear()
+        service = PostgresService(
+            self.temporary_directory.name, application_name="schemer",
+            connect_factory=lambda **kwargs: (captured.update(kwargs) or connection),
+        )
+        service.test_profile("local")
+        self.assertEqual(captured["application_name"], "schemer")
 
     def test_table_data_preview_is_paginated_ordered_and_json_safe(self):
         connection = Connection(responses={

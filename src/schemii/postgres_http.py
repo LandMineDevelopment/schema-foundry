@@ -17,6 +17,7 @@ CONSOLE_WRITE_GRANTS_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-
 CONSOLE_WRITE_GRANT_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/console/write-grants/([^/]+)$")
 RELATION_PREVIEW_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/relation/preview$")
 RELATION_VERIFY_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/relation/verify$")
+RELATION_VERIFY_BATCH_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/relation/verify-batch$")
 RELATION_QUERY_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/relation/query$")
 RELATION_TEMPORAL_SERIES_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/relation/temporal-series$")
 RELATION_DETAIL_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/relation/detail$")
@@ -59,6 +60,24 @@ class PostgresHttpMixin:
     def _has_postgres_capability(self, capability: str) -> bool:
         return capability in self.postgres_capabilities
 
+    def _postgres_service_call(self, callback, status: int = 200):
+        path = getattr(self, "path", "").split("?", 1)[0]
+        if "/console/executions" in path:
+            return self._service_call(callback, status)
+        execution_class = "read" if any(part in path for part in (
+            "/data", "/sql", "/relation/preview", "/relation/query", "/relation/detail",
+            "/relation/temporal-series", "/saved-widgets/",
+        )) else "catalog"
+
+        def admitted():
+            execution = getattr(self.service, "execution", None)
+            if execution is None:
+                return callback()
+            with execution(execution_class):
+                return callback()
+
+        return self._service_call(admitted, status)
+
     def _postgres_profile_dependency_impact(self, profile_id: str) -> dict[str, list[dict]]:
         return {"schemas": [], "dashboards": [], "activeChats": [], "plans": [], "operations": []}
 
@@ -77,7 +96,7 @@ class PostgresHttpMixin:
         path = parsed.path
         if path == "/api/postgres/profiles" and self._has_postgres_capability(POSTGRES_PROFILE_CAPABILITY):
             if self._authorize_postgres():
-                self._service_call(lambda: {"profiles": self.service.list_profiles()})
+                self._postgres_service_call(lambda: {"profiles": self.service.list_profiles()})
             return True
         data_match = DATA_PATH.fullmatch(path)
         if data_match and self._has_postgres_capability(POSTGRES_SCHEMA_CAPABILITY):
@@ -90,7 +109,7 @@ class PostgresHttpMixin:
             except ValueError:
                 self.send_json(400, {"error": {"code": "validation_error", "message": "offset and limit must be integers"}})
                 return True
-            self._service_call(lambda: self.service.preview_table_data(
+            self._postgres_service_call(lambda: self.service.preview_table_data(
                 data_match.group(1), query.get("namespace", [None])[0], query.get("table", [None])[0], offset, limit
             ))
             return True
@@ -106,24 +125,24 @@ class PostgresHttpMixin:
             if not self._authorize_postgres():
                 return True
             if profile_match.group(2) == "deletion-impact":
-                self._service_call(lambda: self._profile_deletion_impact(profile_match.group(1)))
+                self._postgres_service_call(lambda: self._profile_deletion_impact(profile_match.group(1)))
             elif profile_match.group(2) == "namespaces":
-                self._service_call(lambda: {"namespaces": self.service.list_namespaces(profile_match.group(1))})
+                self._postgres_service_call(lambda: {"namespaces": self.service.list_namespaces(profile_match.group(1))})
             elif profile_match.group(2) == "relations":
                 query = parse_qs(parsed.query)
-                self._service_call(lambda: self.service.list_relations(
+                self._postgres_service_call(lambda: self.service.list_relations(
                     profile_match.group(1), query.get("database", [None])[0], query.get("namespace", [None])[0]
                 ))
             elif profile_match.group(2) == "relation":
                 query = parse_qs(parsed.query)
-                self._service_call(lambda: self.service.inspect_relation(
+                self._postgres_service_call(lambda: self.service.inspect_relation(
                     profile_match.group(1), query.get("database", [None])[0], query.get("namespace", [None])[0],
                     query.get("relation", [None])[0], query.get("expectedKind", [None])[0],
                     query.get("expectedFingerprint", [None])[0]
                 ))
             else:
                 namespace = parse_qs(parsed.query).get("namespace", [None])[0]
-                self._service_call(lambda: self.service.catalog_status(profile_match.group(1), namespace))
+                self._postgres_service_call(lambda: self.service.catalog_status(profile_match.group(1), namespace))
             return True
         return False
 
@@ -133,13 +152,14 @@ class PostgresHttpMixin:
                 return True
             body = self._body_or_error()
             if body is not None:
-                self._service_call(lambda: self.service.save_profile(None, body), 201)
+                self._postgres_service_call(lambda: self.service.save_profile(None, body), 201)
             return True
         sql_match = SQL_PATH.fullmatch(path)
         console_match = CONSOLE_EXECUTIONS_PATH.fullmatch(path)
         write_grants_match = CONSOLE_WRITE_GRANTS_PATH.fullmatch(path)
         relation_preview_match = RELATION_PREVIEW_PATH.fullmatch(path)
         relation_verify_match = RELATION_VERIFY_PATH.fullmatch(path)
+        relation_verify_batch_match = RELATION_VERIFY_BATCH_PATH.fullmatch(path)
         relation_query_match = RELATION_QUERY_PATH.fullmatch(path)
         relation_temporal_series_match = RELATION_TEMPORAL_SERIES_PATH.fullmatch(path)
         relation_detail_match = RELATION_DETAIL_PATH.fullmatch(path)
@@ -152,13 +172,13 @@ class PostgresHttpMixin:
             return False
         if write_grants_match and not self._has_postgres_capability(POSTGRES_CONSOLE_WRITE_CAPABILITY):
             return False
-        if any((relation_preview_match, relation_verify_match, relation_query_match, relation_temporal_series_match, relation_detail_match, saved_widget_query_match, saved_widget_detail_match)) and not self._has_postgres_capability(POSTGRES_RELATION_QUERY_CAPABILITY):
+        if any((relation_preview_match, relation_verify_match, relation_verify_batch_match, relation_query_match, relation_temporal_series_match, relation_detail_match, saved_widget_query_match, saved_widget_detail_match)) and not self._has_postgres_capability(POSTGRES_RELATION_QUERY_CAPABILITY):
             return False
         if profile_match and profile_match.group(2) == "test" and not self._has_postgres_capability(POSTGRES_PROFILE_CAPABILITY):
             return False
         if profile_match and profile_match.group(2) == "introspect" and not self._has_postgres_capability(POSTGRES_SCHEMA_CAPABILITY):
             return False
-        if not sql_match and not console_match and not write_grants_match and not relation_preview_match and not relation_verify_match and not relation_query_match and not relation_temporal_series_match and not relation_detail_match and not saved_widget_query_match and not saved_widget_detail_match and not (profile_match and profile_match.group(2) in {"test", "introspect"}):
+        if not sql_match and not console_match and not write_grants_match and not relation_preview_match and not relation_verify_match and not relation_verify_batch_match and not relation_query_match and not relation_temporal_series_match and not relation_detail_match and not saved_widget_query_match and not saved_widget_detail_match and not (profile_match and profile_match.group(2) in {"test", "introspect"}):
             return False
         if not self._authorize_postgres():
             return True
@@ -169,19 +189,19 @@ class PostgresHttpMixin:
             if set(body) != {"dashboardId", "expectedRevision", "widgetId"} or not hasattr(self, "_postgres_saved_widget_query"):
                 self.send_json(400, {"error": {"code": "validation_error", "message": "Saved widget aggregate fields are invalid"}})
             else:
-                self._service_call(lambda: self._postgres_saved_widget_query(saved_widget_query_match.group(1), body))
+                self._postgres_service_call(lambda: self._postgres_saved_widget_query(saved_widget_query_match.group(1), body))
         elif saved_widget_detail_match:
             fields = {"dashboardId", "expectedRevision", "widgetId", "selection", "offset", "limit", "sort", "searches"}
             if set(body) != fields or not hasattr(self, "_postgres_saved_widget_detail"):
                 self.send_json(400, {"error": {"code": "validation_error", "message": "Saved widget detail fields are invalid"}})
             else:
-                self._service_call(lambda: self._postgres_saved_widget_detail(saved_widget_detail_match.group(1), body))
+                self._postgres_service_call(lambda: self._postgres_saved_widget_detail(saved_widget_detail_match.group(1), body))
         elif write_grants_match:
             grant_fields = {"consoleId", "database", "namespace", "confirmed"}
             if not isinstance(body, dict) or set(body) != grant_fields:
                 self.send_json(400, {"error": {"code": "validation_error", "message": "Console write grant request fields are invalid"}})
             else:
-                self._service_call(lambda: self.service.create_console_write_grant(
+                self._postgres_service_call(lambda: self.service.create_console_write_grant(
                     write_grants_match.group(1), body, self.postgres_session_binding, self.postgres_server_id,
                 ), 201)
         elif console_match:
@@ -189,7 +209,7 @@ class PostgresHttpMixin:
             if not isinstance(body, dict) or set(body) != console_fields:
                 self.send_json(400, {"error": {"code": "validation_error", "message": "Console execution request fields are invalid"}})
             else:
-                self._service_call(lambda: self.service.execute_console(
+                self._postgres_service_call(lambda: self.service.execute_console(
                     console_match.group(1), body, self.postgres_session_binding, self.postgres_server_id,
                     self.postgres_console_policy,
                 ))
@@ -211,7 +231,7 @@ class PostgresHttpMixin:
                             relation_detail_match.group(1), body["source"], body["query"], body["selection"],
                             body["detail"], body["offset"], body["limit"], body["sort"], body["searches"],
                         )
-                self._service_call(execute_detail)
+                self._postgres_service_call(execute_detail)
         elif relation_temporal_series_match:
             manifest_fields = {"source", "query", "action", "refreshGeneration"}
             window_fields = manifest_fields | {"series", "windowStart"}
@@ -232,7 +252,7 @@ class PostgresHttpMixin:
                         return call()
                     with guard(body):
                         return call()
-                self._service_call(execute_temporal_series)
+                self._postgres_service_call(execute_temporal_series)
         elif relation_query_match:
             base_fields = {"source", "query"}
             contextual_fields = base_fields | set(self.postgres_relation_query_context_fields)
@@ -245,13 +265,20 @@ class PostgresHttpMixin:
                         return self.service.execute_widget_query(relation_query_match.group(1), body["source"], body["query"])
                     with guard(body):
                         return self.service.execute_widget_query(relation_query_match.group(1), body["source"], body["query"])
-                self._service_call(execute_query)
+                self._postgres_service_call(execute_query)
+        elif relation_verify_batch_match:
+            if not isinstance(body, dict) or set(body) != {"sources"}:
+                self.send_json(400, {"error": {"code": "validation_error", "message": "batch verification fields are invalid"}})
+            else:
+                self._postgres_service_call(lambda: self.service.verify_relation_sources(
+                    relation_verify_batch_match.group(1), body["sources"],
+                ))
         elif relation_verify_match:
-            self._service_call(lambda: self.service.verify_relation_source(
+            self._postgres_service_call(lambda: self.service.verify_relation_source(
                 relation_verify_match.group(1), body.get("source")
             ))
         elif relation_preview_match:
-            self._service_call(lambda: self.service.preview_relation_rows(
+            self._postgres_service_call(lambda: self.service.preview_relation_rows(
                 relation_preview_match.group(1), body.get("source"), body.get("offset", 0), body.get("limit", 20)
             ))
         elif sql_match:
@@ -288,11 +315,11 @@ class PostgresHttpMixin:
                         return execute()
                     with guard(body):
                         return execute()
-                self._service_call(execute_sql)
+                self._postgres_service_call(execute_sql)
         elif profile_match.group(2) == "test":
-            self._service_call(lambda: self.service.test_profile(profile_match.group(1)))
+            self._postgres_service_call(lambda: self.service.test_profile(profile_match.group(1)))
         else:
-            self._service_call(lambda: self.service.introspect(profile_match.group(1), body.get("namespace")))
+            self._postgres_service_call(lambda: self.service.introspect(profile_match.group(1), body.get("namespace")))
         return True
 
     def _handle_postgres_put(self, path: str) -> bool:
@@ -305,14 +332,14 @@ class PostgresHttpMixin:
             return True
         body = self._body_or_error()
         if body is not None:
-            self._service_call(lambda: self.service.save_profile(profile_match.group(1), body))
+            self._postgres_service_call(lambda: self.service.save_profile(profile_match.group(1), body))
         return True
 
     def _handle_postgres_delete(self, path: str) -> bool:
         write_grant_match = CONSOLE_WRITE_GRANT_PATH.fullmatch(path)
         if write_grant_match and self._has_postgres_capability(POSTGRES_CONSOLE_WRITE_CAPABILITY):
             if self._authorize_postgres():
-                self._service_call(lambda: self.service.revoke_console_write_grant(
+                self._postgres_service_call(lambda: self.service.revoke_console_write_grant(
                     write_grant_match.group(1), write_grant_match.group(2),
                     self.postgres_session_binding, self.postgres_server_id,
                 ))
@@ -320,7 +347,7 @@ class PostgresHttpMixin:
         console_match = CONSOLE_EXECUTION_PATH.fullmatch(path)
         if console_match and self._has_postgres_capability(POSTGRES_CONSOLE_CAPABILITY):
             if self._authorize_postgres():
-                self._service_call(lambda: self.service.cancel_console(
+                self._postgres_service_call(lambda: self.service.cancel_console(
                     console_match.group(1), console_match.group(2), self.postgres_session_binding, self.postgres_server_id,
                 ))
             return True
@@ -347,5 +374,5 @@ class PostgresHttpMixin:
                     raise ConflictError("profile_dependencies_changed", "Profile dependencies changed after deletion was reviewed")
                 return self.service.delete_profile(profile_match.group(1), current["profileFingerprint"])
 
-            self._service_call(delete_profile)
+            self._postgres_service_call(delete_profile)
         return True

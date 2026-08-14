@@ -8,8 +8,8 @@ const source = fs.readFileSync(path.join(root, "src/schemii/web/app.js"), "utf8"
 assert.doesNotMatch(source, /fetch\([^\n]*\/api\/schemas|fetch\(`\/api\/schemas/, "schema requests must not bypass the authenticated client");
 
 const reload = source.slice(source.indexOf("async function reloadActiveSchemaRecord"), source.indexOf("function standaloneSqlTarget"));
-assert.match(reload, /sharedSessionClient\.json\("\/api\/schemas"/, "active schema refresh must use the session client");
-assert.match(reload, /allowPath: path => path === "\/api\/schemas"/, "active schema refresh must allow only the exact list path");
+assert.match(reload, /sharedSessionClient\.json\(`\/api\/schemas\/\$\{encodeURIComponent\(activeSchemaId\)\}`/, "active schema refresh must use the exact-resource session client route");
+assert.match(reload, /createApiPathPredicate\("\/api\/schemas"\)/, "active schema refresh must allow only schema resource paths");
 
 const save = source.slice(source.indexOf("async function putRecordFile"), source.indexOf("function saveRecordFile"));
 assert.match(save, /sharedSessionClient\.json\(path/, "schema saves must use the session client");

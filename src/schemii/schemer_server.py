@@ -36,6 +36,7 @@ from .schemer_ai import (
 )
 from .schemer_metadata_authority import SchemerMetadataAuthority, retire_legacy_schemer_authority
 from .widget_query import QueryValidationError, normalize_query
+from .readiness import readiness_report
 
 
 def _configured_ai_widget(service, action, operation_id, widget_count):
@@ -443,15 +444,17 @@ def make_handler(
             parsed = urlparse(self.path)
             path = parsed.path
             if path == "/api/readiness":
-                try:
-                    return self.send_json(200, {"ready": True, "metadata": ai_authority.health()})
-                except MetadataStoreError as error:
-                    return self.send_json(error.status, {"ready": False, **error.to_dict()})
+                status, report = readiness_report(ai_authority, ai_service, service)
+                return self.send_json(status, report)
             if self._handle_common_get(path):
                 return
             if path == "/api/dashboards":
                 if self._authorize_dashboard():
                     self._dashboard_call(lambda: {"dashboards": dashboard_store.list()})
+                return
+            if path == "/api/dashboards/summary":
+                if self._authorize_dashboard():
+                    self._dashboard_call(lambda: {"summaries": dashboard_store.list_summaries()})
                 return
             if ai_router.handle_get(self, path):
                 return
@@ -755,7 +758,7 @@ def main() -> None:
     if not 1 <= ai_timeout <= 300:
         raise SystemExit("SCHEMER_OPENCODE_TIMEOUT must be from 1 to 300 seconds")
     validate_static_directory(web_dir)
-    service = PostgresService(config_dir)
+    service = PostgresService(config_dir, application_name="schemer")
     dashboard_store = DashboardStore(dashboard_dir)
     try:
         metadata_config = MetadataConfig.from_env()

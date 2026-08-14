@@ -138,6 +138,23 @@ class ResultLimiter:
             events.extend(row_events)
         return {"rows": bounded, "truncated": truncated, "limitEvents": events}
 
+    def records(
+        self,
+        rows: Iterable[Any],
+        aliases: Sequence[str],
+        *,
+        max_rows: int,
+        envelope: Callable[[list[dict[str, Any]]], Any] | None = None,
+    ) -> dict[str, Any]:
+        limited = self.rows(
+            rows, aliases, max_rows=max_rows,
+            envelope=(lambda values: envelope([dict(zip(aliases, row)) for row in values])) if envelope else None,
+        )
+        return {
+            **limited,
+            "rows": [dict(zip(aliases, row)) for row in limited["rows"]],
+        }
+
     def _normalize(
         self, value: Any, path: str, depth: int, events: list[dict[str, Any]], active: set[int],
     ) -> Any:

@@ -150,6 +150,11 @@ class SchemerServerTests(unittest.TestCase):
         status, body, _ = self.request("/api/readiness")
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["metadata"]["ok"], True)
+        status, body, _ = self.request("/api/dashboards/summary", authorized=True)
+        self.assertEqual(status, 200)
+        summary = json.loads(body)["summaries"][0]
+        self.assertEqual(summary["id"], "dashboard_mercury")
+        self.assertNotIn("widgets", summary)
 
     def test_shared_connection_routes_match_schemii_contract(self):
         self.assertEqual(self.request("/api/postgres/profiles")[0], 403)

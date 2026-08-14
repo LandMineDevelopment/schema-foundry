@@ -481,6 +481,13 @@ class DashboardStore:
                     continue
         return sorted(records, key=lambda item: (item["dashboard"]["archived"], item["dashboard"]["title"].lower(), item["id"]))
 
+    def list_summaries(self) -> list[dict[str, Any]]:
+        return [{
+            "id": record["id"], "revision": record["revision"], "updatedAt": record.get("updatedAt"),
+            "title": record["dashboard"]["title"], "archived": record["dashboard"]["archived"],
+            "widgetCount": len(record["dashboard"]["widgets"]),
+        } for record in self.list()]
+
     def get(self, dashboard_id: str) -> dict[str, Any]:
         dashboard_id = self.validate_id(dashboard_id)
         with self._lock:

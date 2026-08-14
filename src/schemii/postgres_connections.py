@@ -2,51 +2,52 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
-from datetime import date, datetime, time as datetime_time
-from decimal import Decimal
 from typing import Any
-from uuid import UUID
 
 from .postgres_common import PostgresServiceError
+from .postgres_concurrency import postgres_execution
+from .result_limits import ResultLimitError
+
+
+MAX_CATALOG_ROWS = 5000
 
 
 def _json_cell(value: Any) -> Any:
-    if isinstance(value, float) and not math.isfinite(value):
-        return str(value)
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, (datetime, date, datetime_time)):
-        return value.isoformat()
-    if isinstance(value, (Decimal, UUID)):
-        return str(value)
-    if isinstance(value, bytes):
-        return "\\x" + value.hex()
-    if isinstance(value, dict):
-        return {str(key): _json_cell(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_cell(item) for item in value]
-    return str(value)
+    # Kept as a compatibility hook for callers; the service-owned limiter is authoritative.
+    from .result_limits import ResultLimiter
+    return ResultLimiter().cell(value)
 
 
 class PostgresConnectionMixin:
     def _connect(self, profile_id: str):
-        return self._connect_profile(self._profile(profile_id))
+        profile = self._profile(profile_id)
+        observed = {**profile, "id": profile_id}
+        try:
+            connection = self._connect_profile(profile)
+        except PostgresServiceError:
+            self._record_target_connection(observed, False)
+            raise
+        self._record_target_connection(observed, True)
+        return connection
 
     def _connect_profile(self, profile: dict[str, Any]):
         kwargs = {
             "host": profile["host"], "port": profile["port"], "dbname": profile["dbname"],
             "user": profile["user"], "password": profile["password"], "sslmode": profile["sslmode"],
-            "connect_timeout": profile["timeout"], "application_name": "schemii",
+            "connect_timeout": profile["timeout"], "application_name": self._application_name,
         }
         try:
             if self._connect_factory is not None:
-                return self._connect_factory(**kwargs)
-            import psycopg
-            from psycopg.rows import dict_row
-            return psycopg.connect(**kwargs, row_factory=dict_row)
+                connection = self._connect_factory(**kwargs)
+            else:
+                import psycopg
+                from psycopg.rows import dict_row
+                connection = psycopg.connect(**kwargs, row_factory=dict_row)
         except Exception as exc:
+            self._record_target_connection(profile, False)
             raise PostgresServiceError(502, "connection_failed", "PostgreSQL connection failed") from exc
+        self._record_target_connection(profile, True)
+        return connection
 
     @staticmethod
     def _profile_fingerprint(profile: dict[str, Any]) -> str:
@@ -64,7 +65,13 @@ class PostgresConnectionMixin:
         cursor = connection.cursor()
         try:
             cursor.execute(query, params)
-            rows = cursor.fetchall()
+            fetchmany = getattr(cursor, "fetchmany", None)
+            rows = fetchmany(MAX_CATALOG_ROWS + 1) if fetchmany else cursor.fetchall()
+            if len(rows) > MAX_CATALOG_ROWS:
+                raise PostgresServiceError(
+                    422, "catalog_result_too_large", "PostgreSQL catalog result exceeds the item limit",
+                    {"policy": "reject", "path": "$", "limit": MAX_CATALOG_ROWS, "actual": len(rows)},
+                )
             if not rows:
                 return []
             if isinstance(rows[0], dict):
@@ -97,6 +104,13 @@ class PostgresConnectionMixin:
 
     _json_cell = staticmethod(_json_cell)
 
+    def _bounded_cell(self, value: Any, *, path: str, events: list[dict[str, Any]]) -> Any:
+        try:
+            return self._result_limiter.cell(value, path=path, events=events)
+        except ResultLimitError as exc:
+            raise PostgresServiceError(422, exc.code, exc.message, exc.details) from exc
+
+    @postgres_execution("catalog")
     def test_profile(self, profile_id: str) -> dict[str, Any]:
         connection = self._connect(profile_id)
         try:

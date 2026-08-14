@@ -190,6 +190,10 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["metadata"]["version"], 4)
 
+        status, body, _ = self.request("/api/schemas/summary", authorized=True)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"summaries": []})
+
     def test_ai_chat_uuid_is_distinct_from_external_opencode_session(self):
         self.store.save(
             "schema_one", {"id": "schema_one", "schema": {"projectName": "Display title", "tables": [], "relationships": [], "functions": []}},

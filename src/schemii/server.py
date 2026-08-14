@@ -33,6 +33,7 @@ from .postgres_service import PostgresService, PostgresServiceError
 from .postgres_console import ConsolePolicy
 from .schema_store import SchemaStore, SchemaStoreError
 from .server_runtime import begin_http_shutdown, parse_port, parse_proxy_setting, run_server, validate_static_directory
+from .readiness import readiness_report
 
 
 AI_CONTEXT_SIZE = 64 * 1024
@@ -467,10 +468,8 @@ def make_handler(
             parsed = urlparse(self.path)
             path = parsed.path
             if path == "/api/readiness":
-                try:
-                    return self.send_json(200, {"ready": True, "metadata": ai_authority.health()})
-                except MetadataStoreError as error:
-                    return self.send_json(error.status, {"ready": False, **error.to_dict()})
+                status, report = readiness_report(ai_authority, ai_service, service)
+                return self.send_json(status, report)
             if self._handle_common_get(path) or self._handle_postgres_get(parsed):
                 return
             plan_status = MIGRATION_PLAN_STATUS_PATH.fullmatch(path)
@@ -485,6 +484,10 @@ def make_handler(
                 if not self._authorize_local_api("Schema API", "Schema API session token is missing or invalid"):
                     return
                 return self._schema_call(lambda: {"schemas": store.list()})
+            if path == "/api/schemas/summary":
+                if not self._authorize_local_api("Schema API", "Schema API session token is missing or invalid"):
+                    return
+                return self._schema_call(lambda: {"summaries": store.list_summaries()})
             schema_id = self._schema_id()
             if schema_id is not None:
                 if not self._authorize_local_api("Schema API", "Schema API session token is missing or invalid"):
@@ -521,7 +524,9 @@ def make_handler(
                     return self.send_json(400, {"error": {"code": "validation_error", "message": "Reconcile request fields are invalid"}})
                 if migration_coordinator is None:
                     return self.send_json(503, {"error": {"code": "durable_migrations_unavailable", "message": "Durable migration metadata is unavailable"}})
-                return self._service_call(lambda: migration_coordinator.reconcile(reconcile_match.group(1)))
+                return self._service_call(lambda: self._run_postgres_write(
+                    lambda: migration_coordinator.reconcile(reconcile_match.group(1)),
+                ))
             if path == "/api/shutdown":
                 if not self._authorize_shutdown():
                     return
@@ -553,9 +558,9 @@ def make_handler(
                     return self.send_json(400, {"error": {"code": "validation_error", "message": "Migration apply request fields are invalid"}})
                 if migration_coordinator is None:
                     return self.send_json(503, {"error": {"code": "durable_migrations_unavailable", "message": "Durable migration metadata is unavailable"}})
-                return self._service_call(lambda: migration_coordinator.apply(
+                return self._service_call(lambda: self._run_postgres_write(lambda: migration_coordinator.apply(
                     apply_match.group(2), body["reviewDigest"], body["confirmDestructive"], expected_profile_id=apply_match.group(1),
-                ))
+                )))
             if view_preview_match:
                 common_fields = {
                     "schemaId", "expectedSchemaRevision", "layoutToken", "database", "namespace",
@@ -596,17 +601,25 @@ def make_handler(
                 return self.send_json(400, {"error": {"code": "validation_error", "message": "Migration preview request fields are invalid"}})
             if migration_coordinator is None:
                 return self.send_json(503, {"error": {"code": "durable_migrations_unavailable", "message": "Durable migration metadata is unavailable"}})
-            return self._service_call(lambda: migration_coordinator.preview_full(
+            return self._service_call(lambda: self._run_postgres_write(lambda: migration_coordinator.preview_full(
                 profile_id, body["namespace"], body["schemaId"], body["expectedRevision"], body["layoutToken"], body["allowDestructive"],
-            ))
+            )))
 
         def _view_mutation_call(self, callback):
             try:
-                self.send_json(200, callback())
+                self.send_json(200, self._run_postgres_write(callback))
             except SchemaStoreError as error:
                 self.send_json(error.status, error.payload)
             except PostgresServiceError as error:
                 self.send_json(error.status, error.to_dict())
+
+        @staticmethod
+        def _run_postgres_write(callback):
+            execution = getattr(service, "execution", None)
+            if execution is None:
+                return callback()
+            with execution("write"):
+                return callback()
 
         def _ai_message(self, current_ai_service, session_id: str, body: dict):
             allowed = {"text", "model", "expectedRevision", "resultRef"}
@@ -1175,7 +1188,7 @@ def main() -> None:
     if not 1 <= ai_timeout <= 300:
         raise SystemExit("SCHEMII_OPENCODE_TIMEOUT must be from 1 to 300 seconds")
     validate_static_directory(web_dir)
-    service = PostgresService(config_dir)
+    service = PostgresService(config_dir, application_name="schemii")
     store = SchemaStore(schema_dir)
     try:
         metadata_config = MetadataConfig.from_env()

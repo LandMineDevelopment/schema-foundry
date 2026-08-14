@@ -37,7 +37,9 @@ from .postgres_catalog import PostgresCatalogMixin
 from .postgres_connections import PostgresConnectionMixin
 from .postgres_safety import namespace_lock_keys
 from .postgres_console import ConsolePolicy, PostgresConsole, single_sql_statement, top_level_semicolons
+from .postgres_concurrency import PostgresExecutionController, postgres_execution
 from .relation_source import RelationSourceValidationError, normalize_relation_source
+from .result_limits import ResultLimitError, ResultLimiter, ResultLimits
 from .widget_query import (
     QueryValidationError,
     compile_detail_query,
@@ -275,6 +277,8 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         plan_ttl_seconds: int = 900,
         lock_timeout_ms: int = 5000,
         statement_timeout_ms: int = 30000,
+        application_name: str = "schemii",
+        execution_controller: PostgresExecutionController | None = None,
         clock: Callable[[], float] = time.time,
     ):
         if not isinstance(plan_ttl_seconds, int) or plan_ttl_seconds < 1:
@@ -283,6 +287,8 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             raise ValueError("lock_timeout_ms must be a positive integer")
         if not isinstance(statement_timeout_ms, int) or statement_timeout_ms < 1:
             raise ValueError("statement_timeout_ms must be a positive integer")
+        if not isinstance(application_name, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,63}", application_name):
+            raise ValueError("application_name is invalid")
         self.config_dir = Path(config_dir)
         self.profile_path = self.config_dir / "postgres_profiles.json"
         self.profile_lock_path = self.config_dir / ".postgres_profiles.lock"
@@ -294,6 +300,10 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         self._plan_ttl = plan_ttl_seconds
         self._lock_timeout_ms = lock_timeout_ms
         self._statement_timeout_ms = statement_timeout_ms
+        self._application_name = application_name
+        self._execution_controller = execution_controller or PostgresExecutionController()
+        self._result_limiter = ResultLimiter(ResultLimits())
+        self._target_health: dict[str, dict[str, Any]] = {}
         self._clock = clock
         self._temporal_series_secret = secrets.token_bytes(32)
         self._lock = threading.RLock()
@@ -308,7 +318,8 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         return _profile_context_fingerprint(profile_id, self._profile(profile_id))
 
     def execute_console(self, profile_id: str, payload: Any, binding: str, server_id: str, policy: ConsolePolicy | None = None) -> dict[str, Any]:
-        return self._console.execute(profile_id, payload, binding, server_id, policy or ConsolePolicy(statement_timeout_ms=self._statement_timeout_ms))
+        with self.execution("console"):
+            return self._console.execute(profile_id, payload, binding, server_id, policy or ConsolePolicy(statement_timeout_ms=self._statement_timeout_ms))
 
     def cancel_console(self, profile_id: str, execution_id: Any, binding: str, server_id: str) -> dict[str, bool]:
         return self._console.cancel(profile_id, execution_id, binding, server_id)
@@ -321,6 +332,57 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
 
     def close(self) -> None:
         self._console.close()
+        self._execution_controller.close()
+
+    def execution(self, execution_class: str):
+        return self._execution_controller.execution(execution_class)
+
+    def execution_metrics(self) -> dict[str, Any]:
+        return self._execution_controller.snapshot()
+
+    def _record_target_connection(self, profile: dict[str, Any], healthy: bool) -> None:
+        profile_id = profile.get("id")
+        if not isinstance(profile_id, str):
+            profile_id = next((key for key, value in self._read_profiles().items() if value == profile), None)
+        if isinstance(profile_id, str):
+            with self._lock:
+                self._target_health[profile_id] = {
+                    "status": "available" if healthy else "degraded",
+                    "observedAt": _utc_now(),
+                }
+
+    def target_readiness(self) -> dict[str, Any]:
+        profiles = self.list_profiles()
+        with self._lock:
+            observed = {item["id"]: dict(self._target_health.get(item["id"], {"status": "unknown"})) for item in profiles}
+        return {
+            "required": False,
+            "status": "degraded" if any(item["status"] == "degraded" for item in observed.values()) else "available",
+            "configured": len(profiles),
+            "profiles": observed,
+        }
+
+    @staticmethod
+    def _limit_error(exc: ResultLimitError) -> PostgresServiceError:
+        return PostgresServiceError(422, exc.code, exc.message, exc.details)
+
+    def _limited_rows(
+        self, rows: list[Any], aliases: list[str], *, max_rows: int,
+        envelope: Callable[[list[list[Any]]], Any] | None = None,
+    ) -> dict[str, Any]:
+        try:
+            return self._result_limiter.rows(rows, aliases, max_rows=max_rows, envelope=envelope)
+        except ResultLimitError as exc:
+            raise self._limit_error(exc) from exc
+
+    def _limited_records(
+        self, rows: list[Any], aliases: list[str], *, max_rows: int,
+        envelope: Callable[[list[dict[str, Any]]], Any] | None = None,
+    ) -> dict[str, Any]:
+        try:
+            return self._result_limiter.records(rows, aliases, max_rows=max_rows, envelope=envelope)
+        except ResultLimitError as exc:
+            raise self._limit_error(exc) from exc
 
     # ---- profiles -------------------------------------------------------
 
@@ -678,6 +740,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             },
         }
 
+    @postgres_execution("catalog")
     def verify_relation_source(self, profile_id: str, source: Any) -> dict[str, Any]:
         database, namespace, relation, kind, fingerprint, expected_columns = self._validate_relation_source(profile_id, source)
         connection = self._connect(profile_id)
@@ -719,6 +782,57 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         finally:
             self._close(connection)
 
+    @postgres_execution("catalog")
+    def verify_relation_sources(self, profile_id: str, sources: Any) -> dict[str, Any]:
+        if not isinstance(sources, list) or not 1 <= len(sources) <= 50:
+            raise ValidationError("sources must contain from 1 to 50 relation sources")
+        normalized = [self._validate_relation_source(profile_id, source) for source in sources]
+        connection = self._connect(profile_id)
+        try:
+            self._execute_statement(connection, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            results = []
+            for source, (database, namespace, relation, kind, fingerprint, expected_columns) in zip(sources, normalized):
+                try:
+                    descriptor = self._inspect_relation_connection(
+                        connection, profile_id, database, namespace, relation, None, None,
+                    )
+                except NotFoundError:
+                    results.append({
+                        "source": source, "status": "missing", "matches": False,
+                        "missingColumns": [column["name"] for column in expected_columns or []],
+                        "addedColumns": [], "changedColumns": [],
+                    })
+                    continue
+                current_columns = {column["name"]: column for column in descriptor["columns"]}
+                saved_columns = {column["name"]: column for column in expected_columns or []}
+                changed = [{
+                    "name": name,
+                    "changes": [field for field in ("type", "nullable", "ordinal") if saved_columns[name][field] != current_columns[name][field]],
+                } for name in sorted(set(saved_columns) & set(current_columns))]
+                changed = [item for item in changed if item["changes"]]
+                matches = descriptor["kind"] == kind and descriptor["fingerprint"] == fingerprint
+                results.append({
+                    "source": source, "status": "verified" if matches else "changed", "matches": matches,
+                    "expectedKind": kind, "currentKind": descriptor["kind"],
+                    "expectedFingerprint": fingerprint, "currentFingerprint": descriptor["fingerprint"],
+                    "missingColumns": sorted(set(saved_columns) - set(current_columns)),
+                    "addedColumns": sorted(set(current_columns) - set(saved_columns)) if expected_columns is not None else [],
+                    "changedColumns": changed,
+                })
+            connection.rollback()
+            return {"results": results, "snapshot": "repeatable_read"}
+        except PostgresServiceError:
+            raise
+        except Exception as exc:
+            raise PostgresServiceError(502, "introspection_failed", "PostgreSQL relation sources could not be verified") from exc
+        finally:
+            try:
+                connection.rollback()
+            except Exception:
+                pass
+            self._close(connection)
+
+    @postgres_execution("read")
     def preview_relation_rows(
         self, profile_id: str, source: Any, offset: int = 0, limit: int = 20
     ) -> dict[str, Any]:
@@ -741,14 +855,17 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                 connection, f"SELECT {column_sql} FROM {relation_sql} LIMIT %s OFFSET %s", (limit + 1, offset)
             )
             has_more = len(rows) > limit
-            page = rows[:limit]
+            limited = self._limited_records(rows, column_names, max_rows=limit)
+            page = limited["rows"]
             return {
                 **descriptor,
-                "rows": [{key: self._json_cell(value) for key, value in row.items()} for row in page],
+                "rows": page,
                 "offset": offset,
                 "nextOffset": offset + len(page),
-                "hasMore": has_more,
+                "hasMore": has_more or limited["truncated"],
                 "stableOrder": False,
+                "truncated": has_more or limited["truncated"],
+                "limitEvents": limited["limitEvents"],
             }
         except PostgresServiceError:
             raise
@@ -757,6 +874,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         finally:
             self._close(connection)
 
+    @postgres_execution("read")
     def execute_widget_query(self, profile_id: str, source: Any, query: Any) -> dict[str, Any]:
         database, namespace, relation, kind, fingerprint, source_columns = self._validate_relation_source(profile_id, source)
         if source_columns is None:
@@ -790,10 +908,8 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             limit = normalized_query["limit"]
             truncated = len(rows) > limit
             page = rows[:limit]
-            result_rows = [
-                [self._json_cell(row.get(alias)) for alias in compiled["aliases"]]
-                for row in page
-            ]
+            limited = self._limited_rows(rows, compiled["aliases"], max_rows=limit)
+            result_rows = limited["rows"]
             connection.rollback()
             return {
                 "source": {key: source[key] for key in ("profileId", "database", "namespace", "relation", "kind", "fingerprint")},
@@ -802,7 +918,8 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                 "rows": result_rows,
                 "rowCount": len(result_rows),
                 "limit": limit,
-                "truncated": truncated,
+                "truncated": truncated or limited["truncated"],
+                "limitEvents": limited["limitEvents"],
                 "sql": compiled["sql"],
                 "parameters": [self._json_cell(value) for value in compiled["parameters"]],
                 "queryDurationMs": max(0, round((time.perf_counter() - started) * 1000)),
@@ -832,6 +949,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         finally:
             self._close(connection)
 
+    @postgres_execution("read")
     def execute_temporal_series(
         self, profile_id: str, source: Any, query: Any, action: Any, refresh_generation: Any,
         series: Any = None, window_start: Any = None,
@@ -1008,12 +1126,9 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             rows = self._execute_rows(connection, compiled["sql"], tuple(compiled["parameters"]))
             if len(rows) > maximum_rows:
                 raise PostgresServiceError(422, "temporal_window_too_dense", "The temporal series window returned more than one row per bucket")
-            result_rows = [
-                [_series_iso(_series_datetime(row.get(compiled["aliases"][0]))), *[
-                    self._json_cell(row.get(alias)) for alias in compiled["aliases"][1:]
-                ]]
-                for row in rows
-            ]
+            temporal_rows = [{**row, compiled["aliases"][0]: _series_iso(_series_datetime(row.get(compiled["aliases"][0])))} for row in rows]
+            limited = self._limited_rows(temporal_rows, compiled["aliases"], max_rows=maximum_rows)
+            result_rows = limited["rows"]
             connection.rollback()
             return {
                 "seriesVersion": 1,
@@ -1022,6 +1137,8 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                 "columns": compiled["columns"],
                 "rows": result_rows,
                 "rowCount": len(result_rows),
+                "truncated": limited["truncated"],
+                "limitEvents": limited["limitEvents"],
                 "refreshGeneration": refresh_generation,
                 "sql": compiled["sql"],
                 "parameters": [self._json_cell(value) for value in compiled["parameters"]],
@@ -1052,6 +1169,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         finally:
             self._close(connection)
 
+    @postgres_execution("read")
     def execute_relation_detail(
         self,
         profile_id: str,
@@ -1103,10 +1221,8 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             count_rows = self._execute_rows(connection, compiled["countSql"], tuple(compiled["countParameters"]))
             matching_row_count = int(count_rows[0]["__schemer_count"]) if count_rows else 0
             rows = self._execute_rows(connection, compiled["sql"], tuple(compiled["parameters"]))
-            result_rows = [
-                [self._json_cell(row.get(alias)) for alias in compiled["aliases"]]
-                for row in rows
-            ]
+            limited = self._limited_rows(rows, compiled["aliases"], max_rows=normalized_request["limit"])
+            result_rows = limited["rows"]
             connection.rollback()
             duration_ms = max(0, round((time.perf_counter() - started) * 1000))
             return {
@@ -1119,6 +1235,8 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                 "offset": normalized_request["offset"],
                 "limit": normalized_request["limit"],
                 "hasMore": normalized_request["offset"] + len(result_rows) < matching_row_count,
+                "truncated": limited["truncated"],
+                "limitEvents": limited["limitEvents"],
                 "sql": compiled["sql"],
                 "parameters": [self._json_cell(value) for value in compiled["parameters"]],
                 "countSql": compiled["countSql"],
@@ -1142,6 +1260,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         finally:
             self._close(connection)
 
+    @postgres_execution("read")
     def preview_table_data(
         self,
         profile_id: str,
@@ -1193,7 +1312,9 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                 (limit + 1, offset),
             )
             has_more = len(rows) > limit
-            page = rows[:limit]
+            column_names = [column["column_name"] for column in columns]
+            limited = self._limited_records(rows, column_names, max_rows=limit)
+            page = limited["rows"]
             return {
                 "namespace": namespace,
                 "table": table_name,
@@ -1207,13 +1328,12 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                     for column in columns
                 ],
                 "primaryKey": primary_key,
-                "rows": [
-                    {key: self._json_cell(value) for key, value in row.items()}
-                    for row in page
-                ],
+                "rows": page,
                 "offset": offset,
                 "nextOffset": offset + len(page),
-                "hasMore": has_more,
+                "hasMore": has_more or limited["truncated"],
+                "truncated": has_more or limited["truncated"],
+                "limitEvents": limited["limitEvents"],
                 "stableOrder": bool(primary_key),
             }
         except PostgresServiceError:
@@ -1223,6 +1343,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         finally:
             self._close(connection)
 
+    @postgres_execution("read")
     def execute_read_only_sql(
         self,
         profile_id: str,
@@ -1286,32 +1407,37 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             fetchmany = getattr(cursor, "fetchmany", None)
             raw_rows = fetchmany(max_rows + 1) if fetchmany else cursor.fetchall()[:max_rows + 1]
             truncated = len(raw_rows) > max_rows
-            raw_rows = raw_rows[:max_rows]
-            rows = []
+            limits = ResultLimits(
+                max_cell_bytes=self._result_limiter.limits.max_cell_bytes,
+                max_row_bytes=self._result_limiter.limits.max_row_bytes,
+                max_result_bytes=max_result_bytes,
+                max_nesting=self._result_limiter.limits.max_nesting,
+                max_collection_items=self._result_limiter.limits.max_collection_items,
+            )
+            limiter = ResultLimiter(limits)
             base = {
                 "profileId": profile_id,
                 "database": database,
                 "namespace": namespace,
                 "columns": [{"name": name} for name in names],
-                "rows": rows,
+                "rows": [],
                 "rowCount": 0,
                 "truncated": truncated,
                 "maxRows": max_rows,
                 "maxColumns": max_columns,
                 "maxResultBytes": max_result_bytes,
             }
-            for row in raw_rows:
-                values = [row.get(name) for name in names] if isinstance(row, dict) else list(row)
-                candidate = [self._json_cell(value) for value in values]
-                base["rows"] = [*rows, candidate]
-                base["rowCount"] = len(rows) + 1
-                if len(json.dumps(base, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")) > max_result_bytes:
-                    truncated = True
-                    break
-                rows.append(candidate)
-            base["rows"] = rows
-            base["rowCount"] = len(rows)
-            base["truncated"] = truncated
+            try:
+                limited = limiter.rows(
+                    raw_rows, names, max_rows=max_rows,
+                    envelope=lambda values: {**base, "rows": values, "rowCount": len(values)},
+                )
+            except ResultLimitError as exc:
+                raise self._limit_error(exc) from exc
+            base["rows"] = limited["rows"]
+            base["rowCount"] = len(limited["rows"])
+            base["truncated"] = truncated or limited["truncated"]
+            base["limitEvents"] = limited["limitEvents"]
             if len(json.dumps(base, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")) > max_result_bytes:
                 raise PostgresServiceError(422, "sql_result_too_large", "SQL result metadata exceeds the byte limit")
             return base
@@ -1373,6 +1499,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             raise ValidationError("relation must be a valid PostgreSQL name up to 63 bytes")
         return table_name
 
+    @postgres_execution("catalog")
     def introspect(self, profile_id: str, namespace: str) -> dict[str, Any]:
         namespace = self._validate_namespace(namespace)
         connection = self._connect(profile_id)
@@ -1498,6 +1625,32 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
             WHERE n.nspname=%s AND NOT t.tgisinternal ORDER BY c.relname, t.tgname
         """, (namespace,))
+        collections = {
+            "tables": table_rows, "columns": columns, "constraints": constraints, "indexes": indexes,
+            "routines": routines, "views": views, "triggers": triggers,
+        }
+        for label, rows in collections.items():
+            if len(rows) > self._result_limiter.limits.max_collection_items:
+                raise PostgresServiceError(
+                    422, "catalog_collection_too_large", "PostgreSQL catalog collection exceeds the item limit",
+                    {"policy": "reject", "path": f"$.{label}", "limit": self._result_limiter.limits.max_collection_items, "actual": len(rows)},
+                )
+        for label, rows, fields in (
+            ("columns", columns, ("default_sql",)),
+            ("constraints", constraints, ("definition",)),
+            ("indexes", indexes, ("definition",)),
+            ("routines", routines, ("identity_arguments", "arguments", "return_type", "definition")),
+            ("views", views, ("query_definition",)),
+            ("triggers", triggers, ("definition",)),
+        ):
+            for index, row in enumerate(rows):
+                for field in fields:
+                    value = row.get(field)
+                    if isinstance(value, str) and len(value.encode("utf-8")) > self._result_limiter.limits.max_cell_bytes:
+                        raise PostgresServiceError(
+                            422, "catalog_definition_too_large", "PostgreSQL catalog definition exceeds the byte limit",
+                            {"policy": "reject", "path": f"$.{label}[{index}].{field}", "limit": self._result_limiter.limits.max_cell_bytes, "actual": len(value.encode("utf-8"))},
+                        )
         return self._build_schema(
             profile_id, namespace, meta, columns, constraints, indexes, routines, views, triggers,
             [row["table_name"] for row in table_rows], table_rows,
@@ -1729,6 +1882,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         except KeyError as exc:
             raise ValidationError(f"Constraint on table {table['name']} references an unknown column ID") from exc
 
+    @postgres_execution("write")
     def preview(
         self, profile_id: str, namespace: str, desired_schema: dict[str, Any], allow_destructive: bool = False,
         *, persist: bool = True,
@@ -1768,6 +1922,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             public.update({"id": None, "previewOnly": True})
         return public
 
+    @postgres_execution("write")
     def preview_ai_migration(
         self, operation_id: str, profile_id: str, database: str, namespace: str, desired_schema: dict[str, Any],
         allow_destructive: bool, schema_binding: dict[str, Any],
@@ -1808,6 +1963,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             self._write_ai_plan(stored)
             return {**self._public_plan(stored), "previewOnly": True, "applyPlanId": plan_id}
 
+    @postgres_execution("write")
     def preview_ai_insert_rows(
         self, operation_id: str, profile_id: str, database: str, namespace: str, relation: str,
         rows: list[dict[str, Any]], schema_binding: dict[str, Any],
@@ -1861,6 +2017,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             self._write_ai_plan(stored)
             return self._public_ai_write_plan(stored)
 
+    @postgres_execution("write")
     def preview_ai_create_view(
         self, operation_id: str, profile_id: str, database: str, namespace: str, relation: str,
         definition: str, schema_binding: dict[str, Any],
@@ -2028,6 +2185,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         payload["planDigest"] = canonical_fingerprint(payload)
         return payload
 
+    @postgres_execution("write")
     def apply_ai_migration(
         self, operation_id: str, plan_id: str, profile_id: str, database: str, namespace: str,
         expected_destructive: bool, confirm_destructive: bool,
@@ -2074,6 +2232,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             self._write_ai_plan(plan)
             return self._execute_ai_migration_locked(plan, connection, operation_id)
 
+    @postgres_execution("write")
     def apply_ai_postgres_write(
         self, operation_id: str, plan_id: str, profile_id: str, database: str, namespace: str,
         relation: str, expected_kind: str, expected_review_digest: str,
@@ -2424,6 +2583,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             self._write_ai_plan(plan)
             return copy.deepcopy(result)
 
+    @postgres_execution("write")
     def preview_view_mutation(
         self, profile_id: str, database: str, namespace: str, relation: str,
         operation: str, expectation: dict[str, Any], desired: dict[str, Any] | None, allow_destructive: bool,
@@ -3618,6 +3778,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             "operation": plan["operation"], "expectation": plan["expectation"],
         }
 
+    @postgres_execution("write")
     def apply_view_mutation(self, profile_id: str, plan_id: str, confirm_destructive: bool = False) -> dict[str, Any]:
         if self._migration_coordinator is not None:
             status = self._migration_coordinator.status(plan_id)
@@ -3798,6 +3959,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             result["warnings"] = [history_warning]
         return result
 
+    @postgres_execution("write")
     def apply(self, profile_id: str, plan_id: str, confirm_destructive: bool = False) -> dict[str, Any]:
         if self._migration_coordinator is not None:
             status = self._migration_coordinator.status(plan_id)

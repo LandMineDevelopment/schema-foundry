@@ -130,15 +130,15 @@ Agents must not duplicate another active agent's scope. Research findings that a
 
 ## Phase 6 — bounds, performance, and operability
 
-- [ ] Add per-cell, per-row, total-result, nesting, and catalog-definition limits across all data paths.
-- [ ] Add global PostgreSQL execution concurrency classes and backpressure.
-- [ ] Measure before deciding on connection pooling.
-- [ ] Batch bounded Schemer catalog hydration to avoid N+1 connections.
-- [ ] Deduplicate identical dashboard queries within one refresh generation where safe.
-- [ ] Preserve separate temporal snapshots; never claim cross-window consistency.
-- [ ] Add summary-list and exact-resource endpoints where full-library reloads are wasteful.
-- [ ] Use distinct PostgreSQL `application_name` values for Schemii, Schemer, and metadata authority.
-- [ ] Add operational health/readiness for metadata DB, target DB degradation, and OpenCode separately.
+- [x] Add per-cell, per-row, total-result, nesting, and catalog-definition limits across all data paths.
+- [x] Add global PostgreSQL execution concurrency classes and backpressure.
+- [x] Measure before deciding on connection pooling.
+- [x] Batch bounded Schemer catalog hydration to avoid N+1 connections.
+- [x] Deduplicate identical dashboard queries within one refresh generation where safe.
+- [x] Preserve separate temporal snapshots; never claim cross-window consistency.
+- [x] Add summary-list and exact-resource endpoints where full-library reloads are wasteful.
+- [x] Use distinct PostgreSQL `application_name` values for Schemii, Schemer, and metadata authority.
+- [x] Add operational health/readiness for metadata DB, target DB degradation, and OpenCode separately.
 
 ## Phase 7 — module ownership and cleanup
 

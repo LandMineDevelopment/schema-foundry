@@ -235,7 +235,7 @@ class OpenCodeService:
             raise OpenCodeServiceError(502, "opencode_error", "OpenCode returned an invalid response") from exc
 
     def health(self) -> dict[str, Any]:
-        result = self._request("GET", "/global/health")
+        result = self._request("GET", "/global/health", timeout=min(self.timeout, 2))
         if not isinstance(result, dict) or result.get("healthy") is not True or not isinstance(result.get("version"), str):
             raise OpenCodeServiceError(502, "opencode_error", "OpenCode returned an invalid health response")
         return {"healthy": True, "version": result["version"][:64]}

@@ -4,14 +4,18 @@ import re
 from typing import Any
 
 from .postgres_common import NotFoundError, PostgresServiceError, ValidationError, canonical_fingerprint
+from .postgres_concurrency import postgres_execution
 
 
 FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
 MAX_RELATION_DEFINITION_BYTES = 64 * 1024
 MAX_RELATION_LINEAGE_ITEMS = 500
+MAX_RELATIONS = 1000
+MAX_RELATION_COLUMNS = 1000
 
 
 class PostgresCatalogMixin:
+    @postgres_execution("catalog")
     def list_relations(self, profile_id: str, database: str, namespace: str) -> dict[str, Any]:
         database = self._validate_database(database)
         namespace = self._validate_namespace(namespace)
@@ -30,13 +34,20 @@ class PostgresCatalogMixin:
                 FROM pg_catalog.pg_class c
                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
                 WHERE n.nspname = %s AND c.relkind IN ('r', 'p', 'v', 'm')
-                ORDER BY relation_kind, c.relname
-            """, (namespace,))
+                 ORDER BY relation_kind, c.relname
+                 LIMIT %s
+            """, (namespace, MAX_RELATIONS + 1))
+            truncated = len(rows) > MAX_RELATIONS
             return {
                 "profileId": profile_id,
                 "database": current,
                 "namespace": namespace,
-                "relations": [{"name": row["relation_name"], "kind": row["relation_kind"]} for row in rows],
+                "relations": [{"name": row["relation_name"], "kind": row["relation_kind"]} for row in rows[:MAX_RELATIONS]],
+                "truncated": truncated,
+                "limitEvents": [{
+                    "code": "catalog_collection_truncated", "policy": "truncate", "path": "$.relations",
+                    "limit": MAX_RELATIONS, "actual": len(rows),
+                }] if truncated else [],
             }
         except PostgresServiceError:
             raise
@@ -49,6 +60,7 @@ class PostgresCatalogMixin:
                 pass
             self._close(connection)
 
+    @postgres_execution("catalog")
     def inspect_relation(
         self,
         profile_id: str,
@@ -145,8 +157,14 @@ class PostgresCatalogMixin:
                 JOIN pg_catalog.pg_type attribute_type ON attribute_type.oid = a.atttypid
                 LEFT JOIN pg_catalog.pg_type base_type ON base_type.oid = attribute_type.typbasetype
                 WHERE a.attrelid = %s AND a.attnum > 0 AND NOT a.attisdropped
-                ORDER BY a.attnum
+                 ORDER BY a.attnum
+                 LIMIT 1001
         """, (relation_row["live_oid"],))
+        if len(column_rows) > MAX_RELATION_COLUMNS:
+            raise PostgresServiceError(
+                422, "catalog_definition_too_large", "PostgreSQL relation has too many columns",
+                {"policy": "reject", "path": "$.columns", "limit": MAX_RELATION_COLUMNS, "actual": len(column_rows)},
+            )
         fingerprint_columns = [
             {
                 "name": row["column_name"],

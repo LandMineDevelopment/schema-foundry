@@ -1182,16 +1182,13 @@ function previewViewDefinition(definition, allowDestructive = false) {
 }
 
 async function reloadActiveSchemaRecord() {
-  const payload = await sharedSessionClient.json("/api/schemas", {}, {
-    allowPath: path => path === "/api/schemas",
+  const record = await sharedSessionClient.json(`/api/schemas/${encodeURIComponent(activeSchemaId)}`, {}, {
+    allowPath: window.SchemiiShared.createApiPathPredicate("/api/schemas"),
     defaultMessage: "The saved schema could not be refreshed",
-    validate: window.SchemiiShared.validateSchemasResponse
+    validate: window.SchemiiShared.validateSchemaRecord
   });
-  if (!Array.isArray(payload.schemas)) throw new Error("The saved schema could not be refreshed");
-  const record = payload.schemas.find(item => item.id === activeSchemaId);
-  if (!record) throw new Error("The active saved schema no longer exists");
   const library = readSchemaLibrary();
-  library.schemas = payload.schemas;
+  library.schemas = library.schemas.map(item => item.id === record.id ? record : item);
   library.activeId = activeSchemaId;
   writeSchemaLibrary(library);
   schema = migrateSchema(clone(record.schema));

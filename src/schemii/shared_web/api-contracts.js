@@ -85,6 +85,14 @@
     return payload;
   }
 
+  function validateDashboardSummariesResponse(payload) {
+    validateResourceSummariesResponse(payload);
+    if (payload.summaries.some(item => !nonEmptyString(item.title) || !Number.isInteger(item.revision) || typeof item.archived !== "boolean")) {
+      throw new ApiContractError("The dashboard summaries response contains an invalid dashboard", { contract: "dashboard summaries", payload });
+    }
+    return payload;
+  }
+
   function validateSchemaRecord(payload) {
     requireObject(payload, "schema");
     if (!nonEmptyString(payload.id) || !Number.isInteger(payload.revision) || payload.revision < 1 || !nonEmptyString(payload.layoutToken) || !isObject(payload.schema)) {
@@ -198,6 +206,7 @@
     validateProfilesResponse,
     validateQueryResultResponse,
     validateResourceSummariesResponse,
+    validateDashboardSummariesResponse,
     validateSchemaRecord,
     validateSchemasResponse,
     validateSchemaSaveResponse,

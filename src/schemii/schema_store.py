@@ -156,6 +156,19 @@ class SchemaStore:
         with self._lock:
             return [{**record, "layoutToken": schema_layout_token(record)} for _, record in self._records()]
 
+    def list_summaries(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [{
+                "id": record["id"], "revision": record.get("revision", 0),
+                "updatedAt": record.get("updatedAt"), "layoutToken": schema_layout_token(record),
+                "projectName": record["schema"].get("projectName", ""),
+                "tableCount": len(record["schema"].get("tables", [])),
+                "postgres": {
+                    key: record["schema"].get("postgres", {}).get(key)
+                    for key in ("sourceProfileId", "database", "namespace")
+                },
+            } for _, record in self._records()]
+
     def get(self, schema_id: str) -> dict[str, Any]:
         schema_id = self.validate_id(schema_id)
         with self._schema_guard(schema_id):

@@ -64,6 +64,13 @@ class ResultLimitTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ResultLimiter().rows([], [], max_rows=0)
 
+    def test_record_results_preserve_names_and_share_all_limits(self):
+        limiter = ResultLimiter(ResultLimits(max_collection_items=2, max_result_bytes=100))
+        result = limiter.records([{"payload": [1, 2, 3]}], ["payload"], max_rows=1)
+        self.assertEqual(result["rows"], [{"payload": [1, 2]}])
+        self.assertTrue(result["limitEvents"])
+        self.assertEqual(result["limitEvents"][0]["code"], "result_collection_truncated")
+
 
 if __name__ == "__main__":
     unittest.main()

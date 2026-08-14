@@ -51,6 +51,8 @@ Do not replace a launcher command with partial direct Compose commands. Launcher
 - Metadata migration, PostgreSQL, OpenCode, and Schemii readiness checks
 - Safe legacy-container reuse and an explicit stop when only ambiguous legacy volumes remain
 
+Application container health checks call `/api/readiness`, not the static root. The report keeps required metadata health separate from optional OpenCode and last-observed target health and includes process-local PostgreSQL admission metrics. Schemer depends on metadata migration and its own configured optional services; it does not depend on Schemii health.
+
 Rerun the same launcher command to start or update an installation. For Git updates:
 
 ```bash

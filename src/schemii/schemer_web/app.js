@@ -114,6 +114,8 @@ const widgetTemporalSeries = new Map();
 const widgetQueryExecutionTokens = new Map();
 const widgetTablePages = new Map();
 const executedSqlByResult = new Map();
+const detailRequestDedupe = new Map();
+let detailRequestDedupeGeneration = -1;
 const TEMPORAL_SERIES_PIXELS_PER_BUCKET = 28;
 let detailRequestToken = null;
 let detailContext = null;
@@ -317,7 +319,9 @@ function isMobileLayout() {
 async function dashboardRequest(path, options = {}) {
   try {
     const method = (options.method || "GET").toUpperCase();
-    const validate = path === "/api/dashboards" && method === "GET"
+    const validate = path === "/api/dashboards/summary" && method === "GET"
+      ? window.SchemiiShared.validateDashboardSummariesResponse
+      : path === "/api/dashboards" && method === "GET"
       ? window.SchemiiShared.validateDashboardsResponse
       : method === "DELETE" ? window.SchemiiShared.validateDeleteResponse
       : method === "PUT" || method === "POST" || method === "GET" && /^\/api\/dashboards\/[^/]+$/.test(path)
@@ -1603,17 +1607,27 @@ async function verifyDashboardSources() {
   renderDashboard();
   const uniqueSources = new Map(sourcedWidgets.map(widget => [JSON.stringify(widget.configuration.source), widget.configuration.source]));
   const results = new Map();
-  await Promise.all(Array.from(uniqueSources, async ([key, source]) => {
+  const sourcesByProfile = new Map();
+  for (const [key, source] of uniqueSources) {
+    const batch = sourcesByProfile.get(source.profileId) ?? [];
+    batch.push({ key, source });
+    sourcesByProfile.set(source.profileId, batch);
+  }
+  await Promise.all(Array.from(sourcesByProfile, async ([profileId, batch]) => {
     try {
-      const result = await postgres.request(`/api/postgres/profiles/${encodeURIComponent(source.profileId)}/relation/verify`, {
-        method: "POST", body: JSON.stringify({ source })
+      const payload = await postgres.request(`/api/postgres/profiles/${encodeURIComponent(profileId)}/relation/verify-batch`, {
+        method: "POST", body: JSON.stringify({ sources: batch.map(item => item.source) })
       });
-      results.set(key, result.matches ? { state: "verified" } : {
-        state: "error", code: result.status === "missing" ? "relation_missing" : "relation_changed",
-        message: sourceChangeMessage(result), details: result
-      });
+      for (const [index, item] of batch.entries()) {
+        const result = payload.results?.[index];
+        if (!result) throw new Error("Source verification returned an incomplete batch");
+        results.set(item.key, result.matches ? { state: "verified" } : {
+          state: "error", code: result.status === "missing" ? "relation_missing" : "relation_changed",
+          message: sourceChangeMessage(result), details: result
+        });
+      }
     } catch (error) {
-      results.set(key, { state: "error", code: error.code || "source_unavailable", message: error.message });
+      for (const item of batch) results.set(item.key, { state: "error", code: error.code || "source_unavailable", message: error.message });
     }
   }));
   if (generation !== sourceVerificationGeneration || activeDashboard?.id !== dashboardId) return;
@@ -2561,7 +2575,7 @@ function renderQueryResult(card, widget) {
   container.append(scroll, summary);
 }
 
-async function executeWidgetQuery(widget, query = widget.configuration?.query, { render = true, publish = true, visualization = widget.configuration?.visualization } = {}) {
+async function executeWidgetQuery(widget, query = widget.configuration?.query, { render = true, publish = true, visualization = widget.configuration?.visualization, dedupe = null } = {}) {
   if (!widget.configuration?.source || !query) return null;
   const dashboardId = activeDashboard?.id;
   const dashboardRevision = activeDashboard?.revision;
@@ -2579,9 +2593,17 @@ async function executeWidgetQuery(widget, query = widget.configuration?.query, {
     const body = savedExecution
       ? { dashboardId, expectedRevision: dashboardRevision, widgetId: widget.id }
       : { source: sourceSnapshot, query: executionQuerySnapshot, dashboardId, expectedRevision: dashboardRevision };
-    const result = await postgres.request(`/api/postgres/profiles/${encodeURIComponent(widget.configuration.source.profileId)}/${route}`, {
-      method: "POST", body: JSON.stringify(body)
-    });
+    const dedupeKey = dedupe && savedExecution ? JSON.stringify({
+      dashboardId, dashboardRevision, source: sourceSnapshot, query: querySnapshot, projection: executionQuerySnapshot,
+    }) : null;
+    let request = dedupeKey ? dedupe.get(dedupeKey) : null;
+    if (!request) {
+      request = postgres.request(`/api/postgres/profiles/${encodeURIComponent(widget.configuration.source.profileId)}/${route}`, {
+        method: "POST", body: JSON.stringify(body)
+      });
+      if (dedupeKey) dedupe.set(dedupeKey, request);
+    }
+    const result = await request;
     const currentWidget = activeDashboard?.dashboard.widgets.find(item => item.id === widget.id);
     const sourceCurrent = currentWidget === widget && JSON.stringify(widget.configuration?.source) === JSON.stringify(sourceSnapshot);
     const queryCurrent = !publish || JSON.stringify(widget.configuration?.query) === JSON.stringify(querySnapshot);
@@ -2610,11 +2632,12 @@ async function executeDashboardQueries() {
   const dashboardId = activeDashboard?.id;
   const generation = ++queryExecutionGeneration;
   const widgets = activeDashboard?.dashboard.widgets.filter(widget => widget.configuration?.query && sourceVerification.get(widget.id)?.state === "verified") ?? [];
+  const dedupe = new Map();
   for (const widget of widgets) widgetQueryResults.set(widget.id, { state: "loading", message: "Running verified aggregate query..." });
   if (widgets.length) renderDashboard();
   await Promise.all(widgets.map(async widget => {
     try {
-      await executeWidgetQuery(widget, widget.configuration.query, { render: false });
+      await executeWidgetQuery(widget, widget.configuration.query, { render: false, dedupe });
     } catch (_error) {
       // Each widget displays its own safe execution error.
     }
@@ -2743,13 +2766,14 @@ function renderDashboardList() {
     const copy = document.createElement("span");
     copy.textContent = record.dashboard.title;
     const count = document.createElement("small");
-    count.textContent = `${record.dashboard.widgets.length} widget${record.dashboard.widgets.length === 1 ? "" : "s"}`;
+    const widgetCount = record.summary ? record.widgetCount : record.dashboard.widgets.length;
+    count.textContent = `${widgetCount} widget${widgetCount === 1 ? "" : "s"}`;
     copy.append(count);
     button.append(marker, copy);
     button.addEventListener("click", async () => {
       try {
         await flushPendingSave();
-        openDashboard(record.id);
+        await openDashboardExact(record.id);
       } catch (_error) {
         // The save status already explains why navigation was blocked.
       }
@@ -2789,13 +2813,32 @@ function openDashboard(dashboardId) {
   verifyDashboardSources();
 }
 
+async function openDashboardExact(dashboardId) {
+  const record = dashboards.find(item => item.id === dashboardId);
+  if (record?.summary) {
+    const exact = await dashboardRequest(`/api/dashboards/${encodeURIComponent(dashboardId)}`);
+    dashboards = dashboards.map(item => item.id === exact.id ? exact : item);
+  }
+  openDashboard(dashboardId);
+}
+
 async function loadDashboards(preferredId = activeDashboard?.id) {
   try {
-    const payload = await dashboardRequest("/api/dashboards");
-    dashboards = payload.dashboards ?? [];
-    const preferred = dashboards.find(record => record.id === preferredId);
-    const fallback = dashboards.find(record => !record.dashboard.archived) ?? dashboards[0];
-    openDashboard((preferred ?? fallback)?.id ?? null);
+    const payload = await dashboardRequest("/api/dashboards/summary");
+    const summaries = payload.summaries ?? [];
+    const preferred = summaries.find(record => record.id === preferredId);
+    const fallback = summaries.find(record => !record.archived) ?? summaries[0];
+    const selected = preferred ?? fallback;
+    dashboards = summaries.map(item => ({
+      id: item.id, revision: item.revision, updatedAt: item.updatedAt,
+      summary: true, widgetCount: item.widgetCount,
+      dashboard: { title: item.title, archived: item.archived, widgets: [] },
+    }));
+    if (selected) {
+      const exact = await dashboardRequest(`/api/dashboards/${encodeURIComponent(selected.id)}`);
+      dashboards = dashboards.map(item => item.id === exact.id ? exact : item);
+    }
+    openDashboard(selected?.id ?? null);
   } catch (error) {
     setSaveStatus(error.message, "error");
     throw error;
@@ -3375,7 +3418,22 @@ async function requestDetailReport(context, preserveTable = false) {
   context.request = clone(request);
   try {
     const savedRequest = { dashboardId: context.dashboardId, expectedRevision: context.revision, widgetId: context.widgetId, selection: request.selection, offset: request.offset, limit: request.limit, sort: request.sort, searches: request.searches };
-    const result = await postgres.request(`/api/postgres/profiles/${encodeURIComponent(context.source.profileId)}/saved-widgets/detail`, { method: "POST", body: JSON.stringify(savedRequest) });
+    if (detailRequestDedupeGeneration !== queryExecutionGeneration) {
+      detailRequestDedupe.clear();
+      detailRequestDedupeGeneration = queryExecutionGeneration;
+    }
+    const dedupeKey = JSON.stringify({
+      dashboardId: context.dashboardId, revision: context.revision, source: context.source,
+      query: context.query, detail: requestDetail, selection: request.selection,
+      offset: request.offset, limit: request.limit, sort: request.sort, searches: request.searches,
+    });
+    let pending = detailRequestDedupe.get(dedupeKey);
+    if (!pending) {
+      if (detailRequestDedupe.size >= 100) detailRequestDedupe.delete(detailRequestDedupe.keys().next().value);
+      pending = postgres.request(`/api/postgres/profiles/${encodeURIComponent(context.source.profileId)}/saved-widgets/detail`, { method: "POST", body: JSON.stringify(savedRequest) });
+      detailRequestDedupe.set(dedupeKey, pending);
+    }
+    const result = await pending;
     const widget = activeDashboard?.dashboard.widgets.find(item => item.id === context.widgetId);
     const current = detailContext === context && detailRequestToken === token && activeDashboard?.id === context.dashboardId && activeDashboard.revision === context.revision && widget && JSON.stringify(widget.configuration?.source) === JSON.stringify(context.source) && JSON.stringify(queryForVisualization(widget.configuration.query, widget.configuration.visualization)) === JSON.stringify(context.query) && JSON.stringify(reconcileDetailReport(widget.configuration.source, widget.configuration.detail)) === JSON.stringify(context.detail);
     if (!current) return;
@@ -4020,7 +4078,7 @@ elements.mobileDashboardSelect.addEventListener("change", async () => {
   const dashboardId = elements.mobileDashboardSelect.value;
   try {
     await flushPendingSave();
-    openDashboard(dashboardId);
+    await openDashboardExact(dashboardId);
   } catch (_error) {
     elements.mobileDashboardSelect.value = activeDashboard?.id ?? "";
   }
