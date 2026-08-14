@@ -642,13 +642,22 @@ class SchemaStore:
                 raise SchemaStoreError(500, "schema_store_error", "Schema sync receipt could not be saved") from exc
         return result
 
-    def delete(self, schema_id: str) -> dict[str, str]:
+    def delete(self, schema_id: str, expected_revision: Any, layout_token: Any) -> dict[str, str]:
         schema_id = self.validate_id(schema_id)
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 1:
+            raise SchemaStoreError(400, "invalid_schema_binding", "expectedRevision is invalid")
+        if not isinstance(layout_token, str) or not LAYOUT_TOKEN_PATTERN.fullmatch(layout_token):
+            raise SchemaStoreError(400, "invalid_schema_binding", "layoutToken is invalid")
         with self._schema_guard(schema_id):
             found = self._find(schema_id)
-            if found:
-                try:
-                    found[0].unlink()
-                except OSError as exc:
-                    raise SchemaStoreError(500, "schema_store_error", "Schema file could not be deleted") from exc
+            if found is None:
+                raise SchemaStoreError(404, "not_found", "Schema was not found")
+            if found[1].get("revision", 0) != expected_revision:
+                raise SchemaStoreError(409, "schema_conflict", "Schema changed before it could be deleted", currentRevision=found[1].get("revision", 0))
+            if schema_layout_token(found[1]) != layout_token:
+                raise SchemaStoreError(409, "layout_conflict", "Saved layout changed before the schema could be deleted")
+            try:
+                found[0].unlink()
+            except OSError as exc:
+                raise SchemaStoreError(500, "schema_store_error", "Schema file could not be deleted") from exc
         return {"deleted": schema_id}

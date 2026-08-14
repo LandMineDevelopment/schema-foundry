@@ -139,7 +139,8 @@ class ExampleInstallerTests(unittest.TestCase):
         installer = ExampleInstaller(self.service, self.store, self.root / "config", "local")
         first = installer.initialize_once()
         self.assertEqual(first["installed"], [LOCAL_SCHEMA_ID])
-        self.store.delete(LOCAL_SCHEMA_ID)
+        current = self.store.get(LOCAL_SCHEMA_ID)
+        self.store.delete(LOCAL_SCHEMA_ID, current["revision"], current["layoutToken"])
 
         second = installer.initialize_once()
         self.assertEqual(second["installed"], [])

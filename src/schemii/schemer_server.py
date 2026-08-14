@@ -14,7 +14,8 @@ from .ai_authority import AiAuthorityError
 from .ai_actions import normalize_schemer_action
 from .ai_http import AiHttpRouter, authority_call, bounded_ai_query_result, issue_ai_proposals
 from .dashboard_store import DashboardStore, DashboardStoreError
-from .http_common import make_local_app_handler
+from .http_common import make_local_app_handler, metadata_profile_dependencies
+from .schema_store import SchemaStore
 from .opencode_service import OpenCodeService, OpenCodeServiceError
 from .metadata import MetadataConfig, MetadataConnectionFactory, MetadataStore, MetadataStoreError
 from .postgres_http import (
@@ -86,6 +87,24 @@ def _configured_ai_widget(service, action, operation_id, widget_count):
         if action["visualizationMode"] == "line" and not numeric:
             raise PostgresServiceError(409, "invalid_visualization", "Line chart results require at least one finite non-null point")
     return {"id": widget_id, "kind": "aggregate_report", "title": action["title"], "layout": {"desktop": {"x": 0, "y": 0, "w": 4, "h": 3}, "mobile": {"order": widget_count, "h": 3}}, "configuration": {"source": verified_source, "query": query, "table": table, "visualization": visualization, **({"detail": detail} if columns else {})}}
+
+
+def _saved_widget_projection(configuration):
+    query = configuration["query"]
+    visualization = configuration.get("visualization")
+    if not isinstance(visualization, dict) or visualization.get("mode") == "table":
+        return query
+    mode = visualization["mode"]
+    selection = visualization["selections"][mode]
+    dimension_ids = [] if mode == "kpi" else [selection.get("dimensionId")] if selection.get("dimensionId") else []
+    measure_ids = [selection["measureId"]] if mode == "donut" else selection["measureIds"]
+    target_ids = set(dimension_ids + measure_ids)
+    return {
+        **query,
+        "dimensions": [item for item in query["dimensions"] if item["id"] in dimension_ids],
+        "measures": [item for item in query["measures"] if item["id"] in measure_ids],
+        "sort": [item for item in query["sort"] if item["targetId"] in target_ids],
+    }
 from .schemer_examples import mercury_dashboard_from_service
 from .server_runtime import begin_http_shutdown, parse_port, parse_proxy_setting, run_server, validate_static_directory
 
@@ -150,6 +169,7 @@ def make_handler(
     server_id: str,
     ai_authority: SchemerMetadataAuthority,
     ai_service: OpenCodeService | None = None,
+    dependency_schema_store: SchemaStore | None = None,
     behind_loopback_proxy: bool = False,
 ):
     base_handler = make_local_app_handler(
@@ -270,6 +290,20 @@ def make_handler(
         def _authorize_dashboard(self) -> bool:
             return self._authorize_local_api("Dashboard API", "Dashboard session token is missing or invalid")
 
+        def _postgres_profile_dependency_impact(self, profile_id):
+            impact = {"schemas": [], "dashboards": [], "activeChats": [], "plans": [], "operations": []}
+            for record in dashboard_store.list():
+                widgets = [item["id"] for item in record["dashboard"]["widgets"] if item.get("configuration", {}).get("source", {}).get("profileId") == profile_id]
+                if widgets:
+                    impact["dashboards"].append({"id": record["id"], "revision": record["revision"], "name": record["dashboard"]["title"], "widgetIds": widgets})
+            if dependency_schema_store is not None:
+                for record in dependency_schema_store.list():
+                    postgres = record.get("schema", {}).get("postgres", {})
+                    if postgres.get("sourceProfileId") == profile_id:
+                        impact["schemas"].append({"id": record["id"], "revision": record.get("revision", 0), "name": record["schema"].get("projectName", "")})
+            impact.update(metadata_profile_dependencies(ai_authority, profile_id))
+            return impact
+
         @contextmanager
         def _postgres_dashboard_revision_guard(self, body):
             dashboard_id = body.get("dashboardId")
@@ -286,6 +320,53 @@ def make_handler(
         _postgres_read_sql_guard = _postgres_dashboard_revision_guard
         _postgres_relation_query_guard = _postgres_dashboard_revision_guard
         _postgres_relation_detail_guard = _postgres_dashboard_revision_guard
+
+        def _saved_widget(self, profile_id, body):
+            dashboard_id = body.get("dashboardId")
+            expected_revision = body.get("expectedRevision")
+            widget_id = body.get("widgetId")
+            if not isinstance(dashboard_id, str) or isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or not isinstance(widget_id, str):
+                raise PostgresServiceError(400, "validation_error", "Saved widget binding is invalid")
+            try:
+                guard = dashboard_store.guard_revision(dashboard_id, expected_revision)
+                record = guard.__enter__()
+            except DashboardStoreError as error:
+                detail = error.payload["error"]
+                raise PostgresServiceError(error.status, detail["code"], detail["message"]) from error
+            widget = next((item for item in record["dashboard"]["widgets"] if item["id"] == widget_id), None)
+            configuration = widget.get("configuration", {}) if widget else {}
+            if not widget or configuration.get("source", {}).get("profileId") != profile_id or not isinstance(configuration.get("query"), dict):
+                guard.__exit__(None, None, None)
+                raise PostgresServiceError(409, "saved_widget_changed", "The saved widget source or query is no longer available")
+            return guard, configuration
+
+        def _postgres_saved_widget_query(self, profile_id, body):
+            guard, configuration = self._saved_widget(profile_id, body)
+            try:
+                return service.execute_widget_query(profile_id, configuration["source"], _saved_widget_projection(configuration))
+            finally:
+                guard.__exit__(None, None, None)
+
+        def _postgres_saved_widget_detail(self, profile_id, body):
+            guard, configuration = self._saved_widget(profile_id, body)
+            try:
+                saved_detail = configuration.get("detail")
+                if not isinstance(saved_detail, dict):
+                    raise PostgresServiceError(409, "saved_widget_changed", "The saved widget detail projection is no longer available")
+                detail = {
+                    "version": 1,
+                    "columns": [
+                        {"id": f"detail_column_{index + 1}", "label": item["label"], "column": item["sourceColumn"], "numberFormat": item["numberFormat"], "searchable": item["searchable"]}
+                        for index, item in enumerate(saved_detail["columns"])
+                    ],
+                    "rowIdentifier": saved_detail["rowIdentifier"],
+                }
+                return service.execute_relation_detail(
+                    profile_id, configuration["source"], _saved_widget_projection(configuration), body["selection"],
+                    detail, body["offset"], body["limit"], body["sort"], body["searches"],
+                )
+            finally:
+                guard.__exit__(None, None, None)
 
         @contextmanager
         def _postgres_temporal_series_guard(self, body):
@@ -639,7 +720,7 @@ def make_handler(
                     self._dashboard_call(lambda: dashboard_store.save(dashboard_id, body))
                 return
             if not self._handle_postgres_put(path):
-                self.send_json(404, {"error": "Unknown API path"})
+                self.send_json(404, {"error": {"code": "not_found", "message": "Unknown API path"}})
 
         def do_DELETE(self):
             path = urlparse(self.path).path
@@ -648,10 +729,14 @@ def make_handler(
             dashboard_id = self._dashboard_id(path)
             if dashboard_id is not None:
                 if self._authorize_dashboard():
-                    self._dashboard_call(lambda: dashboard_store.delete(dashboard_id))
+                    body = self._body_or_error()
+                    if body is not None:
+                        if set(body) != {"expectedRevision"}:
+                            return self.send_json(400, {"error": {"code": "invalid_dashboard_binding", "message": "Dashboard deletion fields are invalid"}})
+                        self._dashboard_call(lambda: dashboard_store.delete(dashboard_id, body["expectedRevision"]))
                 return
             if not self._handle_postgres_delete(path):
-                self.send_json(404, {"error": "Unknown API path"})
+                self.send_json(404, {"error": {"code": "not_found", "message": "Unknown API path"}})
 
     return SchemerHandler
 
@@ -707,6 +792,7 @@ def main() -> None:
         secrets.token_urlsafe(32),
         server_id=server_id,
         ai_authority=SchemerMetadataAuthority(metadata_store, worker_id=f"schemer-{server_id}"),
+        dependency_schema_store=SchemaStore(Path(os.environ.get("SCHEMII_SCHEMA_DIR", "~/.local/share/schemii/schemas")).expanduser().resolve()),
         ai_service=ai_service,
         behind_loopback_proxy=behind_loopback_proxy,
     )

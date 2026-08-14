@@ -56,20 +56,24 @@ Plan status is available at `GET /api/postgres/migration-plans/{planId}/status`;
 
 ## Resource deletion
 
-Current schema, dashboard, and profile deletes are ID-only after browser confirmation.
-
-Target contracts require optimistic preconditions:
+Delete contracts use optimistic preconditions:
 
 - Schema: revision plus layout token.
 - Dashboard: revision.
 - Profile: context fingerprint plus server-generated dependency impact.
 
+Schema deletion sends `expectedRevision` and `layoutToken`; dashboard deletion sends `expectedRevision`. Profile deletion first fetches `GET /api/postgres/profiles/{id}/deletion-impact`, reviews the server-visible schemas, dashboards, active chats, plans, and operations, then sends the returned `profileFingerprint` and `impactFingerprint` in the `DELETE` body. Either digest changing produces a stale conflict. Profile deletion never deletes dependent resources.
+
 ## Schemer query execution
 
-Current aggregate/detail routes support caller-supplied draft source/query with an optional dashboard revision guard. Temporal execution reconstructs the exact saved widget projection.
+The `relation/query` and `relation/detail` routes remain caller-structured draft execution with optional dashboard revision context. `saved-widgets/aggregate` and `saved-widgets/detail` require dashboard ID, revision, and widget ID; the server loads the saved source, structured query, detail configuration, and visualization projection. Temporal execution retains its exact saved line-widget guard.
 
 Target distinction:
 
 - Draft relation execution remains caller-structured and target-verified.
 - Saved-widget execution requires dashboard/widget identity and server reconstruction.
-- Documentation and route names must not imply saved-widget authority for draft execution.
+- Documentation and route names do not imply saved-widget authority for draft execution.
+
+## HTTP errors and browser contracts
+
+Every API failure, including unknown routes and legacy handler failures, is normalized to `{ "error": { "code": "...", "message": "...", "retryable": false, "details": {} } }`; `retryable` and `details` are omitted when not applicable. Unexpected failures use generic text rather than exception or credential material. Shared browser validators reject malformed session, profile, catalog, plan, operation, schema, dashboard, deletion-impact, aggregate, and detail successes. Session bootstrap is single-flight, aborting one waiter does not cancel other waiters, and an invalid session response is retried at most once without allowing stale responses to clear a newer token.

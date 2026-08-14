@@ -690,11 +690,19 @@ class DashboardStore:
             upgraded["updatedAt"] = _utc_now()
             return self._write(validate_dashboard_record(upgraded, "dashboard_mercury"))
 
-    def delete(self, dashboard_id: str) -> dict[str, str]:
+    def delete(self, dashboard_id: str, expected_revision: Any) -> dict[str, str]:
         dashboard_id = self.validate_id(dashboard_id)
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 1:
+            raise DashboardStoreError(400, "invalid_dashboard_binding", "expectedRevision is invalid")
         with self._guard(dashboard_id):
+            path = self._path(dashboard_id)
+            if not path.is_file():
+                raise DashboardStoreError(404, "not_found", "Dashboard was not found")
+            current = self._read(path)
+            if current["revision"] != expected_revision:
+                raise DashboardStoreError(409, "dashboard_changed", "Dashboard changed before it could be deleted", currentRevision=current["revision"])
             try:
-                self._path(dashboard_id).unlink(missing_ok=True)
+                path.unlink()
             except OSError as exc:
                 raise DashboardStoreError(500, "dashboard_store_error", "Dashboard file could not be deleted") from exc
         return {"deleted": dashboard_id}

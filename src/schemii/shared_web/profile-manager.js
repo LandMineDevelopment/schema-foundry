@@ -65,8 +65,14 @@
           method: "POST", body: "{}",
         });
       },
-      remove(profileId) {
-        return postgresClient.request(`/api/postgres/profiles/${encodeURIComponent(profileId)}`, { method: "DELETE" });
+      deletionImpact(profileId) {
+        return postgresClient.request(`/api/postgres/profiles/${encodeURIComponent(profileId)}/deletion-impact`);
+      },
+      remove(profileId, preview) {
+        return postgresClient.request(`/api/postgres/profiles/${encodeURIComponent(profileId)}`, {
+          method: "DELETE",
+          body: JSON.stringify({ profileFingerprint: preview.profileFingerprint, impactFingerprint: preview.impactFingerprint }),
+        });
       },
       async namespaces(profileId) {
         const result = await postgresClient.request(`/api/postgres/profiles/${encodeURIComponent(profileId)}/namespaces`);

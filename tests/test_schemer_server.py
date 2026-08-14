@@ -223,9 +223,15 @@ class SchemerServerTests(unittest.TestCase):
                 "line": {"dimensionId": "dimension_date", "measureIds": ["measure_amount"]},
                 "donut": {"dimensionId": "dimension_date", "measureId": "measure_amount"},
             }},
+            "detail": {"version": 1, "columns": [{"sourceColumn": "ordered_on", "label": "Date", "width": 160, "hidden": False, "searchable": True, "numberFormat": {"style": "auto"}}], "defaultSort": None, "rowIdentifier": None, "pageSize": 25},
         }
         mercury = self.dashboard_store.save("dashboard_mercury", mercury)
         revision = mercury["revision"]
+        saved_query_path = "/api/postgres/profiles/shared/saved-widgets/aggregate"
+        saved_binding = {"dashboardId": "dashboard_mercury", "expectedRevision": revision, "widgetId": "widget_trend"}
+        self.assertEqual(self.request(saved_query_path, "POST", saved_binding, True)[0], 200)
+        self.assertEqual(self.request(saved_query_path, "POST", {**saved_binding, "source": preview_source}, True)[0], 400)
+        self.assertEqual(self.request(saved_query_path, "POST", {**saved_binding, "expectedRevision": revision + 1}, True)[0], 409)
         guarded_manifest = {**manifest, "source": series_source, "query": series_query, "dashboardId": "dashboard_mercury", "expectedRevision": revision, "widgetId": "widget_trend"}
         self.assertEqual(self.request(series_path, "POST", guarded_manifest, True)[0], 200)
         self.assertIn(("execute_temporal_series", "shared", guarded_manifest["source"], guarded_manifest["query"], "manifest", "refresh-one", None, None), self.service.calls)
@@ -263,6 +269,10 @@ class SchemerServerTests(unittest.TestCase):
         legacy_request = {key: value for key, value in detail_request.items() if key != "searches"}
         legacy_request["search"] = "old global search"
         self.assertEqual(self.request(detail_path, "POST", legacy_request, True)[0], 400)
+        saved_detail_path = "/api/postgres/profiles/shared/saved-widgets/detail"
+        saved_detail = {"dashboardId": "dashboard_mercury", "expectedRevision": revision, "widgetId": "widget_trend", "selection": {"dimensions": []}, "offset": 0, "limit": 20, "sort": None, "searches": []}
+        self.assertEqual(self.request(saved_detail_path, "POST", saved_detail, True)[0], 200)
+        self.assertEqual(self.request(saved_detail_path, "POST", {**saved_detail, "query": query}, True)[0], 400)
         self.assertIn(("test_profile", "shared"), self.service.calls)
 
     def test_schema_design_routes_are_not_exposed(self):
@@ -380,7 +390,7 @@ class SchemerServerTests(unittest.TestCase):
         self.assertEqual(status, 201)
         created = json.loads(body)
         self.assertEqual(created["dashboard"]["widgets"], [])
-        self.assertEqual(self.request(f"/api/dashboards/{created['id']}", "DELETE", authorized=True)[0], 200)
+        self.assertEqual(self.request(f"/api/dashboards/{created['id']}", "DELETE", {"expectedRevision": created["revision"]}, authorized=True)[0], 200)
 
     def test_mercury_reset_uses_live_view_and_preserves_layout(self):
         columns = [

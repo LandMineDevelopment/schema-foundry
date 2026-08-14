@@ -95,9 +95,17 @@ class DashboardStoreTests(unittest.TestCase):
         records = self.store.list()
         self.assertEqual([record["id"] for record in records], ["dashboard_mercury"])
         self.assertEqual(len(records[0]["dashboard"]["widgets"]), 6)
-        self.store.delete("dashboard_mercury")
+        self.store.delete("dashboard_mercury", records[0]["revision"])
         self.store.initialize_once()
         self.assertEqual(self.store.list(), [])
+
+    def test_delete_rejects_stale_revision(self):
+        self.store.initialize_once()
+        current = self.store.get("dashboard_mercury")
+        with self.assertRaises(DashboardStoreError) as error:
+            self.store.delete("dashboard_mercury", current["revision"] + 1)
+        self.assertEqual(error.exception.payload["error"]["code"], "dashboard_changed")
+        self.assertEqual(self.store.get("dashboard_mercury")["revision"], current["revision"])
 
     def test_live_mercury_template_has_six_executable_widgets(self):
         record = build_mercury_dashboard(MERCURY_DESCRIPTOR)

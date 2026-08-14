@@ -254,10 +254,7 @@ onboardingController = window.SchemiiShared.createOnboardingController({
 
 async function initializeOnboarding() {
   try {
-    const response = await fetch("/api/session");
-    const session = await response.json().catch(() => ({}));
-    if (!response.ok || !session.token) return;
-    if (!sessionToken) sessionToken = session.token;
+    const session = await sessionClient.bootstrap();
     onboardingController.initialize(session.serverId);
   } catch { /* Dashboard startup remains usable if the local session endpoint is unavailable. */ }
 }
@@ -319,12 +316,19 @@ function isMobileLayout() {
 
 async function dashboardRequest(path, options = {}) {
   try {
+    const method = (options.method || "GET").toUpperCase();
+    const validate = path === "/api/dashboards" && method === "GET"
+      ? window.SchemiiShared.validateDashboardsResponse
+      : method === "DELETE" ? window.SchemiiShared.validateDeleteResponse
+      : method === "PUT" || method === "POST" || method === "GET" && /^\/api\/dashboards\/[^/]+$/.test(path)
+        ? window.SchemiiShared.validateDashboardRecord : undefined;
     return await sessionClient.json(path, options, {
-      allowPath: value => typeof value === "string" && value.startsWith("/api/dashboards"),
-      defaultMessage: "Dashboard request failed"
+      allowPath: window.SchemiiShared.createApiPathPredicate("/api/dashboards"),
+      defaultMessage: "Dashboard request failed",
+      validate,
     });
   } catch (error) {
-    error.currentRevision = error.payload?.error?.currentRevision;
+    error.currentRevision = error.payload?.error?.details?.currentRevision;
     throw error;
   }
 }
@@ -2570,8 +2574,13 @@ async function executeWidgetQuery(widget, query = widget.configuration?.query, {
   if (publish) widgetQueryResults.set(widget.id, { state: "loading", message: "Running verified aggregate query..." });
   if (publish && render) renderDashboard();
   try {
-    const result = await postgres.request(`/api/postgres/profiles/${encodeURIComponent(widget.configuration.source.profileId)}/relation/query`, {
-      method: "POST", body: JSON.stringify({ source: sourceSnapshot, query: executionQuerySnapshot, dashboardId, expectedRevision: dashboardRevision })
+    const savedExecution = publish && query === widget.configuration?.query;
+    const route = savedExecution ? "saved-widgets/aggregate" : "relation/query";
+    const body = savedExecution
+      ? { dashboardId, expectedRevision: dashboardRevision, widgetId: widget.id }
+      : { source: sourceSnapshot, query: executionQuerySnapshot, dashboardId, expectedRevision: dashboardRevision };
+    const result = await postgres.request(`/api/postgres/profiles/${encodeURIComponent(widget.configuration.source.profileId)}/${route}`, {
+      method: "POST", body: JSON.stringify(body)
     });
     const currentWidget = activeDashboard?.dashboard.widgets.find(item => item.id === widget.id);
     const sourceCurrent = currentWidget === widget && JSON.stringify(widget.configuration?.source) === JSON.stringify(sourceSnapshot);
@@ -3365,7 +3374,8 @@ async function requestDetailReport(context, preserveTable = false) {
   };
   context.request = clone(request);
   try {
-    const result = await postgres.request(`/api/postgres/profiles/${encodeURIComponent(context.source.profileId)}/relation/detail`, { method: "POST", body: JSON.stringify(request) });
+    const savedRequest = { dashboardId: context.dashboardId, expectedRevision: context.revision, widgetId: context.widgetId, selection: request.selection, offset: request.offset, limit: request.limit, sort: request.sort, searches: request.searches };
+    const result = await postgres.request(`/api/postgres/profiles/${encodeURIComponent(context.source.profileId)}/saved-widgets/detail`, { method: "POST", body: JSON.stringify(savedRequest) });
     const widget = activeDashboard?.dashboard.widgets.find(item => item.id === context.widgetId);
     const current = detailContext === context && detailRequestToken === token && activeDashboard?.id === context.dashboardId && activeDashboard.revision === context.revision && widget && JSON.stringify(widget.configuration?.source) === JSON.stringify(context.source) && JSON.stringify(queryForVisualization(widget.configuration.query, widget.configuration.visualization)) === JSON.stringify(context.query) && JSON.stringify(reconcileDetailReport(widget.configuration.source, widget.configuration.detail)) === JSON.stringify(context.detail);
     if (!current) return;
@@ -3746,7 +3756,7 @@ async function deleteDashboard() {
   clearTimeout(saveTimer);
   saveTimer = null;
   saveTimerDashboardId = null;
-  await dashboardRequest(`/api/dashboards/${encodeURIComponent(dashboardId)}`, { method: "DELETE" });
+  await dashboardRequest(`/api/dashboards/${encodeURIComponent(dashboardId)}`, { method: "DELETE", body: JSON.stringify({ expectedRevision: activeDashboard.revision }) });
   activeDashboard = null;
   await loadDashboards();
 }

@@ -191,6 +191,10 @@
 .database-drift-banner .status-dot { background: var(--blue); box-shadow: 0 0 8px rgba(101, 169, 255, .55); }
 .database-drift-banner button { padding: 4px 7px; border: 1px solid #3d6078; border-radius: 4px; color: #cbe6f8; background: #172c3a; font-size: 9px; cursor: pointer; }
 .database-drift-banner button:last-child { padding: 1px 5px; border: 0; color: #7494aa; background: transparent; font-size: 15px; }
+.schema-conflict-banner { position: fixed; z-index: 90; top: 54px; left: 50%; display: flex; max-width: calc(100vw - 24px); align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid #7d3941; border-radius: 7px; color: #f0c4c8; background: #29171b; box-shadow: 0 12px 34px rgba(0,0,0,.5); font-size: 9px; transform: translateX(-50%); }
+.schema-conflict-banner[hidden] { display: none; }
+.schema-conflict-banner button { padding: 5px 7px; border: 1px solid #744047; border-radius: 4px; color: #f0d4d7; background: #351d22; font-size: 8px; cursor: pointer; }
+@media (max-width: 680px) { .schema-conflict-banner { top: 48px; width: calc(100vw - 24px); flex-wrap: wrap; justify-content: center; text-align: center; } }
 .canvas-hint { position: absolute; left: 17px; bottom: 14px; display: flex; align-items: center; gap: 7px; color: #505b69; font-size: 9px; text-transform: uppercase; letter-spacing: .08em; }
 .canvas-hint kbd { padding: 2px 5px; border: 1px solid #343c47; border-bottom-width: 2px; border-radius: 3px; color: #788493; background: #141920; font-family: inherit; }
 .canvas-hint span { width: 2px; height: 2px; margin: 0 3px; border-radius: 50%; background: #46515e; }

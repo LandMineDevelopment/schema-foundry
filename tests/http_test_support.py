@@ -75,8 +75,8 @@ class FakePostgresService:
         self.profiles = [saved]
         return saved
 
-    def delete_profile(self, profile_id):
-        self.calls.append(("delete_profile", profile_id))
+    def delete_profile(self, profile_id, expected_fingerprint=None):
+        self.calls.append(("delete_profile", profile_id, expected_fingerprint))
         return {"deleted": profile_id}
 
     def list_history(self, profile_id, limit):

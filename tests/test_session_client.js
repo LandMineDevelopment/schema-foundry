@@ -14,9 +14,9 @@ function response(ok, status, payload) {
 async function main() {
   const calls = [];
   const queue = [
-    response(true, 200, { token: "first" }),
+    response(true, 200, { token: "first", serverId: "server-one" }),
     response(false, 403, { error: { code: "invalid_session", message: "expired" } }),
-    response(true, 200, { token: "second" }),
+    response(true, 200, { token: "second", serverId: "server-two" }),
     response(true, 200, { profiles: [] })
   ];
   let token = null;

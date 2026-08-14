@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from urllib.parse import parse_qs
 
 from .postgres_console import ConsolePolicy
 
 
-PROFILE_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})(?:/(namespaces|relations|relation|fingerprint|test|introspect|preview))?$")
+PROFILE_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})(?:/(namespaces|relations|relation|fingerprint|test|introspect|preview|deletion-impact))?$")
 DATA_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/data$")
 SQL_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/sql$")
 CONSOLE_EXECUTIONS_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/console/executions$")
@@ -18,6 +20,8 @@ RELATION_VERIFY_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0
 RELATION_QUERY_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/relation/query$")
 RELATION_TEMPORAL_SERIES_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/relation/temporal-series$")
 RELATION_DETAIL_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/relation/detail$")
+SAVED_WIDGET_QUERY_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/saved-widgets/aggregate$")
+SAVED_WIDGET_DETAIL_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/saved-widgets/detail$")
 POSTGRES_PROFILE_CAPABILITY = "profiles"
 POSTGRES_CATALOG_CAPABILITY = "catalog"
 POSTGRES_SCHEMA_CAPABILITY = "schema"
@@ -55,6 +59,20 @@ class PostgresHttpMixin:
     def _has_postgres_capability(self, capability: str) -> bool:
         return capability in self.postgres_capabilities
 
+    def _postgres_profile_dependency_impact(self, profile_id: str) -> dict[str, list[dict]]:
+        return {"schemas": [], "dashboards": [], "activeChats": [], "plans": [], "operations": []}
+
+    def _profile_deletion_impact(self, profile_id: str) -> dict:
+        profile_fingerprint = self.service.profile_context_fingerprint(profile_id)
+        impact = self._postgres_profile_dependency_impact(profile_id)
+        encoded = json.dumps(impact, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        return {
+            "profileId": profile_id,
+            "profileFingerprint": profile_fingerprint,
+            "impact": impact,
+            "impactFingerprint": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+        }
+
     def _handle_postgres_get(self, parsed) -> bool:
         path = parsed.path
         if path == "/api/postgres/profiles" and self._has_postgres_capability(POSTGRES_PROFILE_CAPABILITY):
@@ -83,10 +101,13 @@ class PostgresHttpMixin:
         if profile_match and (
             (catalog_action and self._has_postgres_capability(POSTGRES_CATALOG_CAPABILITY))
             or (schema_action and self._has_postgres_capability(POSTGRES_SCHEMA_CAPABILITY))
+            or (action == "deletion-impact" and self._has_postgres_capability(POSTGRES_PROFILE_CAPABILITY))
         ):
             if not self._authorize_postgres():
                 return True
-            if profile_match.group(2) == "namespaces":
+            if profile_match.group(2) == "deletion-impact":
+                self._service_call(lambda: self._profile_deletion_impact(profile_match.group(1)))
+            elif profile_match.group(2) == "namespaces":
                 self._service_call(lambda: {"namespaces": self.service.list_namespaces(profile_match.group(1))})
             elif profile_match.group(2) == "relations":
                 query = parse_qs(parsed.query)
@@ -122,6 +143,8 @@ class PostgresHttpMixin:
         relation_query_match = RELATION_QUERY_PATH.fullmatch(path)
         relation_temporal_series_match = RELATION_TEMPORAL_SERIES_PATH.fullmatch(path)
         relation_detail_match = RELATION_DETAIL_PATH.fullmatch(path)
+        saved_widget_query_match = SAVED_WIDGET_QUERY_PATH.fullmatch(path)
+        saved_widget_detail_match = SAVED_WIDGET_DETAIL_PATH.fullmatch(path)
         profile_match = PROFILE_PATH.fullmatch(path)
         if sql_match and not self._has_postgres_capability(POSTGRES_READ_SQL_CAPABILITY):
             return False
@@ -129,20 +152,31 @@ class PostgresHttpMixin:
             return False
         if write_grants_match and not self._has_postgres_capability(POSTGRES_CONSOLE_WRITE_CAPABILITY):
             return False
-        if any((relation_preview_match, relation_verify_match, relation_query_match, relation_temporal_series_match, relation_detail_match)) and not self._has_postgres_capability(POSTGRES_RELATION_QUERY_CAPABILITY):
+        if any((relation_preview_match, relation_verify_match, relation_query_match, relation_temporal_series_match, relation_detail_match, saved_widget_query_match, saved_widget_detail_match)) and not self._has_postgres_capability(POSTGRES_RELATION_QUERY_CAPABILITY):
             return False
         if profile_match and profile_match.group(2) == "test" and not self._has_postgres_capability(POSTGRES_PROFILE_CAPABILITY):
             return False
         if profile_match and profile_match.group(2) == "introspect" and not self._has_postgres_capability(POSTGRES_SCHEMA_CAPABILITY):
             return False
-        if not sql_match and not console_match and not write_grants_match and not relation_preview_match and not relation_verify_match and not relation_query_match and not relation_temporal_series_match and not relation_detail_match and not (profile_match and profile_match.group(2) in {"test", "introspect"}):
+        if not sql_match and not console_match and not write_grants_match and not relation_preview_match and not relation_verify_match and not relation_query_match and not relation_temporal_series_match and not relation_detail_match and not saved_widget_query_match and not saved_widget_detail_match and not (profile_match and profile_match.group(2) in {"test", "introspect"}):
             return False
         if not self._authorize_postgres():
             return True
         body = self._body_or_error()
         if body is None:
             return True
-        if write_grants_match:
+        if saved_widget_query_match:
+            if set(body) != {"dashboardId", "expectedRevision", "widgetId"} or not hasattr(self, "_postgres_saved_widget_query"):
+                self.send_json(400, {"error": {"code": "validation_error", "message": "Saved widget aggregate fields are invalid"}})
+            else:
+                self._service_call(lambda: self._postgres_saved_widget_query(saved_widget_query_match.group(1), body))
+        elif saved_widget_detail_match:
+            fields = {"dashboardId", "expectedRevision", "widgetId", "selection", "offset", "limit", "sort", "searches"}
+            if set(body) != fields or not hasattr(self, "_postgres_saved_widget_detail"):
+                self.send_json(400, {"error": {"code": "validation_error", "message": "Saved widget detail fields are invalid"}})
+            else:
+                self._service_call(lambda: self._postgres_saved_widget_detail(saved_widget_detail_match.group(1), body))
+        elif write_grants_match:
             grant_fields = {"consoleId", "database", "namespace", "confirmed"}
             if not isinstance(body, dict) or set(body) != grant_fields:
                 self.send_json(400, {"error": {"code": "validation_error", "message": "Console write grant request fields are invalid"}})
@@ -296,5 +330,22 @@ class PostgresHttpMixin:
         if not profile_match or profile_match.group(2) is not None:
             return False
         if self._authorize_postgres():
-            self._service_call(lambda: self.service.delete_profile(profile_match.group(1)))
+            body = self._body_or_error()
+            if body is None:
+                return True
+            if set(body) != {"profileFingerprint", "impactFingerprint"}:
+                self.send_json(400, {"error": {"code": "validation_error", "message": "Profile deletion fields are invalid"}})
+                return True
+
+            def delete_profile():
+                current = self._profile_deletion_impact(profile_match.group(1))
+                if body["profileFingerprint"] != current["profileFingerprint"]:
+                    from .postgres_common import ConflictError
+                    raise ConflictError("profile_changed", "The PostgreSQL profile changed after deletion was reviewed")
+                if body["impactFingerprint"] != current["impactFingerprint"]:
+                    from .postgres_common import ConflictError
+                    raise ConflictError("profile_dependencies_changed", "Profile dependencies changed after deletion was reviewed")
+                return self.service.delete_profile(profile_match.group(1), current["profileFingerprint"])
+
+            self._service_call(delete_profile)
         return True

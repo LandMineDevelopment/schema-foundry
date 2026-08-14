@@ -447,6 +447,7 @@ let aiState = {
   requestGeneration: 0,
   oauth: null
 };
+let schemaSaveQuarantine = null;
 
 const TABLE_CREATION_DEMO_STATES = ["dialog", "named", "created", "email", "email-named", "timestamp", "complete"];
 const tableCreationDemo = window.SchemiiShared.createOnboardingDemo({
@@ -1183,7 +1184,8 @@ function previewViewDefinition(definition, allowDestructive = false) {
 async function reloadActiveSchemaRecord() {
   const payload = await sharedSessionClient.json("/api/schemas", {}, {
     allowPath: path => path === "/api/schemas",
-    defaultMessage: "The saved schema could not be refreshed"
+    defaultMessage: "The saved schema could not be refreshed",
+    validate: window.SchemiiShared.validateSchemasResponse
   });
   if (!Array.isArray(payload.schemas)) throw new Error("The saved schema could not be refreshed");
   const record = payload.schemas.find(item => item.id === activeSchemaId);
@@ -2283,10 +2285,7 @@ function createSchemiiOnboardingController() {
 
 async function initializeOnboarding() {
   try {
-    const response = await fetch("/api/session");
-    const session = await response.json().catch(() => ({}));
-    if (!response.ok || !session.token) return;
-    postgresState.token = session.token;
+    const session = await sharedSessionClient.bootstrap();
     onboardingController.initialize(session.serverId);
   } catch { /* Startup remains usable if the local session endpoint is unavailable. */ }
 }
@@ -2316,15 +2315,11 @@ async function shutdownSchemii() {
   elements.shutdownWarning.hidden = true;
   try {
     await flushPendingSave();
-    if (!postgresState.token) {
-      const sessionResponse = await fetch("/api/session");
-      const session = await sessionResponse.json().catch(() => ({}));
-      if (!sessionResponse.ok || !session.token) throw new Error("Could not authorize shutdown");
-      postgresState.token = session.token;
-    }
-    const response = await fetch("/api/shutdown", { method: "POST", headers: { "X-Schemii-Token": postgresState.token } });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok || !payload.shuttingDown) throw new Error(payload.error?.message || "Schemii could not be shut down");
+    await sharedSessionClient.json("/api/shutdown", { method: "POST" }, {
+      allowPath: path => path === "/api/shutdown",
+      defaultMessage: "Schemii could not be shut down",
+      validate: window.SchemiiShared.validateShutdownResponse,
+    });
     serverStopped = true;
     elements.shutdownConfirmPanel.hidden = true;
     elements.shutdownComplete.hidden = false;
@@ -2389,7 +2384,8 @@ async function putRecordFile(record) {
     body: JSON.stringify(record)
   }, {
     allowPath: candidate => candidate === path,
-    defaultMessage: "The schema file could not be saved"
+    defaultMessage: "The schema file could not be saved",
+    validate: window.SchemiiShared.validateSchemaSaveResponse
   });
 }
 
@@ -2431,7 +2427,8 @@ async function restoreExamples() {
     });
     const schemasPayload = await sharedSessionClient.json("/api/schemas", {}, {
       allowPath: path => path === "/api/schemas",
-      defaultMessage: "Restored examples could not be loaded"
+      defaultMessage: "Restored examples could not be loaded",
+      validate: window.SchemiiShared.validateSchemasResponse
     });
     if (!Array.isArray(schemasPayload.schemas)) throw new Error("Restored examples could not be loaded");
     const library = readSchemaLibrary();
@@ -2507,7 +2504,8 @@ async function initializeSchemaLibrary() {
   try {
     const payload = await sharedSessionClient.json("/api/schemas", {}, {
       allowPath: path => path === "/api/schemas",
-      defaultMessage: "The schema file server is unavailable"
+      defaultMessage: "The schema file server is unavailable",
+      validate: window.SchemiiShared.validateSchemasResponse
     });
     const records = Array.isArray(payload.schemas) ? payload.schemas : [];
 
@@ -3000,6 +2998,7 @@ function relationshipIncludesColumn(relationship, columnId) {
 }
 
 function saveSchema(delay = SAVE_DELAY_MS) {
+  if (schemaSaveQuarantine) return;
   elements.saveStatus.textContent = "Saving...";
   clearTimeout(saveTimer);
   saveTimer = setTimeout(async () => {
@@ -3016,12 +3015,23 @@ function saveSchema(delay = SAVE_DELAY_MS) {
 
 function reportSaveError(error) {
   const conflict = error?.code === "schema_conflict" || error?.code === "layout_conflict";
+  if (conflict && !schemaSaveQuarantine) {
+    schemaSaveQuarantine = { schemaId: activeSchemaId, schema: clone(schema), capturedAt: new Date().toISOString(), code: error.code };
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    document.querySelector("#schema-conflict-banner").hidden = false;
+  }
   elements.saveStatus.textContent = conflict ? "Save conflict" : "Save failed";
   showToast(conflict ? "This design or its layout changed in another session. Reload before saving" : "Could not save the schema file");
 }
 
 function persistSchemaRecord(schemaId, schemaValue) {
   saveQueue = saveQueue.catch(() => {}).then(async () => {
+    if (schemaSaveQuarantine?.schemaId === schemaId) {
+      const error = new Error("Autosave is frozen until the schema conflict is recovered");
+      error.code = "schema_save_quarantined";
+      throw error;
+    }
     const library = readSchemaLibrary();
     const record = library.schemas.find(item => item.id === schemaId);
     const savedRecord = {
@@ -3259,9 +3269,10 @@ async function deleteSavedSchema(schemaId) {
   await saveQueue.catch(() => {});
   try {
     const path = `/api/schemas/${encodeURIComponent(schemaId)}`;
-    await sharedSessionClient.json(path, { method: "DELETE" }, {
+    await sharedSessionClient.json(path, { method: "DELETE", body: JSON.stringify({ expectedRevision: record.revision, layoutToken: record.layoutToken }) }, {
       allowPath: candidate => candidate === path,
-      defaultMessage: "Could not delete the schema file"
+      defaultMessage: "Could not delete the schema file",
+      validate: window.SchemiiShared.validateDeleteResponse
     });
   } catch {
     return showToast("Could not delete the schema file");
@@ -3271,6 +3282,31 @@ async function deleteSavedSchema(schemaId) {
   renderSchemaLibrary();
   showToast("Schema deleted");
 }
+
+document.querySelector("#export-conflicted-schema").addEventListener("click", () => {
+  if (!schemaSaveQuarantine) return;
+  const name = (schemaSaveQuarantine.schema.projectName || "schema-local-edits").replace(/[^A-Za-z0-9_-]+/g, "-");
+  exportFile(`${name}-conflict.json`, JSON.stringify({ id: schemaSaveQuarantine.schemaId, capturedAt: schemaSaveQuarantine.capturedAt, schema: schemaForStorage(schemaSaveQuarantine.schema, view) }, null, 2), "application/json");
+});
+
+document.querySelector("#refresh-conflicted-schema").addEventListener("click", async () => {
+  if (!schemaSaveQuarantine || !confirm("Discard the quarantined local edits and load the current saved design? Export them first if needed.")) return;
+  const schemaId = schemaSaveQuarantine.schemaId;
+  const path = `/api/schemas/${encodeURIComponent(schemaId)}`;
+  try {
+    const record = await sharedSessionClient.json(path, {}, { allowPath: candidate => candidate === path, validate: window.SchemiiShared.validateSchemaRecord });
+    const library = readSchemaLibrary();
+    const index = library.schemas.findIndex(item => item.id === schemaId);
+    if (index >= 0) library.schemas[index] = record;
+    else library.schemas.push(record);
+    writeSchemaLibrary(library);
+    schemaSaveQuarantine = null;
+    document.querySelector("#schema-conflict-banner").hidden = true;
+    openSavedSchema(schemaId, false);
+  } catch (error) {
+    showToast(error.message || "Could not refresh the saved design");
+  }
+});
 
 function formatSavedDate(value) {
   const date = new Date(value);
@@ -6086,6 +6122,7 @@ async function handleSchemiiAiOperationResult(result, context) {
   if (result?.kind === "schema_saved") {
     const payload = await sharedSessionClient.json("/api/schemas", {}, {
       allowPath: path => path === "/api/schemas",
+      validate: window.SchemiiShared.validateSchemasResponse,
       defaultMessage: "The saved schema could not be refreshed"
     });
     const records = Array.isArray(payload.schemas) ? payload.schemas : [];
@@ -7529,7 +7566,10 @@ elements.postgresProfilesList.addEventListener("click", async event => {
     if (!confirm(`Delete PostgreSQL connection ${profile?.name ?? profileId}?`)) return;
     setPostgresBusy(true, "Deleting connection...");
     try {
-      await postgresProfileRepository.remove(profileId);
+      const preview = await postgresProfileRepository.deletionImpact(profileId);
+      const counts = Object.values(preview.impact).reduce((total, items) => total + items.length, 0);
+      if (counts && !confirm(`This connection has ${counts} saved or active dependenc${counts === 1 ? "y" : "ies"}. Delete the profile without deleting those resources?`)) return;
+      await postgresProfileRepository.remove(profileId, preview);
       if (postgresState.selectedProfileId === profileId) postgresState.selectedProfileId = null;
       await loadPostgresProfiles();
     } catch (error) {

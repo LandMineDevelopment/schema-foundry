@@ -6,7 +6,7 @@ const context = vm.createContext({ window: {}, Error, TypeError, Object, Array }
 vm.runInContext(fs.readFileSync("src/schemii/shared_web/api-contracts.js", "utf8"), context);
 const contracts = context.window.SchemiiShared;
 
-assert.equal(contracts.validateSessionResponse({ token: "token" }).token, "token");
+assert.equal(contracts.validateSessionResponse({ token: "token", serverId: "server" }).token, "token");
 assert.equal(contracts.validateProfilesResponse({ profiles: [{ id: "local" }] }).profiles.length, 1);
 assert.equal(contracts.validateCatalogResponse({ namespaces: ["public"] }, "namespaces").namespaces[0], "public");
 assert.equal(contracts.validateCatalogResponse({ relations: [{ name: "orders", kind: "table" }] }, "relations").relations[0].name, "orders");
@@ -14,14 +14,19 @@ assert.equal(contracts.validatePlanResponse({ id: "plan", steps: [], warnings: [
 assert.equal(contracts.validateOperationResponse({ operation: { id: "operation", state: "running" } }).operation.state, "running");
 assert.equal(contracts.validateResourceSummariesResponse({ resources: [{ id: "schema" }] }).resources.length, 1);
 assert.equal(contracts.validateResourceSummariesResponse({ summaries: [{ id: "dashboard" }] }).summaries.length, 1);
+assert.equal(contracts.validateDeleteResponse({ deleted: "schema" }).deleted, "schema");
+assert.equal(contracts.validateShutdownResponse({ shuttingDown: true }).shuttingDown, true);
 
 for (const [validator, payload] of [
   [contracts.validateSessionResponse, { token: "" }],
+  [contracts.validateSessionResponse, { token: "token" }],
   [contracts.validateProfilesResponse, { profiles: null }],
   [value => contracts.validateCatalogResponse(value, "relations"), { relations: [{ kind: "table" }] }],
   [contracts.validatePlanResponse, { id: "plan", steps: [] }],
   [contracts.validateOperationResponse, { operation: { id: "operation" } }],
   [contracts.validateResourceSummariesResponse, { resources: [{}] }],
+  [contracts.validateDeleteResponse, { deleted: "" }],
+  [contracts.validateShutdownResponse, { shuttingDown: false }],
 ]) {
   assert.throws(() => validator(payload), error => error.code === "invalid_api_response");
 }

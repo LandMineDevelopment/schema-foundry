@@ -2,6 +2,7 @@
   function createSessionClient({ getToken, setToken, sessionPath = "/api/session" } = {}) {
     if (typeof getToken !== "function" || typeof setToken !== "function") throw new TypeError("Token accessors are required");
     let bootstrap = null;
+    let session = null;
 
     function abortError() {
       const error = new Error("The request was aborted");
@@ -33,9 +34,9 @@
       }
     }
 
-    async function ensureToken(options = {}) {
+    async function bootstrapSession(options = {}) {
+      if (session && getToken() === session.token) return session;
       const token = getToken();
-      if (token) return token;
       if (!bootstrap) {
         bootstrap = (async () => {
           const response = await fetch(sessionPath);
@@ -45,12 +46,19 @@
             ? window.SchemiiShared.validateSessionResponse(payload)
             : payload;
           if (typeof validated.token !== "string" || !validated.token) throw new Error("Could not start a local session");
-          setToken(validated.token);
-          return validated.token;
+           setToken(validated.token);
+           session = validated;
+           return validated;
         })();
         bootstrap.finally(() => { bootstrap = null; }).catch(() => {});
       }
       return waitFor(bootstrap, options.signal);
+    }
+
+    async function ensureToken(options = {}) {
+      const token = getToken();
+      if (token) return token;
+      return (await bootstrapSession(options)).token;
     }
 
     function validatePath(path, allowPath) {
@@ -74,7 +82,7 @@
       if (response.ok) return response;
       const payload = await response.clone().json().catch(() => ({}));
       if (payload.error?.code === "invalid_session" && retryInvalidSession) {
-        if (getToken() === token) setToken(null);
+        if (getToken() === token) { setToken(null); session = null; }
         return authenticatedFetch(path, options, { ...requestOptions, retryInvalidSession: false });
       }
       const error = new Error(payload.error?.message || payload.error || defaultMessage);
@@ -90,7 +98,7 @@
       return typeof requestOptions.validate === "function" ? requestOptions.validate(payload) : payload;
     }
 
-    return Object.freeze({ ensureToken, fetch: authenticatedFetch, json });
+    return Object.freeze({ bootstrap: bootstrapSession, ensureToken, fetch: authenticatedFetch, json });
   }
 
   window.SchemiiShared = Object.freeze({ ...(window.SchemiiShared || {}), createSessionClient });

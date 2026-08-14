@@ -250,11 +250,21 @@ class SchemaStoreTests(unittest.TestCase):
                     layout_protocol=None,
                 )
 
-        self.store.save(
+        saved = self.store.save(
             "schema_one", record("schema_one"), expected_layout_token=None, layout_protocol=None
         )
-        self.assertEqual(self.store.delete("schema_one"), {"deleted": "schema_one"})
+        self.assertEqual(self.store.delete("schema_one", saved["revision"], saved["layoutToken"]), {"deleted": "schema_one"})
         self.assertFalse((self.schema_dir / "schema_one.json").exists())
+
+    def test_delete_rejects_stale_revision_and_layout(self):
+        saved = self.store.save("schema_one", record("schema_one"), expected_layout_token=None, layout_protocol=None)
+        with self.assertRaises(SchemaStoreError) as revision_error:
+            self.store.delete("schema_one", saved["revision"] + 1, saved["layoutToken"])
+        self.assertEqual(revision_error.exception.payload["error"]["code"], "schema_conflict")
+        with self.assertRaises(SchemaStoreError) as layout_error:
+            self.store.delete("schema_one", saved["revision"], "f" * 64)
+        self.assertEqual(layout_error.exception.payload["error"]["code"], "layout_conflict")
+        self.assertTrue((self.schema_dir / "schema_one.json").exists())
 
     def test_view_mutation_reservation_blocks_concurrent_save_until_release(self):
         original = record("schema_one")

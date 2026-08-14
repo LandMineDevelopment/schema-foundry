@@ -16,7 +16,8 @@ from .ai_http import AiHttpRouter, authority_call, bounded_ai_query_result, issu
 from .metadata import MetadataConfig, MetadataConnectionFactory, MetadataStore, MetadataStoreError
 from .migration_execution import DurableMigrationCoordinator
 from .examples import ExampleInstaller, installer_from_environment
-from .http_common import CONTENT_SECURITY_POLICY, MAX_BODY_SIZE, is_local_request as _is_local_request, make_local_app_handler
+from .http_common import CONTENT_SECURITY_POLICY, MAX_BODY_SIZE, is_local_request as _is_local_request, make_local_app_handler, metadata_profile_dependencies
+from .dashboard_store import DashboardStore
 from .opencode_service import OpenCodeService, OpenCodeServiceError
 from .postgres_http import (
     POSTGRES_CATALOG_CAPABILITY,
@@ -289,6 +290,7 @@ def make_handler(
     migration_coordinator: DurableMigrationCoordinator | None = None,
     ai_service: OpenCodeService | None = None,
     example_installer: ExampleInstaller | None = None,
+    dependency_dashboard_store: DashboardStore | None = None,
     behind_loopback_proxy: bool = False,
 ):
     migration_coordinator = migration_coordinator or getattr(service, "_migration_coordinator", None)
@@ -423,6 +425,21 @@ def make_handler(
             except SchemaStoreError as error:
                 self.send_json(error.status, error.payload)
 
+        def _postgres_profile_dependency_impact(self, profile_id):
+            impact = {"schemas": [], "dashboards": [], "activeChats": [], "plans": [], "operations": []}
+            records = store.list()
+            for record in records:
+                postgres = record.get("schema", {}).get("postgres", {})
+                if postgres.get("sourceProfileId") == profile_id:
+                    impact["schemas"].append({"id": record["id"], "revision": record.get("revision", 0), "name": record["schema"].get("projectName", "")})
+            if dependency_dashboard_store is not None:
+                for record in dependency_dashboard_store.list():
+                    widgets = [item["id"] for item in record["dashboard"]["widgets"] if item.get("configuration", {}).get("source", {}).get("profileId") == profile_id]
+                    if widgets:
+                        impact["dashboards"].append({"id": record["id"], "revision": record["revision"], "name": record["dashboard"]["title"], "widgetIds": widgets})
+            impact.update(metadata_profile_dependencies(ai_authority, profile_id))
+            return impact
+
         def _schema_call(self, callback):
             try:
                 self.send_json(200, callback())
@@ -468,6 +485,11 @@ def make_handler(
                 if not self._authorize_local_api("Schema API", "Schema API session token is missing or invalid"):
                     return
                 return self._schema_call(lambda: {"schemas": store.list()})
+            schema_id = self._schema_id()
+            if schema_id is not None:
+                if not self._authorize_local_api("Schema API", "Schema API session token is missing or invalid"):
+                    return
+                return self._schema_call(lambda: store.get(schema_id))
             if ai_router.handle_get(self, path):
                 return
             if path == "/api/postgres/history":
@@ -1107,7 +1129,7 @@ def make_handler(
                 return
             schema_id = self._schema_id()
             if schema_id is None:
-                return self.send_json(404, {"error": "Unknown schema path"})
+                return self.send_json(404, {"error": {"code": "not_found", "message": "Unknown schema path"}})
             if not self._authorize_local_api("Schema API", "Schema API session token is missing or invalid"):
                 return
             body = self._body_or_error()
@@ -1127,10 +1149,14 @@ def make_handler(
                 return
             schema_id = self._schema_id()
             if schema_id is None:
-                return self.send_json(404, {"error": "Unknown schema path"})
+                return self.send_json(404, {"error": {"code": "not_found", "message": "Unknown schema path"}})
             if not self._authorize_local_api("Schema API", "Schema API session token is missing or invalid"):
                 return
-            return self._schema_call(lambda: store.delete(schema_id))
+            body = self._body_or_error()
+            if body is not None:
+                if set(body) != {"expectedRevision", "layoutToken"}:
+                    return self.send_json(400, {"error": {"code": "invalid_schema_binding", "message": "Schema deletion fields are invalid"}})
+                return self._schema_call(lambda: store.delete(schema_id, body["expectedRevision"], body["layoutToken"]))
 
     return SchemiiHandler
 
@@ -1183,6 +1209,7 @@ def main() -> None:
         secrets.token_urlsafe(32),
         server_id=server_id,
         ai_authority=SchemiiMetadataAuthority(metadata_store, worker_id=f"schemii-{server_id}"),
+        dependency_dashboard_store=DashboardStore(Path(os.environ.get("SCHEMER_DASHBOARD_DIR", "~/.local/share/schemer/dashboards")).expanduser().resolve()),
         migration_coordinator=migration_coordinator,
         ai_service=ai_service,
         example_installer=example_installer,

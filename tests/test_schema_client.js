@@ -22,8 +22,14 @@ assert.match(initialize, /sharedSessionClient\.json\("\/api\/schemas"/, "schema 
 assert.match(initialize, /allowPath: path => path === "\/api\/schemas"/, "schema initialization must allow only the exact list path");
 
 const deletion = source.slice(source.indexOf("async function deleteSavedSchema"), source.indexOf("function formatSavedDate"));
-assert.match(deletion, /sharedSessionClient\.json\(path, \{ method: "DELETE" \}/, "schema deletion must use the session client");
+assert.match(deletion, /sharedSessionClient\.json\(path, \{ method: "DELETE", body: JSON\.stringify\(\{ expectedRevision: record\.revision, layoutToken: record\.layoutToken \}\) \}/, "schema deletion must carry revision and layout preconditions");
 assert.match(deletion, /allowPath: candidate => candidate === path/, "schema deletion must allow only its exact encoded path");
+
+const quarantine = source.slice(source.indexOf("function reportSaveError"), source.indexOf("function captureHistoryState"));
+assert.match(quarantine, /schemaSaveQuarantine = \{ schemaId: activeSchemaId, schema: clone\(schema\)/, "a schema conflict must preserve an immutable local recovery snapshot");
+assert.match(quarantine, /clearTimeout\(saveTimer\)[\s\S]*schema-conflict-banner/, "a schema conflict must freeze scheduled autosave and expose recovery");
+assert.match(quarantine, /schemaSaveQuarantine\?\.schemaId === schemaId[\s\S]*schema_save_quarantined/, "queued saves must not replay a stale schema after quarantine");
+assert.match(source, /export-conflicted-schema[\s\S]*schemaForStorage\(schemaSaveQuarantine\.schema[\s\S]*refresh-conflicted-schema[\s\S]*validateSchemaRecord/, "quarantined local edits must remain exportable until explicit authoritative refresh");
 
 const clientDeclaration = source.indexOf("const sharedSessionClient =");
 assert.ok(clientDeclaration > source.indexOf("async function putRecordFile"), "schema functions may be declared before the session client");

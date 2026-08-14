@@ -259,7 +259,26 @@ class ServerTests(unittest.TestCase):
         self.assertNotIn("password", json.loads(body)["profiles"][0])
 
         self.assertEqual(self.request("/api/postgres/profiles/local", "PUT", profile, authorized=True)[0], 200)
-        self.assertEqual(self.request("/api/postgres/profiles/local", "DELETE", authorized=True)[0], 200)
+        status, impact_body, _ = self.request("/api/postgres/profiles/local/deletion-impact", authorized=True)
+        self.assertEqual(status, 200)
+        impact = json.loads(impact_body)
+        self.assertEqual(self.request("/api/postgres/profiles/local", "DELETE", {"profileFingerprint": impact["profileFingerprint"], "impactFingerprint": impact["impactFingerprint"]}, authorized=True)[0], 200)
+
+    def test_unknown_and_unexpected_api_failures_are_safe_envelopes(self):
+        status, body, _ = self.request("/api/not-a-route")
+        self.assertEqual(status, 404)
+        self.assertEqual(set(json.loads(body)["error"]), {"code", "message"})
+
+        def fail_profiles():
+            raise RuntimeError("password=should-never-leak")
+
+        self.service.list_profiles = fail_profiles
+        status, body, _ = self.request("/api/postgres/profiles", authorized=True)
+        payload = json.loads(body)
+        self.assertEqual(status, 500)
+        self.assertEqual(payload["error"]["code"], "internal_error")
+        self.assertTrue(payload["error"]["retryable"])
+        self.assertNotIn("should-never-leak", body.decode())
 
     def test_data_and_sql_routes_validate_and_forward(self):
         data_path = "/api/postgres/profiles/local/data?namespace=public&table=events&offset=50&limit=25"
@@ -549,7 +568,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual([item["id"] for item in json.loads(list_body)["schemas"]], ["schema_one"])
 
-        status, delete_body, _ = self.request(path, "DELETE", authorized=True)
+        status, delete_body, _ = self.request(path, "DELETE", {"expectedRevision": saved["revision"], "layoutToken": saved["layoutToken"]}, authorized=True)
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(delete_body), {"deleted": "schema_one"})
 
@@ -944,7 +963,7 @@ class ServerTests(unittest.TestCase):
 
         self.service.apply_ai_postgres_write = fail_before_mutation
         status, body, _ = self.request(f"/api/ai/sessions/ses_1/proposals/{apply_proposal['proposalId']}/execute", "POST", execute, authorized=True)
-        operation = json.loads(body)["operation"]
+        operation = json.loads(body)["error"]["details"]["operation"]
         self.assertEqual(status, 500)
         self.assertEqual(operation["state"], "failed")
         self.assertEqual(operation["error"]["code"], "plan_store_error")

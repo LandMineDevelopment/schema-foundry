@@ -119,14 +119,14 @@ Agents must not duplicate another active agent's scope. Research findings that a
 
 ## Phase 5 — browser/server contracts
 
-- [ ] Standardize structured API error envelopes.
-- [ ] Add conditional deletion for schemas, dashboards, and profiles.
-- [ ] Add explicit Schemii conflict quarantine and recovery UX.
-- [ ] Separate Schemer draft query execution from exact saved-widget execution.
-- [ ] Define focused successful-response validators in shared browser clients.
-- [ ] Consolidate session bootstrap through one shared client contract.
-- [ ] Tighten route-family path predicates to segment boundaries/templates.
-- [ ] Add behavioral browser tests for retries, conflicts, stale responses, uncertain operations, and malformed success responses.
+- [x] Standardize structured API error envelopes.
+- [x] Add conditional deletion for schemas, dashboards, and profiles.
+- [x] Add explicit Schemii conflict quarantine and recovery UX.
+- [x] Separate Schemer draft query execution from exact saved-widget execution.
+- [x] Define focused successful-response validators in shared browser clients.
+- [x] Consolidate session bootstrap through one shared client contract.
+- [x] Tighten route-family path predicates to segment boundaries/templates.
+- [x] Add behavioral browser tests for retries, conflicts, stale responses, uncertain operations, and malformed success responses.
 
 ## Phase 6 — bounds, performance, and operability
 

@@ -28,6 +28,11 @@
           <input id="project-name" aria-label="Project name" value="Product workspace" />
           <span id="save-status">Loading files...</span>
         </div>
+        <div class="schema-conflict-banner" id="schema-conflict-banner" role="alert" hidden>
+          <span>Autosave is frozen. Your local edits are preserved until you export or refresh.</span>
+          <button id="export-conflicted-schema" type="button">Export local edits</button>
+          <button id="refresh-conflicted-schema" type="button">Refresh saved design</button>
+        </div>
 
         <div class="top-actions">
           <button class="button button-ghost top-action-icon" id="new-design-button" type="button" data-tooltip="New design" data-tooltip-placement="bottom" aria-label="New design">

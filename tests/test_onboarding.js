@@ -100,8 +100,8 @@ assert.doesNotMatch(sharedCss, /\.onboarding-skip\s*\{[^}]*display:\s*none/, "to
 const shutdownStart = source.indexOf("async function shutdownSchemii");
 const shutdownEnd = source.indexOf("function schemaForStorage");
 const shutdown = source.slice(shutdownStart, shutdownEnd);
-assert.ok(shutdown.indexOf("await flushPendingSave()") < shutdown.indexOf('fetch("/api/shutdown"'), "shutdown must save pending edits before stopping the server");
-assert.match(shutdown, /"X-Schemii-Token": postgresState\.token/, "shutdown must send the local session token");
+assert.ok(shutdown.indexOf("await flushPendingSave()") < shutdown.indexOf('sharedSessionClient.json("/api/shutdown"'), "shutdown must save pending edits before stopping the server");
+assert.match(shutdown, /allowPath: path => path === "\/api\/shutdown"/, "shutdown must use the exact authenticated local API path");
 assert.match(source, /initializeSchemaLibrary\(\)\.finally[\s\S]+initializeOnboarding\(\)/, "onboarding must initialize after the workspace");
 assert.match(source, /workspace\.addEventListener\("pointerdown"[\s\S]*event\.target\.closest\("\.database-drift-banner"\)[^\n]*return;/, "database drift controls must not be captured as blank-canvas selection gestures");
 assert.match(source, /refresh-database-drift"\)\.addEventListener\("click", refreshLinkedPostgresDesign\)[\s\S]*dismiss-database-drift"\)\.addEventListener\("click"[\s\S]*databaseDriftBanner\.hidden = true/, "the drift banner must retain working refresh and dismiss actions");

@@ -596,13 +596,16 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                 self._write_profiles(profiles)
             return self._redact(profile_id, profile)
 
-    def delete_profile(self, profile_id: str) -> dict[str, str]:
+    def delete_profile(self, profile_id: str, expected_fingerprint: str | None = None) -> dict[str, str]:
         profile_id = self._validate_profile_id(profile_id)
         with self._lock:
             with self._profile_store_lock():
                 profiles = self._read_profiles()
                 if profile_id not in profiles:
                     raise NotFoundError("Profile was not found")
+                current_fingerprint = _profile_context_fingerprint(profile_id, profiles[profile_id])
+                if not isinstance(expected_fingerprint, str) or expected_fingerprint != current_fingerprint:
+                    raise ConflictError("profile_changed", "The PostgreSQL profile changed after deletion was reviewed")
                 del profiles[profile_id]
                 self._write_profiles(profiles)
         return {"deleted": profile_id}
