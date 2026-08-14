@@ -1,9 +1,12 @@
 (() => {
   function createPostgresClient({ sessionClient = null, getToken, setToken, sessionPath = "/api/session" } = {}) {
     const client = sessionClient || window.SchemiiShared.createSessionClient({ getToken, setToken, sessionPath });
-    const allowPath = path => typeof path === "string" && path.startsWith("/api/postgres/");
+    const allowPath = window.SchemiiShared.createApiPathPredicate
+      ? window.SchemiiShared.createApiPathPredicate("/api/postgres")
+      : path => typeof path === "string" && (path === "/api/postgres" || path.startsWith("/api/postgres/"));
     function request(path, options = {}) {
-      return client.json(path, options, { allowPath, defaultMessage: "PostgreSQL request failed" });
+      const validate = window.SchemiiShared.postgresResponseValidator?.(path, options.method || "GET") || null;
+      return client.json(path, options, { allowPath, defaultMessage: "PostgreSQL request failed", validate });
     }
     return { request };
   }
