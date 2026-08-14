@@ -115,6 +115,11 @@ Critical transaction boundaries:
 
 ## Verification log
 
+- Phase 7 focused verification: 107 AI action/registry/executor/server/PostgreSQL route/migration tests passed.
+- Phase 7 full verification: 324 Python tests passed with 5 expected skips; every `tests/test_*.js` file passed; Python compile, all three browser syntax checks, eight supported Compose config combinations, and `git diff --check` passed.
+- Phase 7 ownership: shared AI primitives and app vocabularies are separate; declarative tool contracts match OpenCode registrations; app executors own action execution/reconciliation; PostgreSQL routes use explicit app policies; durable migration compatibility is behind `PostgresMigrationFacade`.
+- Retired `ai_authority.py`, `ai_chat_store.py`, their JSON-only tests, browser authority fingerprint derivation, and proposal claim/finalize/release routes. Legacy records remain archive-only migration inputs.
+
 - Pre-branch full Python: 286 passed, 5 skipped.
 - Pre-branch all `tests/test_*.js`: passed.
 - Pre-branch Python compile, JavaScript syntax, and `git diff --check`: passed.

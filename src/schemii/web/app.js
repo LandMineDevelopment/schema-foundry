@@ -6371,7 +6371,7 @@ const aiAssistant = window.SchemiiShared.createAiAssistant({
     };
   },
   contextKey: (context, accessLevel) => context
-    ? `${context.schemaId}:${accessLevel}${!["metadata", "schema"].includes(accessLevel) ? `:${window.SchemiiShared.aiContextFingerprint([context.profileId, context.database, context.namespace, context.profileFingerprint])}` : ""}`
+    ? `${context.schemaId}:${accessLevel}${!["metadata", "schema"].includes(accessLevel) ? `:${window.SchemiiShared.aiContextCacheKey([context.profileId, context.database, context.namespace])}` : ""}`
     : null,
   buildSessionPayload: (context, accessLevel, model) => ({
     model, schemaId: context.schemaId, accessLevel, approvals: currentAiApprovals(),
@@ -6381,7 +6381,7 @@ const aiAssistant = window.SchemiiShared.createAiAssistant({
     const accessLevel = Array.isArray(session.capabilities) && session.capabilities.length ? session.capabilities.join("-") : "metadata";
     const target = session.target ?? {};
     return {
-      key: `${session.schemaId}:${accessLevel}${Object.keys(target).length ? `:${window.SchemiiShared.aiContextFingerprint([target.profileId, target.database, target.namespace, target.profileFingerprint])}` : ""}`,
+      key: `${session.schemaId}:${accessLevel}${Object.keys(target).length ? `:${window.SchemiiShared.aiContextCacheKey([target.profileId, target.database, target.namespace])}` : ""}`,
       accessLevel,
       title: session.title || "Schema chat",
     };

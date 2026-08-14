@@ -7,7 +7,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from schemii.ai_actions import normalize_schemii_action, normalize_schemer_action
+from schemii.schemii_ai_actions import normalize_schemii_action
+from schemii.schemer_ai_actions import normalize_schemer_action
 
 
 class AiActionTests(unittest.TestCase):

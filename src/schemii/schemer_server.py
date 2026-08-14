@@ -10,9 +10,8 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .ai_authority import AiAuthorityError
-from .ai_actions import normalize_schemer_action
-from .ai_http import AiHttpRouter, authority_call, bounded_ai_query_result, issue_ai_proposals
+from .schemer_ai_actions import normalize_schemer_action
+from .ai_http import AiHttpRouter, authority_call, issue_ai_proposals
 from .dashboard_store import DashboardStore, DashboardStoreError
 from .http_common import make_local_app_handler, metadata_profile_dependencies
 from .schema_store import SchemaStore
@@ -24,6 +23,8 @@ from .postgres_http import (
     POSTGRES_PROFILE_CAPABILITY,
     POSTGRES_READ_SQL_CAPABILITY,
     POSTGRES_RELATION_QUERY_CAPABILITY,
+    PostgresRoutePolicy,
+    ReadSqlRoutePolicy,
     PostgresHttpMixin,
 )
 from .postgres_service import PostgresService, PostgresServiceError
@@ -32,9 +33,9 @@ from .schemer_ai import (
     SCHEMER_AI_SYSTEM_INSTRUCTIONS,
     SCHEMER_AI_TOOL_ACTION_TYPES,
     dashboard_context,
-    validated_query_result,
 )
 from .schemer_metadata_authority import SchemerMetadataAuthority, retire_legacy_schemer_authority
+from .schemer_ai_executor import SchemerAiExecutor
 from .widget_query import QueryValidationError, normalize_query
 from .readiness import readiness_report
 
@@ -191,24 +192,33 @@ def make_handler(
         lambda handler, current_service, session_id: handler._ai_delete_session(current_service, session_id),
         proposal_operations=frozenset({"execute", "reconcile"}),
     )
+    ai_executor = SchemerAiExecutor(
+        service, dashboard_store, ai_authority,
+        catalog_sources=_ai_catalog_sources, configured_widget=_configured_ai_widget,
+    )
 
     class SchemerHandler(PostgresHttpMixin, base_handler):
-        postgres_capabilities = frozenset({
-            POSTGRES_PROFILE_CAPABILITY, POSTGRES_CATALOG_CAPABILITY, POSTGRES_RELATION_QUERY_CAPABILITY,
-            POSTGRES_READ_SQL_CAPABILITY, POSTGRES_CONSOLE_CAPABILITY,
-        })
-        postgres_read_sql_policy = {
-            "require_database": True,
-            "require_profile_fingerprint": True,
-            "context_fields": frozenset({"dashboardId", "expectedRevision"}),
-            "allow_explain": False,
-            "max_rows": 100,
-            "max_columns": 50,
-            "max_result_bytes": 256 * 1024,
-        }
-        postgres_relation_query_context_fields = frozenset({"dashboardId", "expectedRevision"})
-        postgres_temporal_series_context_fields = frozenset({"dashboardId", "expectedRevision", "widgetId"})
-        postgres_relation_detail_context_fields = frozenset({"dashboardId", "expectedRevision"})
+        postgres_route_policy = PostgresRoutePolicy(
+            "schemer",
+            frozenset({
+                POSTGRES_PROFILE_CAPABILITY, POSTGRES_CATALOG_CAPABILITY, POSTGRES_RELATION_QUERY_CAPABILITY,
+                POSTGRES_READ_SQL_CAPABILITY, POSTGRES_CONSOLE_CAPABILITY,
+            }),
+            read_sql=ReadSqlRoutePolicy(
+                require_database=True, require_profile_fingerprint=True,
+                context_fields=frozenset({"dashboardId", "expectedRevision"}), allow_explain=False,
+                max_rows=100, max_columns=50, max_result_bytes=256 * 1024,
+            ),
+            relation_query_context_fields=frozenset({"dashboardId", "expectedRevision"}),
+            temporal_series_context_fields=frozenset({"dashboardId", "expectedRevision", "widgetId"}),
+            relation_detail_context_fields=frozenset({"dashboardId", "expectedRevision"}),
+            read_sql_guard=lambda handler, body: handler._postgres_dashboard_revision_guard(body),
+            relation_query_guard=lambda handler, body: handler._postgres_dashboard_revision_guard(body),
+            relation_detail_guard=lambda handler, body: handler._postgres_dashboard_revision_guard(body),
+            temporal_series_guard=lambda handler, body: handler._postgres_temporal_series_guard(body),
+            saved_widget_query=lambda handler, profile_id, body: handler._postgres_saved_widget_query(profile_id, body),
+            saved_widget_detail=lambda handler, profile_id, body: handler._postgres_saved_widget_detail(profile_id, body),
+        )
 
         def _ai_create_session(self, current_ai_service, body):
             def create():
@@ -318,10 +328,6 @@ def make_handler(
                 detail = error.payload["error"]
                 raise PostgresServiceError(error.status, detail["code"], detail["message"]) from error
 
-        _postgres_read_sql_guard = _postgres_dashboard_revision_guard
-        _postgres_relation_query_guard = _postgres_dashboard_revision_guard
-        _postgres_relation_detail_guard = _postgres_dashboard_revision_guard
-
         def _saved_widget(self, profile_id, body):
             dashboard_id = body.get("dashboardId")
             expected_revision = body.get("expectedRevision")
@@ -404,8 +410,6 @@ def make_handler(
                 self.send_json(status, callback())
             except DashboardStoreError as error:
                 self.send_json(error.status, error.payload)
-            except AiAuthorityError as error:
-                self.send_json(error.status, error.to_dict())
             except MetadataStoreError as error:
                 self.send_json(error.status, error.to_dict())
             except PostgresServiceError as error:
@@ -430,8 +434,6 @@ def make_handler(
                 self.send_json(error.status, error.to_dict())
             except DashboardStoreError as error:
                 self.send_json(error.status, error.payload)
-            except AiAuthorityError as error:
-                self.send_json(error.status, error.to_dict())
             except MetadataStoreError as error:
                 self.send_json(error.status, error.to_dict())
 
@@ -610,12 +612,7 @@ def make_handler(
                         raise MetadataStoreError("operation_not_started", "Proposal operation has not started", status=404)
                     if current["state"] != "uncertain": return {"operation": current}
                     proposal = ai_authority.proposal(proposal_id, session_id)
-                    action = proposal["action"]
-                    if action.get("type") not in {"dashboard_create", "widget_create", "widget_rename", "widget_duplicate", "widget_delete"}: return {"operation": current}
-                    receipt = dashboard_store.operation_receipt(chat["dashboardId"], current["id"])
-                    if receipt is None:
-                        return {"operation": ai_authority.resolve_operation(current["id"], session_id, "failed", error={"code": "operation_not_applied", "message": "No dashboard mutation receipt exists; request a fresh proposal"})}
-                    return {"operation": ai_authority.resolve_operation(current["id"], session_id, "succeeded", result=receipt)}
+                    return ai_executor.reconcile(chat, current, proposal)
                 return authority_call(self, reconcile)
             if operation == "execute":
                 return self._ai_execute_proposal(current_ai_service, session_id, proposal_id, body)
@@ -657,43 +654,10 @@ def make_handler(
             try:
                 if proposal_record["schemaConcurrency"] != schema_concurrency or proposal_record["authorizationTarget"] != authorization_target:
                     raise DashboardStoreError(409, "dashboard_changed", "Proposal authority binding changed; request a fresh proposal")
-                action_type = action.get("type")
-                if action_type == "read_query":
-                    if profile is None or any(action.get(key) != authorization_target[key] for key in ("profileId", "database", "namespace")):
-                        raise PostgresServiceError(409, "action_target_changed", "Query target no longer matches the proposal")
-                    result = service.execute_read_only_sql(
-                        profile["id"], authorization_target["namespace"], action.get("sql"), database=profile["dbname"],
-                        expected_profile_fingerprint=service.profile_context_fingerprint(profile["id"]),
-                        allow_explain=False, max_rows=100, max_columns=50, max_result_bytes=256 * 1024,
-                    )
-                    reference = ai_authority.create_result(
-                        session_id, {"resource": dashboard_id, "target": authorization_target, "revision": record["revision"], "access": "data"},
-                        bounded_ai_query_result(result, max_rows=100, max_columns=50, max_bytes=48 * 1024),
-                    )
-                    result = {"kind": "sql_result", "display": result, "resultRef": reference["id"], "schemaConcurrency": schema_concurrency, "authorizationTarget": authorization_target}
-                elif action_type == "dashboard_open":
-                    target = dashboard_store.get(action.get("dashboardId"))
-                    if target["revision"] != action.get("expectedRevision") or target["dashboard"]["title"] != action.get("title"):
-                        raise DashboardStoreError(409, "dashboard_changed", "Target dashboard changed; request a fresh proposal")
-                    result = {"kind": "client_command", "command": {"type": "open_dashboard", "dashboardId": target["id"], "revision": target["revision"]}}
-                elif action_type == "dashboard_create":
-                    result = dashboard_store.create_ai(operation["id"], action["title"])
-                elif action_type in {"widget_create", "widget_rename", "widget_duplicate", "widget_delete"}:
-                    if action["dashboardId"] != dashboard_id or action["expectedRevision"] != schema_concurrency["revision"]:
-                        raise DashboardStoreError(409, "dashboard_changed", "Dashboard binding no longer matches the proposal")
-                    prepared = None
-                    if action_type == "widget_create" and "source" in action:
-                        if access == "data" and any(action["source"].get(key) != authorization_target.get(key) for key in ("profileId", "database", "namespace")):
-                            raise PostgresServiceError(409, "action_target_changed", "Widget source no longer matches the confirmed data target")
-                        allowed_sources = _ai_catalog_sources(service, record, authorization_target if access == "data" else None)
-                        identity = tuple(action["source"].get(key) for key in ("profileId", "database", "namespace", "relation", "kind", "fingerprint"))
-                        if identity not in {tuple(item.get(key) for key in ("profileId", "database", "namespace", "relation", "kind", "fingerprint")) for item in allowed_sources}:
-                            raise PostgresServiceError(409, "action_target_changed", "Widget source is outside the bounded catalog context issued for this proposal")
-                        with dashboard_store.guard_revision(dashboard_id, schema_concurrency["revision"]) as guarded:
-                            prepared = _configured_ai_widget(service, action, operation["id"], len(guarded["dashboard"]["widgets"]))
-                    result = dashboard_store.apply_ai_mutation(dashboard_id, operation["id"], schema_concurrency["revision"], action, prepared)
-                else:
-                    raise OpenCodeServiceError(409, "action_temporarily_unavailable", "This action is unavailable until its server execution adapter is installed")
+                result = ai_executor.execute(
+                    action, operation["id"], chat=chat, record=record, profile=profile,
+                    schema_concurrency=schema_concurrency, authorization_target=authorization_target,
+                )
             except (OpenCodeServiceError, DashboardStoreError, PostgresServiceError, MetadataStoreError) as error:
                 payload = error.payload if hasattr(error, "payload") else error.to_dict()
                 uncertain = isinstance(error, DashboardStoreError) and error.status >= 500

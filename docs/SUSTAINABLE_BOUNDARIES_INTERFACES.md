@@ -8,11 +8,10 @@ This is the Phase 0 inventory of authority-relevant persistence and wire contrac
 | --- | --- | --- | --- |
 | PostgreSQL profiles | `postgres_profiles.json` | Shared profile service | Preserve; version and migrate losslessly. Keep credentials outside browser/OpenCode. |
 | Migration history | `migration_history.json` | PostgreSQL service | Preserve as non-authoritative audit history; move to metadata PostgreSQL later. |
-| Schemii chats/policies/grants | `ai_chats/v1/*.json` | Schemii | Archive executable authority; optionally import validated chats as read-only history with grants removed. |
-| AI proposals | `ai_authority/v1/{app}/proposals/*.json` | Shared authority | Archive/reset active authority. Do not infer atomic state across files. |
-| AI operations | `ai_authority/v1/{app}/operations/*.json` | Shared authority | Archive/reset; reconcile only through an explicit offline recovery tool and domain receipts. |
-| AI query results | `ai_authority/v1/{app}/results/*.json` | Shared authority | Do not import payloads/reservations; expire and archive metadata only if needed. |
-| AI migration/write plans | `ai_migration_plans/*.json` | PostgreSQL service | Archive/reset active plans; do not replay. |
+| Legacy Schemii chats/policies/grants | `ai_chats/v1/*.json` | Retired JSON authority | Archived as inert evidence; never imported as executable records. |
+| Chats, policies, grants, proposals, operations, query-result references | Metadata PostgreSQL | Application-scoped metadata authority | Active source of truth with transactional transitions, retention, and RLS isolation. |
+| Legacy AI proposals/operations/results | `ai_authority/v1/{app}/*.json` | Retired JSON authority | Archived as inert evidence; never imported or replayed. |
+| Legacy AI migration/write plans | `ai_migration_plans/*.json` | Retired PostgreSQL-service compatibility | Archived as inert evidence; durable coordinator plans are the only executable plans. |
 | Normal migration/view plans | Process memory | PostgreSQL service | Reset; replaced by durable plan store. |
 | Console grants/executions | Process memory | Console service | Reset by design. |
 | Schemii schemas | schema directory | Schemii domain store | Preserve exactly, including unknown fields, semantic IDs, receipts, and complete layout. |
@@ -21,14 +20,14 @@ This is the Phase 0 inventory of authority-relevant persistence and wire contrac
 
 ## AI wire contracts
 
-Current shared routes include status/auth, session creation/list/history/activity/delete, messages, proposal claim/finalize/release/execute/reconcile, operation status, and Schemii policy GET/PUT.
+Current shared routes include status/auth, session creation/list/history/activity/delete, messages, proposal execute/reconcile, operation status, and Schemii policy GET/PUT. Claim/finalize/release proposal routes no longer exist.
 
 Target changes:
 
 - Application chat ID becomes distinct from external OpenCode session ID.
 - Both applications use durable chat ownership; titles are display-only.
 - Browser does not resend resource, target, capability, or policy authority after chat creation.
-- Legacy claim/finalize/release routes are removed after consumers migrate to operation execution.
+- Proposal execution and reconciliation are the only proposal transitions exposed to browsers.
 - Query-result delivery adds explicit pre-dispatch reservation and post-dispatch uncertain states.
 - Pending valid proposals are restored from metadata authority, never reconstructed from model history.
 

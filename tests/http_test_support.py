@@ -66,8 +66,12 @@ class FakePostgresService:
 
     def profile_context_fingerprint(self, profile_id):
         profile = next(item for item in self.profiles if item["id"] == profile_id)
-        from schemii.ai_http import ai_context_fingerprint
-        return ai_context_fingerprint([profile_id, profile.get("host"), profile.get("port"), profile.get("dbname"), profile.get("user"), profile.get("sslmode")])
+        import json
+        encoded = json.dumps([profile_id, profile.get("host"), profile.get("port"), profile.get("dbname"), profile.get("user"), profile.get("sslmode")], separators=(",", ":"))
+        value = 1469598103934665603
+        for character in encoded:
+            value = ((value ^ ord(character)) * 1099511628211) & ((1 << 64) - 1)
+        return f"{value:016x}"
 
     def save_profile(self, profile_id, body):
         self.calls.append(("save_profile", profile_id, body))

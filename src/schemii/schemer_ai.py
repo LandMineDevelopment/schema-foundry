@@ -4,18 +4,12 @@ import json
 import math
 from typing import Any
 
+from .ai_tool_contracts import SCHEMER_TOOL_CONTRACTS
+
 
 SCHEMER_AI_CONTEXT_SIZE = 64 * 1024
 SCHEMER_AI_QUERY_RESULT_SIZE = 48 * 1024
-SCHEMER_AI_TOOL_ACTION_TYPES = {
-    "schemer_read_query": "read_query",
-    "schemer_dashboard_open": "dashboard_open",
-    "schemer_dashboard_create": "dashboard_create",
-    "schemer_widget_create": "widget_create",
-    "schemer_widget_rename": "widget_rename",
-    "schemer_widget_duplicate": "widget_duplicate",
-    "schemer_widget_delete": "widget_delete",
-}
+SCHEMER_AI_TOOL_ACTION_TYPES = {name: contract.action_type for name, contract in SCHEMER_TOOL_CONTRACTS.items()}
 SCHEMER_AI_SKILLS = {
     "schemer-help",
     "schemer-dashboard-safety",

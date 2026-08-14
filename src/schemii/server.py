@@ -10,9 +10,10 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .ai_metadata_authority import SchemiiMetadataAuthority, retire_legacy_schemii_authority
-from .ai_actions import normalize_schemii_action, schemii_action_approval_floor, schemii_action_capability
+from .schemii_ai_actions import normalize_schemii_action
+from .ai_tool_contracts import effective_schemii_contract
 from .ai_schema_mutations import apply_schema_actions, destructive_impact
-from .ai_http import AiHttpRouter, authority_call, bounded_ai_query_result, issue_ai_proposals
+from .ai_http import AiHttpRouter, authority_call, issue_ai_proposals
 from .metadata import MetadataConfig, MetadataConnectionFactory, MetadataStore, MetadataStoreError
 from .migration_execution import DurableMigrationCoordinator
 from .examples import ExampleInstaller, installer_from_environment
@@ -27,11 +28,14 @@ from .postgres_http import (
     POSTGRES_READ_SQL_CAPABILITY,
     POSTGRES_SCHEMA_CAPABILITY,
     PROFILE_PATH,
+    PostgresRoutePolicy,
+    ReadSqlRoutePolicy,
     PostgresHttpMixin,
 )
 from .postgres_service import PostgresService, PostgresServiceError
 from .postgres_console import ConsolePolicy
 from .schema_store import SchemaStore, SchemaStoreError
+from .schemii_ai_executor import SchemiiAiExecutor
 from .server_runtime import begin_http_shutdown, parse_port, parse_proxy_setting, run_server, validate_static_directory
 from .readiness import readiness_report
 
@@ -71,11 +75,11 @@ def _ai_approvals() -> dict[str, str]:
 
 
 def _ai_policy_binding(chat, action, *, origin="model") -> dict:
-    capability = schemii_action_capability(action)
+    capability, approval_floor = effective_schemii_contract(action)
     configured = "every_action" if capability is None else chat["approvals"][capability]
     return {
         "capability": capability, "policyRevision": chat["policyRevision"], "origin": origin,
-        "configuredMode": configured, "effectiveMode": schemii_action_approval_floor(action) or configured,
+        "configuredMode": configured, "effectiveMode": approval_floor or configured,
     }
 
 AI_SYSTEM_INSTRUCTIONS = """You are Schemii's embedded PostgreSQL design assistant.
@@ -314,18 +318,21 @@ def make_handler(
         lambda handler, current_service, session_id, body: handler._ai_policy(current_service, session_id, body),
         proposal_operations=frozenset({"execute", "reconcile"}),
     )
+    ai_executor = SchemiiAiExecutor(
+        service, store, ai_authority, mutation_types=AI_SCHEMA_MUTATION_TYPES,
+        has_access=_has_ai_access, policy_binding=_ai_policy_binding,
+    )
 
     class SchemiiHandler(PostgresHttpMixin, base_handler):
-        postgres_capabilities = frozenset({
-            POSTGRES_PROFILE_CAPABILITY, POSTGRES_CATALOG_CAPABILITY, POSTGRES_SCHEMA_CAPABILITY,
-            POSTGRES_READ_SQL_CAPABILITY, POSTGRES_CONSOLE_CAPABILITY, POSTGRES_CONSOLE_WRITE_CAPABILITY,
-        })
+        postgres_route_policy = PostgresRoutePolicy(
+            "schemii",
+            frozenset({
+                POSTGRES_PROFILE_CAPABILITY, POSTGRES_CATALOG_CAPABILITY, POSTGRES_SCHEMA_CAPABILITY,
+                POSTGRES_READ_SQL_CAPABILITY, POSTGRES_CONSOLE_CAPABILITY, POSTGRES_CONSOLE_WRITE_CAPABILITY,
+            }),
+            read_sql=ReadSqlRoutePolicy(),
+        )
         postgres_console_policy = ConsolePolicy(allow_write=True)
-        postgres_read_sql_policy = {
-            "require_database": False, "require_profile_fingerprint": False,
-            "context_fields": frozenset(),
-            "allow_explain": True, "max_rows": 500, "max_columns": 100, "max_result_bytes": 1024 * 1024,
-        }
 
         def _ai_create_session(self, current_ai_service, body):
             def create():
@@ -788,46 +795,7 @@ def make_handler(
                     if current["state"] != "uncertain":
                         return {"operation": current}
                     proposal = ai_authority.proposal(proposal_id, session_id)
-                    action = proposal["action"]
-                    try:
-                        if action.get("type") == "migration_apply":
-                            result = service.reconcile_ai_migration(action["planId"], action["profileId"])
-                        elif action.get("type") == "postgres_write_apply":
-                            result = service.reconcile_ai_postgres_write(action["planId"], action["profileId"])
-                        elif action.get("type") in AI_SCHEMA_MUTATION_TYPES | {"schema_batch"}:
-                            result = store.get(chat["schemaId"]).get("aiOperationReceipts", {}).get(current["id"])
-                            if result is None:
-                                raise SchemaStoreError(409, "operation_not_applied", "No saved-design receipt exists for this operation")
-                        elif action.get("type") == "create_project":
-                            result = next((item.get("aiOperationReceipts", {}).get(current["id"]) for item in store.list() if current["id"] in item.get("aiOperationReceipts", {})), None)
-                            if result is None:
-                                raise SchemaStoreError(409, "operation_not_applied", "No created-project receipt exists for this operation")
-                        else:
-                            return {"operation": current}
-                    except (PostgresServiceError, SchemaStoreError) as error:
-                        if isinstance(error, SchemaStoreError):
-                            error_payload = error.payload["error"]
-                            error_status = error.status
-                            error_code = error_payload["code"]
-                        else:
-                            error_payload = error.to_dict()["error"]
-                            error_status = error.status
-                            error_code = error.code
-                        terminal_codes = {"apply_not_committed", "profile_changed", "database_changed", "plan_consumed", "not_found", "relation_changed"}
-                        state = "uncertain" if error_code == "execution_outcome_unknown" else "failed" if error_code in terminal_codes or error_status < 500 else "uncertain"
-                        resolved = current if state == "uncertain" else ai_authority.resolve_operation(current["id"], session_id, state, error=error_payload)
-                    else:
-                        durable_state = result.get("state") if action.get("type") in {"migration_apply", "postgres_write_apply"} and isinstance(result, dict) else None
-                        if durable_state in {"ready", "applying", "uncertain"}:
-                            return {"operation": current, "migrationExecution": result}
-                        if durable_state == "failed":
-                            resolved = ai_authority.resolve_operation(
-                                current["id"], session_id, "failed",
-                                error={"code": "apply_not_committed", "message": "PostgreSQL execution did not commit; create a fresh preview"},
-                            )
-                        else:
-                            resolved = ai_authority.resolve_operation(current["id"], session_id, "succeeded", result=result)
-                    return {"operation": resolved}
+                    return ai_executor.reconcile(chat, current, proposal)
                 return authority_call(self, reconcile)
             try:
                 chat = self._ai_chat(current_ai_service, session_id, body)
@@ -931,208 +899,12 @@ def make_handler(
             return envelope
 
         def _execute_schemii_action(self, action, session_id, schema_id, record, profile, authorization_target, schema_concurrency, operation_id, access):
-            action_type = action.get("type") or action.get("action")
-            schema_binding = {"schemaId": schema_id, **schema_concurrency}
-            if action_type == "schema_read_query":
-                if profile is None or action.get("profileId") != authorization_target.get("profileId") or action.get("namespace") != authorization_target.get("namespace"):
-                    raise PostgresServiceError(409, "action_target_changed", "Query target no longer matches the proposal")
-                result = service.execute_read_only_sql(
-                    profile["id"], authorization_target["namespace"], action.get("sql"), database=profile.get("dbname"),
-                    expected_profile_fingerprint=service.profile_context_fingerprint(profile["id"]),
-                    allow_explain=False, max_rows=100, max_columns=50, max_result_bytes=256 * 1024,
-                )
-                reference = ai_authority.create_result(
-                    session_id, {"resource": schema_id, "target": authorization_target,
-                                 "revision": record["revision"], "access": "data"},
-                    bounded_ai_query_result(result, max_rows=50, max_columns=50, max_bytes=24 * 1024),
-                )
-                return {"kind": "sql_result", "display": result, "resultRef": reference["id"], "schemaConcurrency": schema_concurrency, "authorizationTarget": authorization_target}
-            if action_type == "data_read":
-                if not _has_ai_access(access, "structured") or profile is None or action.get("profileId") != authorization_target.get("profileId") or action.get("namespace") != authorization_target.get("namespace"):
-                    raise PostgresServiceError(409, "action_target_changed", "Structured data-read target no longer matches the proposal")
-                result = service.preview_table_data(profile["id"], action["namespace"], action["relation"], action["offset"], action["limit"])
-                names = [column["name"] for column in result["columns"]]
-                display = {
-                    "columns": [{"name": name} for name in names],
-                    "rows": [[row.get(name) for name in names] for row in result["rows"]],
-                    "rowCount": len(result["rows"]), "truncated": result["hasMore"],
-                }
-                reference = ai_authority.create_result(
-                    session_id, {"resource": schema_id, "target": authorization_target,
-                                 "revision": record["revision"], "access": "data"},
-                    bounded_ai_query_result(display, max_rows=50, max_columns=50, max_bytes=24 * 1024),
-                )
-                return {"kind": "data_result", "display": display, "resultRef": reference["id"], "schemaConcurrency": schema_concurrency, "authorizationTarget": authorization_target}
-            if action_type == "raw_write":
-                if not _has_ai_access(access, "rawwrite") or profile is None or action.get("profileId") != authorization_target.get("profileId") or action.get("namespace") != authorization_target.get("namespace"):
-                    raise PostgresServiceError(409, "action_target_changed", "Raw-write target no longer matches the proposal")
-                console_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"schemii-ai-console:{operation_id}"))
-                execution_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"schemii-ai-execution:{operation_id}"))
-                grant = service.create_console_write_grant(profile["id"], {
-                    "consoleId": console_id, "database": profile["dbname"], "namespace": action["namespace"], "confirmed": True,
-                }, self.postgres_session_binding, self.postgres_server_id)
-                try:
-                    result = service.execute_console(profile["id"], {
-                        "executionId": execution_id, "consoleId": console_id, "database": profile["dbname"],
-                        "namespace": action["namespace"], "sql": action["sql"], "mode": "write",
-                        "writeGrantId": grant["writeGrantId"],
-                    }, self.postgres_session_binding, self.postgres_server_id, self.postgres_console_policy)
-                finally:
-                    try:
-                        service.revoke_console_write_grant(profile["id"], grant["writeGrantId"], self.postgres_session_binding, self.postgres_server_id)
-                    except PostgresServiceError:
-                        pass
-                return {"kind": "raw_sql_result", "mode": "write", "execution": result, "schemaConcurrency": schema_concurrency, "authorizationTarget": authorization_target}
-            if action_type == "migration_preview":
-                selected = next((item for item in service.list_profiles() if item.get("id") == action.get("profileId")), None)
-                if selected is None or selected.get("dbname") != action.get("database") or service.profile_context_fingerprint(selected["id"]) != action.get("profileFingerprint") or any(action.get(key) != authorization_target.get(key) for key in ("profileId", "database", "namespace", "profileFingerprint")):
-                    raise PostgresServiceError(409, "action_target_changed", "Migration target no longer matches the proposal")
-                saved_target = record["schema"].get("postgres", {})
-                if (saved_target.get("sourceProfileId"), saved_target.get("database"), saved_target.get("namespace")) != (selected["id"], selected["dbname"], action["namespace"]):
-                    raise SchemaStoreError(409, "schema_target_changed", "Saved schema target no longer matches the migration target")
-                plan = service.preview_ai_migration(
-                    operation_id, selected["id"], selected["dbname"], action["namespace"], record["schema"],
-                    action.get("destructivePolicy") == "allow-preview", schema_binding,
-                )
-                apply_action = {
-                    "type": "migration_apply", "profileId": selected["id"], "database": selected["dbname"],
-                    "namespace": action["namespace"], "planId": plan["applyPlanId"], "destructive": plan["destructive"],
-                    "reviewDigest": plan["reviewDigest"],
-                    "requiresConfirmation": True,
-                }
-                current_chat = ai_authority.get_chat(session_id)
-                proposal = ai_authority.create_proposal(
-                    session_id, apply_action, _ai_policy_binding(current_chat, apply_action, origin="server_apply"),
-                    authorization_target, schema_concurrency,
-                )
-                return {"kind": "migration_plan", "plan": plan, "target": {"profileId": selected["id"], "database": selected["dbname"], "namespace": action["namespace"], "profileFingerprint": action["profileFingerprint"]}, "schemaBinding": schema_binding, "applyProposal": self._ai_proposal_envelope(proposal, session_id, current_chat)}
-            if action_type in {"insert_rows_preview", "create_view_preview"}:
-                selected = next((item for item in service.list_profiles() if item.get("id") == action.get("profileId")), None)
-                if selected is None or selected.get("dbname") != action.get("database") or service.profile_context_fingerprint(selected["id"]) != action.get("profileFingerprint") or any(action.get(key) != authorization_target.get(key) for key in ("profileId", "database", "namespace", "profileFingerprint")):
-                    raise PostgresServiceError(409, "action_target_changed", "PostgreSQL write target no longer matches the proposal")
-                if action_type == "create_view_preview":
-                    store.require_view_mutation_binding(
-                        schema_id, schema_concurrency["revision"], schema_concurrency["layoutToken"], selected["id"], selected["dbname"],
-                        action["namespace"], action["relation"], "upsert", {"absent": True}, None,
-                    )
-                    plan = service.preview_ai_create_view(
-                        operation_id, selected["id"], selected["dbname"], action["namespace"], action["relation"],
-                        action["definition"], schema_binding,
-                    )
-                    write_kind = "create_view"
-                else:
-                    plan = service.preview_ai_insert_rows(
-                        operation_id, selected["id"], selected["dbname"], action["namespace"], action["relation"],
-                        action["rows"], schema_binding,
-                    )
-                    write_kind = "insert_rows"
-                apply_action = {
-                    "type": "postgres_write_apply", "writeKind": write_kind, "profileId": selected["id"],
-                    "database": selected["dbname"], "namespace": action["namespace"], "relation": action["relation"],
-                    "planId": plan["applyPlanId"], "reviewDigest": plan["planDigest"],
-                    "rowCount": plan.get("rowCount"), "reviewedPlan": plan,
-                    "requiresConfirmation": True,
-                }
-                current_chat = ai_authority.get_chat(session_id)
-                proposal = ai_authority.create_proposal(
-                    session_id, apply_action, _ai_policy_binding(current_chat, apply_action, origin="server_apply"),
-                    authorization_target, schema_concurrency,
-                )
-                return {
-                    "kind": "postgres_write_plan", "writeKind": write_kind, "plan": plan,
-                    "target": {"profileId": selected["id"], "database": selected["dbname"], "namespace": action["namespace"], "relation": action["relation"], "profileFingerprint": action["profileFingerprint"]},
-                    "schemaBinding": schema_binding, "applyProposal": self._ai_proposal_envelope(proposal, session_id, current_chat),
-                }
-            if action_type == "migration_apply":
-                return service.apply_ai_migration(
-                    operation_id, action["planId"], action["profileId"], action["database"], action["namespace"],
-                    action["destructive"], True,
-                )
-            if action_type == "postgres_write_apply":
-                if profile is None or any(action.get(key) != authorization_target.get(key) for key in ("profileId", "database", "namespace")):
-                    raise PostgresServiceError(409, "action_target_changed", "PostgreSQL write target no longer matches the reviewed plan")
-                return service.apply_ai_postgres_write(
-                    operation_id, action["planId"], action["profileId"], action["database"], action["namespace"],
-                    action["relation"], action["writeKind"], action["reviewDigest"],
-                )
-            if action_type == "open_project":
-                target = store.get(action.get("schemaId"))
-                if target["schema"].get("projectName") != action.get("projectName"):
-                    raise SchemaStoreError(409, "schema_conflict", "Target project changed; request a fresh proposal")
-                return {"kind": "client_command", "command": {"type": "open_schema", "schemaId": target["id"], "revision": target["revision"], "layoutToken": target["layoutToken"]}}
-            if action_type == "connection_setup":
-                fields = {key: action.get(key) for key in ("name", "host", "port", "database", "user", "sslmode")}
-                if not all(value is not None for value in fields.values()):
-                    raise OpenCodeServiceError(400, "validation_error", "Connection proposal is incomplete")
-                return {"kind": "client_command", "command": {"type": "prefill_postgres_profile", "profile": fields}}
-            if action_type == "open_connection":
-                selected = next((item for item in service.list_profiles() if item.get("id") == action.get("profileId")), None)
-                if selected is None or (selected.get("name"), selected.get("dbname"), service.profile_context_fingerprint(selected["id"])) != (action.get("name"), action.get("database"), action.get("profileFingerprint")):
-                    raise PostgresServiceError(409, "action_target_changed", "Saved connection no longer matches the proposal")
-                if action["namespace"] not in service.list_namespaces(selected["id"]):
-                    raise PostgresServiceError(409, "action_target_changed", "PostgreSQL namespace no longer exists")
-                return {"kind": "client_command", "command": {"type": "select_postgres_profile", "profileId": selected["id"], "name": selected["name"], "database": selected["dbname"], "namespace": action["namespace"], "profileFingerprint": action["profileFingerprint"]}}
-            if action_type == "create_project":
-                return store.create_ai_project(operation_id, action["projectName"])
-            if action_type in AI_SCHEMA_MUTATION_TYPES:
-                if action.get("profileId") is not None:
-                    postgres = record["schema"].get("postgres", {})
-                    if (action["profileId"], action["namespace"]) != (postgres.get("sourceProfileId"), postgres.get("namespace")):
-                        raise SchemaStoreError(409, "schema_target_changed", "Saved schema target no longer matches the proposal")
-                receipt = store.apply_ai_mutation(
-                    schema_id, operation_id, schema_concurrency["revision"], schema_concurrency["layoutToken"],
-                    lambda current: apply_schema_actions(current, [action], operation_id),
-                )
-                return self._add_ai_migration_preview(receipt, session_id, operation_id, access, authorization_target)
-            if action_type == "schema_batch":
-                actions = action.get("actions")
-                if not isinstance(actions, list) or not 2 <= len(actions) <= 5 or any(not isinstance(item, dict) or item.get("type") not in AI_SCHEMA_MUTATION_TYPES for item in actions):
-                    raise OpenCodeServiceError(400, "validation_error", "Schema batch is invalid")
-                for item in actions:
-                    if item.get("profileId") is not None:
-                        postgres = record["schema"].get("postgres", {})
-                        if (item["profileId"], item["namespace"]) != (postgres.get("sourceProfileId"), postgres.get("namespace")):
-                            raise SchemaStoreError(409, "schema_target_changed", "Saved schema target no longer matches the proposal")
-                receipt = store.apply_ai_mutation(
-                    schema_id, operation_id, schema_concurrency["revision"], schema_concurrency["layoutToken"],
-                    lambda current: apply_schema_actions(current, actions, operation_id),
-                )
-                return self._add_ai_migration_preview(receipt, session_id, operation_id, access, authorization_target)
-            raise OpenCodeServiceError(409, "action_temporarily_unavailable", "This action is unavailable until its server execution adapter is installed")
-
-        def _add_ai_migration_preview(self, receipt, session_id, operation_id, access, authorization_target):
-            if not authorization_target:
-                return receipt
-            saved = store.get(receipt["schemaId"])
-            target = saved["schema"].get("postgres", {})
-            if (target.get("sourceProfileId"), target.get("database"), target.get("namespace")) != (
-                authorization_target["profileId"], authorization_target["database"], authorization_target["namespace"],
-            ):
-                return receipt
-            binding = {"schemaId": receipt["schemaId"], "revision": receipt["revision"], "layoutToken": receipt["layoutToken"]}
-            try:
-                plan = service.preview_ai_migration(
-                    f"{operation_id}_migration", authorization_target["profileId"], authorization_target["database"],
-                    authorization_target["namespace"], saved["schema"], False, binding,
-                )
-                apply_action = {
-                    "type": "migration_apply", "profileId": authorization_target["profileId"],
-                    "database": authorization_target["database"], "namespace": authorization_target["namespace"],
-                    "planId": plan["applyPlanId"], "destructive": plan["destructive"], "reviewDigest": plan["reviewDigest"], "requiresConfirmation": True,
-                }
-                chat = ai_authority.get_chat(session_id)
-                proposal = ai_authority.create_proposal(
-                    session_id, apply_action, _ai_policy_binding(chat, apply_action, origin="server_apply"),
-                    authorization_target, {"revision": receipt["revision"], "layoutToken": receipt["layoutToken"]},
-                )
-                receipt["migrationPreview"] = {
-                    "status": "ready", "kind": "migration_plan", "plan": plan, "target": authorization_target,
-                    "schemaBinding": binding, "applyProposal": self._ai_proposal_envelope(proposal, session_id, chat),
-                }
-            except (PostgresServiceError, MetadataStoreError) as error:
-                payload = error.payload if hasattr(error, "payload") else error.to_dict()
-                receipt["migrationPreview"] = {"status": "unavailable", "error": payload["error"]}
-            return receipt
+            return ai_executor.execute(
+                action, session_id, schema_id, record, profile, authorization_target,
+                schema_concurrency, operation_id, access,
+                session_binding=self.postgres_session_binding, server_id=self.postgres_server_id,
+                console_policy=self.postgres_console_policy, proposal_envelope=self._ai_proposal_envelope,
+            )
 
         def do_PUT(self):
             path = urlparse(self.path).path

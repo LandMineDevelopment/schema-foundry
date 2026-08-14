@@ -10,6 +10,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from .ai_tool_contracts import SCHEMII_TOOL_CONTRACTS
+
 
 MAX_UPSTREAM_BODY = 8 * 1024 * 1024
 MAX_TEXT_SIZE = 64 * 1024
@@ -23,44 +25,8 @@ MAX_HISTORY_MESSAGES = 100
 MAX_HISTORY_TEXT_SIZE = 512 * 1024
 OPENCODE_WORKSPACE = "/workspace"
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
-CUSTOM_TOOLS = {
-    "schema_read_query",
-    "schema_data_read",
-    "schema_raw_write",
-    "schema_connection_setup",
-    "schema_project_open",
-    "schema_project_create",
-    "schema_populate",
-    "schema_add_table",
-    "schema_rename_table",
-    "schema_add_column",
-    "schema_update_column",
-    "schema_delete_element",
-    "schema_add_relationship",
-    "schema_connection_open",
-    "schema_migration_preview",
-    "schema_insert_rows_preview",
-    "schema_create_view_preview",
-}
-TOOL_ACTION_TYPES = {
-    "schema_read_query": "schema_read_query",
-    "schema_data_read": "data_read",
-    "schema_raw_write": "raw_write",
-    "schema_connection_setup": "connection_setup",
-    "schema_project_open": "open_project",
-    "schema_project_create": "create_project",
-    "schema_populate": "populate_schema",
-    "schema_add_table": "add_table",
-    "schema_rename_table": "rename_table",
-    "schema_add_column": "add_column",
-    "schema_update_column": "update_column",
-    "schema_delete_element": "delete_element",
-    "schema_add_relationship": "add_relationship",
-    "schema_connection_open": "open_connection",
-    "schema_migration_preview": "migration_preview",
-    "schema_insert_rows_preview": "insert_rows_preview",
-    "schema_create_view_preview": "create_view_preview",
-}
+CUSTOM_TOOLS = set(SCHEMII_TOOL_CONTRACTS)
+TOOL_ACTION_TYPES = {name: contract.action_type for name, contract in SCHEMII_TOOL_CONTRACTS.items()}
 SAFE_SKILLS = {
     "schemii-help",
     "connection-setup",

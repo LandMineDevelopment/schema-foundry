@@ -69,28 +69,28 @@ Agents must not duplicate another active agent's scope. Research findings that a
 
 ## Phase 1 — transactional server authority
 
-- [ ] Design versioned PostgreSQL schema for chats, policies, grants, proposals, operations, query-result references, and execution receipts.
-- [ ] Add a narrowly scoped metadata database role and connection configuration.
-- [ ] Implement idempotent metadata migrations with startup verification.
-- [ ] Implement transactional chat creation/deletion and policy updates.
-- [ ] Implement atomic approval-grant plus operation creation.
-- [ ] Implement unique one-operation-per-proposal ownership.
-- [ ] Implement durable operation lifecycle and recovery without fixed unrenewed leases.
-- [ ] Implement query-result reserve/consume/release with explicit uncertain delivery semantics.
-- [ ] Add cleanup and retention for expired/terminal authority records and sensitive result payloads.
-- [ ] Migrate or intentionally retire JSON authority/chat records.
-- [ ] Add cross-process, crash-window, restart, and unavailable-metadata-DB tests.
+- [x] Design versioned PostgreSQL schema for chats, policies, grants, proposals, operations, query-result references, and execution receipts.
+- [x] Add a narrowly scoped metadata database role and connection configuration.
+- [x] Implement idempotent metadata migrations with startup verification.
+- [x] Implement transactional chat creation/deletion and policy updates.
+- [x] Implement atomic approval-grant plus operation creation.
+- [x] Implement unique one-operation-per-proposal ownership.
+- [x] Implement durable operation lifecycle and recovery without fixed unrenewed leases.
+- [x] Implement query-result reserve/consume/release with explicit uncertain delivery semantics.
+- [x] Add cleanup and retention for expired/terminal authority records and sensitive result payloads.
+- [x] Migrate or intentionally retire JSON authority/chat records.
+- [x] Add cross-process, crash-window, restart, and unavailable-metadata-DB tests.
 
 ## Phase 2 — common chat identity for both apps
 
-- [ ] Introduce application/resource-aware chat identity.
-- [ ] Move Schemer from title-bound authority to durable chat records.
-- [ ] Keep OpenCode titles display-only.
-- [ ] Add one-time import or explicit retirement for legacy Schemer sessions.
-- [ ] Use one server-owned cryptographic target fingerprint contract.
-- [ ] Remove browser-side authority fingerprint derivation.
-- [ ] Align history, activity, deletion, proposal, operation, and policy routes with chat identity.
-- [ ] Restore all still-valid pending server proposals from authority records.
+- [x] Introduce application/resource-aware chat identity.
+- [x] Move Schemer from title-bound authority to durable chat records.
+- [x] Keep OpenCode titles display-only.
+- [x] Add one-time import or explicit retirement for legacy Schemer sessions.
+- [x] Use one server-owned cryptographic target fingerprint contract.
+- [x] Remove browser-side authority fingerprint derivation.
+- [x] Align history, activity, deletion, proposal, operation, and policy routes with chat identity.
+- [x] Restore all still-valid pending server proposals from authority records.
 
 ## Phase 3 — durable migration execution
 
@@ -107,15 +107,15 @@ Agents must not duplicate another active agent's scope. Research findings that a
 
 ## Phase 4 — PostgreSQL catalog and write safety
 
-- [ ] Run full introspection in one read-only repeatable-read snapshot.
-- [ ] Reject missing namespaces distinctly from empty namespaces.
-- [ ] Inventory table metadata affected by reconstruction: owner, ACLs, comments, RLS/policies, rules, replica identity, statistics, storage, tablespace/access method, publications, security labels, and extension-owned state.
-- [ ] Preserve supported metadata transactionally.
-- [ ] Reject reconstruction when unsupported metadata would be lost.
-- [ ] Improve role capability reporting, including inheritance and `SET ROLE` ability.
-- [ ] Fix post-commit local-history/receipt error handling.
-- [ ] Replace weak advisory-lock keys with a collision-resistant contract.
-- [ ] Add live disposable PostgreSQL tests for all risky paths and cleanup assertions.
+- [x] Run full introspection in one read-only repeatable-read snapshot.
+- [x] Reject missing namespaces distinctly from empty namespaces.
+- [x] Inventory table metadata affected by reconstruction: owner, ACLs, comments, RLS/policies, rules, replica identity, statistics, storage, tablespace/access method, publications, security labels, and extension-owned state.
+- [x] Preserve supported metadata transactionally.
+- [x] Reject reconstruction when unsupported metadata would be lost.
+- [x] Improve role capability reporting, including inheritance and `SET ROLE` ability.
+- [x] Fix post-commit local-history/receipt error handling.
+- [x] Replace weak advisory-lock keys with a collision-resistant contract.
+- [x] Add live disposable PostgreSQL tests for all risky paths and cleanup assertions.
 
 ## Phase 5 — browser/server contracts
 
@@ -142,14 +142,14 @@ Agents must not duplicate another active agent's scope. Research findings that a
 
 ## Phase 7 — module ownership and cleanup
 
-- [ ] Split shared AI primitive validation from Schemii and Schemer action vocabularies.
-- [ ] Introduce declarative per-application tool contract registries and parity tests.
-- [ ] Extract Schemii and Schemer AI executors from HTTP handlers.
-- [ ] Extract explicit PostgreSQL route policies and guards from stringly mixin hooks.
-- [ ] Decompose `PostgresService` internally while preserving a deliberate facade where useful.
-- [ ] Remove dead compatibility functions and stale title/fingerprint paths.
-- [ ] Remove false Compose coupling between Schemer and Schemii health.
-- [ ] Correct documentation to exactly match implemented capabilities.
+- [x] Split shared AI primitive validation from Schemii and Schemer action vocabularies.
+- [x] Introduce declarative per-application tool contract registries and parity tests.
+- [x] Extract Schemii and Schemer AI executors from HTTP handlers.
+- [x] Extract explicit PostgreSQL route policies and guards from stringly mixin hooks.
+- [x] Decompose `PostgresService` internally while preserving a deliberate facade where useful.
+- [x] Remove dead compatibility functions and stale title/fingerprint paths.
+- [x] Remove false Compose coupling between Schemer and Schemii health.
+- [x] Correct documentation to exactly match implemented capabilities.
 
 ## Phase 8 — final verification and delivery
 

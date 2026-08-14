@@ -4,7 +4,7 @@ import json
 import re
 from typing import Any, Callable
 
-from .ai_authority import AiAuthorityError
+from .ai_errors import AiDisclosureError
 from .metadata import MetadataStoreError
 from .opencode_service import OpenCodeService, OpenCodeServiceError
 
@@ -15,22 +15,13 @@ AI_SESSION_PATH = re.compile(r"^/api/ai/sessions/([A-Za-z0-9][A-Za-z0-9_.:-]{0,1
 AI_ACTIVITY_PATH = re.compile(r"^/api/ai/sessions/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})/activity$")
 AI_PROPOSAL_PATH = re.compile(
     r"^/api/ai/sessions/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})/proposals/"
-    r"([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})/(claim|finalize|release|execute|reconcile)$"
+    r"([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})/(execute|reconcile)$"
 )
 AI_OPERATION_PATH = re.compile(
     r"^/api/ai/sessions/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})/operations/"
     r"([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})/status$"
 )
 AI_POLICY_PATH = re.compile(r"^/api/ai/sessions/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})/policy$")
-
-
-def ai_context_fingerprint(parts: list[Any]) -> str:
-    encoded = json.dumps(parts, ensure_ascii=False, separators=(",", ":"))
-    value = 1469598103934665603
-    for character in encoded:
-        value ^= ord(character)
-        value = value * 1099511628211 & ((1 << 64) - 1)
-    return f"{value:016x}"
 
 
 class AiHttpRouter:
@@ -58,7 +49,7 @@ class AiHttpRouter:
         self.activity_handler = activity_handler
         self.delete_session_handler = delete_session_handler
         self.policy_handler = policy_handler
-        self.proposal_operations = proposal_operations or frozenset({"claim", "finalize", "release", "execute", "reconcile"})
+        self.proposal_operations = proposal_operations or frozenset({"execute", "reconcile"})
 
     @staticmethod
     def _authorize(handler) -> bool:
@@ -259,7 +250,7 @@ def issue_ai_proposals(authority, response, *, application, session_id, resource
 def authority_call(handler, callback, status: int = 200):
     try:
         handler.send_json(status, callback())
-    except (AiAuthorityError, MetadataStoreError) as error:
+    except (AiDisclosureError, MetadataStoreError) as error:
         handler.send_json(error.status, error.to_dict())
 
 
@@ -275,5 +266,5 @@ def bounded_ai_query_result(result: dict[str, Any], *, max_rows: int, max_column
         bounded["rowCount"] = len(rows)
         bounded["truncated"] = True
     if len(json.dumps(bounded, allow_nan=False, separators=(",", ":")).encode("utf-8")) > max_bytes:
-        raise AiAuthorityError(413, "authority_payload_too_large", "Query result metadata exceeds the AI disclosure limit")
+        raise AiDisclosureError(413, "ai_disclosure_too_large", "Query result metadata exceeds the AI disclosure limit")
     return bounded

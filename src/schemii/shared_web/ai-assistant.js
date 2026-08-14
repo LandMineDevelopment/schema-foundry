@@ -22,7 +22,7 @@
     return seconds < 10 ? `${seconds.toFixed(1)}s` : `${Math.round(seconds)}s`;
   }
 
-  function aiContextFingerprint(parts) {
+  function aiContextCacheKey(parts) {
     let hash = 1469598103934665603n;
     for (const character of JSON.stringify(parts)) {
       hash ^= BigInt(character.codePointAt(0));
@@ -670,5 +670,5 @@
     return Object.freeze({ ...api, open: () => setOpen(true), close: () => setOpen(false), refresh: loadStatus, reset: resetConversation, normalizeStoredModel });
   }
 
-  window.SchemiiShared = Object.freeze({ ...(window.SchemiiShared || {}), createAiAssistant, normalizeStoredAiModel: normalizeStoredModel, aiContextFingerprint, boundedAiQueryResult });
+  window.SchemiiShared = Object.freeze({ ...(window.SchemiiShared || {}), createAiAssistant, normalizeStoredAiModel: normalizeStoredModel, aiContextCacheKey, boundedAiQueryResult });
 })();

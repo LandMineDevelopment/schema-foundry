@@ -793,9 +793,7 @@ class ServerTests(unittest.TestCase):
             }}, expected_layout_token=None, layout_protocol=None,
         )
         self.service.profiles = [{"id": "local", "name": "Local", "host": "127.0.0.1", "port": 5432, "dbname": "demo", "user": "reader"}]
-        from schemii.ai_http import ai_context_fingerprint
-        fingerprint = self.service.profile_context_fingerprint("local")
-        self.ai_service.session_title = f"SCHEMII_CONTEXT:schema_one:schema-write:{ai_context_fingerprint(['local', 'demo', 'public', fingerprint])} Demo"
+        self.ai_service.session_title = "Demo"
         self.ai_service.prompt_response = {"text": "Review.", "parts": [], "actions": [{
             "type": "add_table", "name": "events", "purpose": "Events", "columns": [{"name": "id", "type": "uuid"}], "requiresConfirmation": True,
         }]}
@@ -838,10 +836,8 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(operation["result"]["command"]["type"], "select_postgres_profile")
         self.assertIn(("list_namespaces", "local"), self.service.calls)
 
-        from schemii.ai_http import ai_context_fingerprint
-        fingerprint = self.service.profile_context_fingerprint("local")
         self.authority.chats.pop("ses_1", None)
-        self.ai_service.session_title = f"SCHEMII_CONTEXT:schema_one:schema-read-write:{ai_context_fingerprint(['local', 'demo', 'public', fingerprint])} Demo chat"
+        self.ai_service.session_title = "Demo chat"
         message = {
             "text": "Preview migration", "model": {}, "schemaId": "schema_one", "accessLevel": "schema-read-write",
             "profileId": "local", "database": "demo", "namespace": "public",
@@ -878,9 +874,7 @@ class ServerTests(unittest.TestCase):
             "id": "local", "name": "Local", "host": "127.0.0.1", "port": 5432,
             "dbname": "demo", "user": "reader", "sslmode": "prefer",
         }]
-        from schemii.ai_http import ai_context_fingerprint
-        fingerprint = self.service.profile_context_fingerprint("local")
-        self.ai_service.session_title = f"SCHEMII_CONTEXT:schema_one:data:{ai_context_fingerprint(['local', 'demo', 'public', fingerprint])} Demo chat"
+        self.ai_service.session_title = "Demo chat"
         self.ai_service.prompt_response = {"text": "Review.", "parts": [], "actions": [{
             "type": "insert_rows_preview", "profileId": "local", "namespace": "public", "relation": "events",
             "rows": [{"name": "launch"}, {"name": "review"}], "purpose": "Seed events",
@@ -924,10 +918,8 @@ class ServerTests(unittest.TestCase):
             "id": "local", "name": "Local", "host": "127.0.0.1", "port": 5432,
             "dbname": "demo", "user": "writer", "sslmode": "prefer",
         }]
-        from schemii.ai_http import ai_context_fingerprint
-        fingerprint = self.service.profile_context_fingerprint("local")
         access = "schema-structured-write-rawread-rawwrite"
-        self.ai_service.session_title = f"SCHEMII_CONTEXT:schema_one:{access}:{ai_context_fingerprint(['local', 'demo', 'public', fingerprint])} Demo chat"
+        self.ai_service.session_title = "Demo chat"
         sql = "UPDATE events SET active = true; DELETE FROM events WHERE expired"
         self.ai_service.prompt_response = {"text": "Review.", "parts": [], "actions": [{
             "type": "raw_write", "profileId": "local", "namespace": "public", "sql": sql,
@@ -953,9 +945,7 @@ class ServerTests(unittest.TestCase):
             "type": "insert_rows_preview", "profileId": "local", "namespace": "public", "relation": "events",
             "rows": [{"name": "later"}], "purpose": "Seed events", "readOnly": True, "requiresConfirmation": True,
         }]}
-        fingerprint = self.service.profile_context_fingerprint("local")
-        from schemii.ai_http import ai_context_fingerprint
-        self.ai_service.session_title = f"SCHEMII_CONTEXT:schema_one:data:{ai_context_fingerprint(['local', 'demo', 'public', fingerprint])} Demo chat"
+        self.ai_service.session_title = "Demo chat"
         message = {"text": "Insert later", "model": {}, "schemaId": "schema_one", "accessLevel": "data", "profileId": "local", "database": "demo", "namespace": "public"}
         execute = {"schemaId": "schema_one", "accessLevel": "data", "profileId": "local", "database": "demo", "namespace": "public", "policyRevision": 1, "confirmation": {"accepted": True, "mode": "every_action"}}
         proposal = json.loads(self.request("/api/ai/sessions/ses_1/messages", "POST", message, authorized=True)[1])["proposals"][0]
@@ -987,9 +977,7 @@ class ServerTests(unittest.TestCase):
             "id": "local", "name": "Local", "host": "127.0.0.1", "port": 5432,
             "dbname": "demo", "user": "reader", "sslmode": "prefer",
         }]
-        from schemii.ai_http import ai_context_fingerprint
-        fingerprint = self.service.profile_context_fingerprint("local")
-        self.ai_service.session_title = f"SCHEMII_CONTEXT:schema_one:data:{ai_context_fingerprint(['local', 'demo', 'public', fingerprint])} Demo chat"
+        self.ai_service.session_title = "Demo chat"
         self.ai_service.prompt_response = {"text": "Review.", "parts": [], "actions": [{
             "type": "create_view_preview", "profileId": "local", "namespace": "public", "relation": "summary",
             "definition": 'CREATE VIEW "public"."summary" AS SELECT 1', "purpose": "Create summary",
@@ -1047,9 +1035,7 @@ class RealAiWriteHttpTests(unittest.TestCase):
             "projectName": "Demo", "tables": [], "relationships": [], "functions": [], "views": [],
             "postgres": {"sourceProfileId": "local", "database": "demo", "namespace": "public"},
         }}, expected_layout_token=None, layout_protocol=None)
-        from schemii.ai_http import ai_context_fingerprint
-        fingerprint = self.service.profile_context_fingerprint("local")
-        self.ai_service.session_title = f"SCHEMII_CONTEXT:schema_one:data:{ai_context_fingerprint(['local', 'demo', 'public', fingerprint])} Demo chat"
+        self.ai_service.session_title = "Demo chat"
 
     def tearDown(self):
         if self.http is not None:

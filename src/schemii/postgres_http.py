@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import dataclass, field
+from typing import Any, Callable, ContextManager, FrozenSet
 from urllib.parse import parse_qs
 
 from .postgres_console import ConsolePolicy
@@ -32,33 +34,57 @@ POSTGRES_CONSOLE_CAPABILITY = "console"
 POSTGRES_CONSOLE_WRITE_CAPABILITY = "console_write"
 
 
+@dataclass(frozen=True)
+class ReadSqlRoutePolicy:
+    require_database: bool = False
+    require_profile_fingerprint: bool = False
+    context_fields: FrozenSet[str] = frozenset()
+    ai_context_fields: FrozenSet[str] = frozenset()
+    allow_explain: bool = True
+    max_rows: int = 500
+    max_columns: int = 100
+    max_result_bytes: int = 1024 * 1024
+
+
+RouteGuard = Callable[[Any, dict[str, Any]], ContextManager[Any]]
+RouteResultHandler = Callable[[Any, dict[str, Any], dict[str, Any]], dict[str, Any]]
+SavedWidgetHandler = Callable[[Any, str, dict[str, Any]], dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class PostgresRoutePolicy:
+    application: str
+    capabilities: FrozenSet[str]
+    read_sql: ReadSqlRoutePolicy = field(default_factory=ReadSqlRoutePolicy)
+    relation_query_context_fields: FrozenSet[str] = frozenset()
+    temporal_series_context_fields: FrozenSet[str] = frozenset()
+    relation_detail_context_fields: FrozenSet[str] = frozenset()
+    read_sql_guard: RouteGuard | None = None
+    read_sql_result: RouteResultHandler | None = None
+    relation_query_guard: RouteGuard | None = None
+    temporal_series_guard: RouteGuard | None = None
+    relation_detail_guard: RouteGuard | None = None
+    saved_widget_query: SavedWidgetHandler | None = None
+    saved_widget_detail: SavedWidgetHandler | None = None
+
+
+DEFAULT_POSTGRES_ROUTE_POLICY = PostgresRoutePolicy(
+    "shared",
+    frozenset({
+        POSTGRES_PROFILE_CAPABILITY, POSTGRES_CATALOG_CAPABILITY, POSTGRES_SCHEMA_CAPABILITY,
+        POSTGRES_RELATION_QUERY_CAPABILITY, POSTGRES_READ_SQL_CAPABILITY, POSTGRES_CONSOLE_CAPABILITY,
+    }),
+)
+
+
 class PostgresHttpMixin:
     """Shared profile, catalog, and read-only query routes for local apps."""
 
-    postgres_capabilities = frozenset({
-        POSTGRES_PROFILE_CAPABILITY,
-        POSTGRES_CATALOG_CAPABILITY,
-        POSTGRES_SCHEMA_CAPABILITY,
-        POSTGRES_RELATION_QUERY_CAPABILITY,
-        POSTGRES_READ_SQL_CAPABILITY,
-        POSTGRES_CONSOLE_CAPABILITY,
-    })
-    postgres_read_sql_policy = {
-        "require_database": False,
-        "require_profile_fingerprint": False,
-        "context_fields": frozenset(),
-        "allow_explain": True,
-        "max_rows": 500,
-        "max_columns": 100,
-        "max_result_bytes": 1024 * 1024,
-    }
-    postgres_relation_query_context_fields = frozenset()
-    postgres_temporal_series_context_fields = frozenset()
-    postgres_relation_detail_context_fields = frozenset()
+    postgres_route_policy = DEFAULT_POSTGRES_ROUTE_POLICY
     postgres_console_policy = ConsolePolicy()
 
     def _has_postgres_capability(self, capability: str) -> bool:
-        return capability in self.postgres_capabilities
+        return capability in self.postgres_route_policy.capabilities
 
     def _postgres_service_call(self, callback, status: int = 200):
         path = getattr(self, "path", "").split("?", 1)[0]
@@ -186,16 +212,18 @@ class PostgresHttpMixin:
         if body is None:
             return True
         if saved_widget_query_match:
-            if set(body) != {"dashboardId", "expectedRevision", "widgetId"} or not hasattr(self, "_postgres_saved_widget_query"):
+            adapter = self.postgres_route_policy.saved_widget_query
+            if set(body) != {"dashboardId", "expectedRevision", "widgetId"} or adapter is None:
                 self.send_json(400, {"error": {"code": "validation_error", "message": "Saved widget aggregate fields are invalid"}})
             else:
-                self._postgres_service_call(lambda: self._postgres_saved_widget_query(saved_widget_query_match.group(1), body))
+                self._postgres_service_call(lambda: adapter(self, saved_widget_query_match.group(1), body))
         elif saved_widget_detail_match:
             fields = {"dashboardId", "expectedRevision", "widgetId", "selection", "offset", "limit", "sort", "searches"}
-            if set(body) != fields or not hasattr(self, "_postgres_saved_widget_detail"):
+            adapter = self.postgres_route_policy.saved_widget_detail
+            if set(body) != fields or adapter is None:
                 self.send_json(400, {"error": {"code": "validation_error", "message": "Saved widget detail fields are invalid"}})
             else:
-                self._postgres_service_call(lambda: self._postgres_saved_widget_detail(saved_widget_detail_match.group(1), body))
+                self._postgres_service_call(lambda: adapter(self, saved_widget_detail_match.group(1), body))
         elif write_grants_match:
             grant_fields = {"consoleId", "database", "namespace", "confirmed"}
             if not isinstance(body, dict) or set(body) != grant_fields:
@@ -215,18 +243,18 @@ class PostgresHttpMixin:
                 ))
         elif relation_detail_match:
             base_fields = {"source", "query", "selection", "detail", "offset", "limit", "sort", "searches"}
-            contextual_fields = base_fields | set(self.postgres_relation_detail_context_fields)
+            contextual_fields = base_fields | set(self.postgres_route_policy.relation_detail_context_fields)
             if not isinstance(body, dict) or set(body) not in (base_fields, contextual_fields):
                 self.send_json(400, {"error": {"code": "validation_error", "message": "detail request fields are invalid"}})
             else:
                 def execute_detail():
-                    guard = getattr(self, "_postgres_relation_detail_guard", None)
+                    guard = self.postgres_route_policy.relation_detail_guard
                     if guard is None or set(body) == base_fields:
                         return self.service.execute_relation_detail(
                             relation_detail_match.group(1), body["source"], body["query"], body["selection"],
                             body["detail"], body["offset"], body["limit"], body["sort"], body["searches"],
                         )
-                    with guard(body):
+                    with guard(self, body):
                         return self.service.execute_relation_detail(
                             relation_detail_match.group(1), body["source"], body["query"], body["selection"],
                             body["detail"], body["offset"], body["limit"], body["sort"], body["searches"],
@@ -235,7 +263,7 @@ class PostgresHttpMixin:
         elif relation_temporal_series_match:
             manifest_fields = {"source", "query", "action", "refreshGeneration"}
             window_fields = manifest_fields | {"series", "windowStart"}
-            context = set(self.postgres_temporal_series_context_fields)
+            context = set(self.postgres_route_policy.temporal_series_context_fields)
             fields = set(body) if isinstance(body, dict) else set()
             expected_fields = manifest_fields if isinstance(body, dict) and body.get("action") == "manifest" else window_fields if isinstance(body, dict) and body.get("action") == "window" else set()
             valid_fields = (expected_fields | context,) if context else (expected_fields,)
@@ -247,23 +275,23 @@ class PostgresHttpMixin:
                         relation_temporal_series_match.group(1), body["source"], body["query"], body["action"], body["refreshGeneration"],
                         body.get("series"), body.get("windowStart"),
                     )
-                    guard = getattr(self, "_postgres_temporal_series_guard", None)
+                    guard = self.postgres_route_policy.temporal_series_guard
                     if guard is None:
                         return call()
-                    with guard(body):
+                    with guard(self, body):
                         return call()
                 self._postgres_service_call(execute_temporal_series)
         elif relation_query_match:
             base_fields = {"source", "query"}
-            contextual_fields = base_fields | set(self.postgres_relation_query_context_fields)
+            contextual_fields = base_fields | set(self.postgres_route_policy.relation_query_context_fields)
             if not isinstance(body, dict) or set(body) not in (base_fields, contextual_fields):
                 self.send_json(400, {"error": {"code": "validation_error", "message": "query request fields are invalid"}})
             else:
                 def execute_query():
-                    guard = getattr(self, "_postgres_relation_query_guard", None)
+                    guard = self.postgres_route_policy.relation_query_guard
                     if guard is None or set(body) == base_fields:
                         return self.service.execute_widget_query(relation_query_match.group(1), body["source"], body["query"])
-                    with guard(body):
+                    with guard(self, body):
                         return self.service.execute_widget_query(relation_query_match.group(1), body["source"], body["query"])
                 self._postgres_service_call(execute_query)
         elif relation_verify_batch_match:
@@ -282,18 +310,18 @@ class PostgresHttpMixin:
                 relation_preview_match.group(1), body.get("source"), body.get("offset", 0), body.get("limit", 20)
             ))
         elif sql_match:
-            policy = self.postgres_read_sql_policy
-            allowed_fields = {"database", "namespace", "sql"} if policy["require_database"] else {"namespace", "sql"}
-            if policy.get("require_profile_fingerprint"):
+            policy = self.postgres_route_policy.read_sql
+            allowed_fields = {"database", "namespace", "sql"} if policy.require_database else {"namespace", "sql"}
+            if policy.require_profile_fingerprint:
                 allowed_fields.add("profileFingerprint")
-            allowed_fields |= set(policy.get("context_fields", ()))
-            ai_fields = set(policy.get("ai_context_fields", ()))
+            allowed_fields |= set(policy.context_fields)
+            ai_fields = set(policy.ai_context_fields)
             compatible_fields = {"database", "namespace", "sql"}
             valid_fields = (
                 isinstance(body, dict)
                 and (
                     set(body) == allowed_fields or set(body) == allowed_fields | ai_fields
-                    or (not policy["require_database"] and set(body) == compatible_fields)
+                    or (not policy.require_database and set(body) == compatible_fields)
                 )
             )
             if not valid_fields:
@@ -305,15 +333,15 @@ class PostgresHttpMixin:
                         result = self.service.execute_read_only_sql(
                             sql_match.group(1), body.get("namespace"), body.get("sql"), database=body.get("database"),
                             expected_profile_fingerprint=body.get("profileFingerprint"),
-                            allow_explain=policy["allow_explain"] and not ai_request, max_rows=policy["max_rows"],
-                            max_columns=policy["max_columns"], max_result_bytes=policy["max_result_bytes"],
+                            allow_explain=policy.allow_explain and not ai_request, max_rows=policy.max_rows,
+                            max_columns=policy.max_columns, max_result_bytes=policy.max_result_bytes,
                         )
-                        result_handler = getattr(self, "_postgres_read_sql_result", None)
-                        return result_handler(body, result) if result_handler is not None and ai_request else result
-                    guard = getattr(self, "_postgres_read_sql_guard", None) if ai_fields <= set(body) else None
+                        result_handler = self.postgres_route_policy.read_sql_result
+                        return result_handler(self, body, result) if result_handler is not None and ai_request else result
+                    guard = self.postgres_route_policy.read_sql_guard if ai_fields <= set(body) else None
                     if guard is None:
                         return execute()
-                    with guard(body):
+                    with guard(self, body):
                         return execute()
                 self._postgres_service_call(execute_sql)
         elif profile_match.group(2) == "test":

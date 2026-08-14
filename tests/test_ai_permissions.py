@@ -10,6 +10,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from schemii.opencode_service import CUSTOM_TOOLS, PROMPT_TOOLS, SAFE_SKILLS, TOOL_ACTION_TYPES
 from schemii.schemer_ai import SCHEMER_AI_SKILLS, SCHEMER_AI_TOOL_ACTION_TYPES
+from schemii.ai_tool_contracts import AI_TOOL_CONTRACTS, SCHEMII_TOOL_CONTRACTS, SCHEMER_TOOL_CONTRACTS
 
 
 class AiPermissionContractTests(unittest.TestCase):
@@ -42,6 +43,25 @@ class AiPermissionContractTests(unittest.TestCase):
             self.assertNotIn("SCHEMII_ACTION:", source)
             self.assertNotRegex(source, re.compile(r"^\s*password\s*:", re.MULTILINE | re.IGNORECASE))
             self.assertNotRegex(source.lower(), r'filesystem|shell|webfetch')
+
+    def test_declarative_tool_contracts_match_every_opencode_registration(self):
+        expected = {
+            "schemii": (ROOT / "ai/workspace/.opencode/tools", SCHEMII_TOOL_CONTRACTS, TOOL_ACTION_TYPES),
+            "schemer": (ROOT / "ai/schemer-workspace/.opencode/tools", SCHEMER_TOOL_CONTRACTS, SCHEMER_AI_TOOL_ACTION_TYPES),
+        }
+        self.assertEqual(set(AI_TOOL_CONTRACTS), set(expected))
+        for application, (directory, contracts, registrations) in expected.items():
+            with self.subTest(application=application):
+                self.assertEqual(set(contracts), {path.stem for path in directory.glob("*.ts")})
+                self.assertEqual({name: item.action_type for name, item in contracts.items()}, registrations)
+                for name, contract in contracts.items():
+                    self.assertEqual(contract.name, name)
+                    self.assertEqual(contract.supported_app, application)
+                    self.assertTrue((ROOT / contract.schema).is_file())
+                    self.assertTrue(callable(contract.normalizer))
+                    self.assertTrue(callable(contract.approval_floor))
+                    self.assertIsInstance(contract.executor_adapter, str)
+                    self.assertTrue(contract.executor_adapter)
 
     def test_agent_guidance_exposes_table_proposals_without_write_bypasses(self):
         workspace = ROOT / "ai/workspace"

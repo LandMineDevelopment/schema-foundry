@@ -1,14 +1,22 @@
 from __future__ import annotations
 
 import copy
-import json
-import math
 import re
 from typing import Any
 
+from .ai_validation import (
+    confirmation as _confirmation,
+    exact as _exact,
+    exact_optional as _exact_optional,
+    identifier as _id,
+    insert_rows as _insert_rows,
+    normalized_list as _list,
+    postgres_name as _name,
+    sql as _sql,
+    text as _text,
+)
 
-SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
-NAME = re.compile(r"^[^\x00-\x1f\x7f]{1,63}$")
+
 SCHEMA_ACTIONS = {
     "create_project", "populate_schema", "add_table", "rename_table", "add_column", "update_column",
     "delete_element", "add_relationship", "migration_preview",
@@ -236,91 +244,12 @@ def normalize_schemii_action(action: Any, access: str) -> dict[str, Any]:
     raise ValueError("unsupported action")
 
 
-def normalize_schemer_action(action: Any, access: str) -> dict[str, Any]:
-    if not isinstance(action, dict):
-        raise ValueError("action must be an object")
-    action_type = action.get("type")
-    if action_type == "read_query":
-        fields = {"type", "dashboardId", "expectedRevision", "profileId", "database", "namespace", "sql", "purpose", "readOnly", "requiresConfirmation"}
-        _exact(action, fields)
-        if access != "data" or action.get("readOnly") is not True or action.get("requiresConfirmation") is not True:
-            raise ValueError("query action is not authorized")
-        return {
-            "type": action_type, "dashboardId": _id(action.get("dashboardId")),
-            "expectedRevision": _revision(action.get("expectedRevision")), "profileId": _id(action.get("profileId")),
-            "database": _name(action.get("database")), "namespace": _name(action.get("namespace")),
-            "sql": _sql(action.get("sql")), "purpose": _text(action.get("purpose"), 500),
-            "readOnly": True, "requiresConfirmation": True,
-        }
-    if action_type == "dashboard_open":
-        _exact(action, {"type", "dashboardId", "expectedRevision", "title", "requiresConfirmation"})
-        if action.get("requiresConfirmation") is not True:
-            raise ValueError("confirmation is required")
-        return {
-            "type": action_type, "dashboardId": _id(action.get("dashboardId")),
-            "expectedRevision": _revision(action.get("expectedRevision")), "title": _text(action.get("title"), 128),
-            "requiresConfirmation": True,
-        }
-    if action_type == "dashboard_create":
-        _exact(action, {"type", "title", "requiresConfirmation"}); _confirmation(action)
-        return {"type": action_type, "title": _text(action.get("title"), 128), "requiresConfirmation": True}
-    if action_type == "widget_create":
-        if access not in {"dashboard", "data"}: raise ValueError("widget mutation requires dashboard access")
-        base = {"type", "dashboardId", "expectedRevision", "title", "requiresConfirmation"}
-        complete = base | {"source", "query", "visualizationMode"}
-        action_fields = frozenset(action)
-        if action_fields not in {frozenset(base), frozenset(complete)}: raise ValueError("action fields are invalid")
-        _confirmation(action)
-        result = {"type": action_type, "dashboardId": _id(action.get("dashboardId")), "expectedRevision": _revision(action.get("expectedRevision")), "title": _text(action.get("title"), 128), "requiresConfirmation": True}
-        if action_fields == frozenset(complete):
-            source = action.get("source")
-            if not isinstance(source, dict) or set(source) != {"profileId", "database", "namespace", "relation", "kind", "fingerprint"}: raise ValueError("source is invalid")
-            if source.get("kind") not in {"table", "view", "materialized_view"} or not isinstance(source.get("fingerprint"), str) or not re.fullmatch(r"[0-9a-f]{64}", source["fingerprint"]): raise ValueError("source is invalid")
-            result["source"] = {"profileId": _id(source["profileId"]), "database": _name(source["database"]), "namespace": _name(source["namespace"]), "relation": _name(source["relation"]), "kind": source["kind"], "fingerprint": source["fingerprint"]}
-            if not isinstance(action.get("query"), dict): raise ValueError("query is invalid")
-            result["query"] = copy.deepcopy(action["query"])
-            if action.get("visualizationMode") not in {"table", "kpi", "bar", "line", "donut"}: raise ValueError("visualization mode is invalid")
-            result["visualizationMode"] = action["visualizationMode"]
-        return result
-    if action_type in {"widget_rename", "widget_duplicate", "widget_delete"}:
-        if access not in {"dashboard", "data"}: raise ValueError("widget mutation requires dashboard access")
-        fields = {"type", "dashboardId", "expectedRevision", "widgetId", "currentTitle", "requiresConfirmation"} | ({"destructive"} if action_type == "widget_delete" else {"title"})
-        _exact(action, fields); _confirmation(action)
-        if action_type == "widget_delete" and action.get("destructive") is not True: raise ValueError("destructive confirmation is invalid")
-        result = {"type": action_type, "dashboardId": _id(action.get("dashboardId")), "expectedRevision": _revision(action.get("expectedRevision")), "widgetId": _id(action.get("widgetId")), "currentTitle": _text(action.get("currentTitle"), 128), "requiresConfirmation": True}
-        if action_type == "widget_delete": result["destructive"] = True
-        else: result["title"] = _text(action.get("title"), 128)
-        return result
-    raise ValueError("unsupported action")
-
-
-def _exact(value: dict[str, Any], fields: set[str]) -> None:
-    if set(value) != fields:
-        raise ValueError("action fields are invalid")
-
-
-def _exact_optional(value: dict[str, Any], required: set[str], optional: set[str]) -> None:
-    if not required <= set(value) or set(value) - required - optional:
-        raise ValueError("action fields are invalid")
-
-
-def _confirmation(action: dict[str, Any]) -> None:
-    if action.get("requiresConfirmation") is not True:
-        raise ValueError("confirmation is required")
-
-
 def _optional_target(action: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
     if ("profileId" in action) != ("namespace" in action):
         raise ValueError("optional target is incomplete")
     if "profileId" in action:
         result.update({"profileId": _id(action["profileId"]), "namespace": _name(action["namespace"])})
     return result
-
-
-def _list(value: Any, minimum: int, maximum: int, normalize) -> list[Any]:
-    if not isinstance(value, list) or not minimum <= len(value) <= maximum:
-        raise ValueError("list size is invalid")
-    return [normalize(item) for item in value]
 
 
 def _table_definition(value: Any, *, require_purpose: bool) -> dict[str, Any]:
@@ -373,74 +302,4 @@ def _column_type(value: Any) -> str:
 def _default(value: Any, *, nullable: bool) -> str | None:
     if nullable and value is None: return None
     if not isinstance(value, str) or len(value.encode("utf-8")) > 1000 or "\x00" in value: raise ValueError("column default is invalid")
-    return value
-
-
-def _id(value: Any) -> str:
-    if not isinstance(value, str) or not SAFE_ID.fullmatch(value):
-        raise ValueError("identifier is invalid")
-    return value
-
-
-def _name(value: Any) -> str:
-    if not isinstance(value, str) or value != value.strip() or not NAME.fullmatch(value) or len(value.encode("utf-8")) > 63:
-        raise ValueError("PostgreSQL name is invalid")
-    return value
-
-
-def _text(value: Any, maximum: int) -> str:
-    if not isinstance(value, str) or not value or value != value.strip() or len(value.encode("utf-8")) > maximum or any(ord(char) < 32 or ord(char) == 127 for char in value):
-        raise ValueError("text is invalid")
-    return copy.deepcopy(value)
-
-
-def _sql(value: Any, maximum: int = 10_000) -> str:
-    if not isinstance(value, str) or not value.strip() or value != value.strip() or len(value.encode("utf-8")) > maximum or "\x00" in value:
-        raise ValueError("SQL is invalid")
-    if any(ord(char) < 32 and char not in "\n\r\t" for char in value):
-        raise ValueError("SQL is invalid")
-    return value
-
-
-def _insert_rows(value: Any) -> list[dict[str, Any]]:
-    if not isinstance(value, list) or not 1 <= len(value) <= 100:
-        raise ValueError("rows must contain 1 to 100 items")
-    normalized = []
-    columns = None
-    for row in value:
-        if not isinstance(row, dict) or not 1 <= len(row) <= 50:
-            raise ValueError("each row must contain 1 to 50 columns")
-        current = tuple(row)
-        if columns is None:
-            columns = current
-        elif set(current) != set(columns):
-            raise ValueError("all rows must use the same columns")
-        normalized_row = {}
-        for name in columns:
-            normalized_row[_name(name)] = _json_value(row[name])
-        normalized.append(normalized_row)
-    try:
-        encoded = json.dumps(normalized, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
-    except (TypeError, ValueError, RecursionError) as exc:
-        raise ValueError("row values must be finite JSON values") from exc
-    if len(encoded) > 24 * 1024:
-        raise ValueError("row values are too large")
-    return normalized
-
-
-def _json_value(value: Any) -> Any:
-    if isinstance(value, float) and not math.isfinite(value):
-        raise ValueError("row values must be finite JSON values")
-    if value is None or isinstance(value, (str, bool, int, float)):
-        return copy.deepcopy(value)
-    if isinstance(value, list):
-        return [_json_value(item) for item in value]
-    if isinstance(value, dict) and all(isinstance(key, str) for key in value):
-        return {key: _json_value(item) for key, item in value.items()}
-    raise ValueError("row values must be JSON values")
-
-
-def _revision(value: Any) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError("revision is invalid")
     return value

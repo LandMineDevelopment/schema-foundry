@@ -10,15 +10,35 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from schemii.dashboard_store import DashboardStore
-from schemii.ai_authority import AiAuthority
 from schemii.schema_store import SchemaStore
 from schemii.schemer_server import make_handler as make_schemer_handler
 from schemii.server import make_handler as make_schemii_handler
+from schemii.postgres_http import (
+    POSTGRES_CONSOLE_WRITE_CAPABILITY, POSTGRES_RELATION_QUERY_CAPABILITY,
+)
 from tests.http_test_support import FakePostgresService, RunningHttpServer
 from tests.fake_metadata_authority import FakeSchemiiAuthority
 
 
 class PostgresHttpContractTests(unittest.TestCase):
+    def test_application_route_policy_matrix_is_explicit_and_isolated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            schemii = make_schemii_handler(ROOT / "src/schemii/web", FakePostgresService(), SchemaStore(root / "schemas"), "token", server_id="schemii-policy", ai_authority=FakeSchemiiAuthority())
+            schemer = make_schemer_handler(ROOT / "src/schemii/schemer_web", FakePostgresService(), DashboardStore(root / "dashboards"), "token", server_id="schemer-policy", ai_authority=FakeSchemiiAuthority())
+            matrix = {
+                "schemii": (schemii.postgres_route_policy, True, False),
+                "schemer": (schemer.postgres_route_policy, False, True),
+            }
+            for application, (policy, console_write, relation_query) in matrix.items():
+                with self.subTest(application=application):
+                    self.assertEqual(policy.application, application)
+                    self.assertEqual(POSTGRES_CONSOLE_WRITE_CAPABILITY in policy.capabilities, console_write)
+                    self.assertEqual(POSTGRES_RELATION_QUERY_CAPABILITY in policy.capabilities, relation_query)
+                    self.assertEqual(policy.relation_query_guard is not None, application == "schemer")
+                    self.assertEqual(policy.saved_widget_query is not None, application == "schemer")
+                    self.assertEqual(policy.read_sql.require_profile_fingerprint, application == "schemer")
+
     def test_shared_profile_and_catalog_contract(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -29,7 +49,7 @@ class PostgresHttpContractTests(unittest.TestCase):
                 ),
                 "schemer": lambda service: make_schemer_handler(
                     ROOT / "src/schemii/schemer_web", service, DashboardStore(root / "dashboards"),
-                    "session-token", server_id="schemer-contract", ai_authority=AiAuthority(root / "authority", "schemer"),
+                    "session-token", server_id="schemer-contract", ai_authority=FakeSchemiiAuthority(),
                 ),
             }
             for name, factory in factories.items():
