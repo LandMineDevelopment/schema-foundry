@@ -290,12 +290,12 @@ esac
         project_create = (ROOT / "ai" / "workspace" / ".opencode" / "tools" / "schema_project_create.ts").read_text(encoding="utf-8")
         self.assertNotRegex(project_create, r"\b(?:password|path|url|host|shell|command|schemaId)\b")
 
-    def test_ai_schema_mutation_tools_use_inert_confirmed_actions(self):
+    def test_ai_schema_mutation_tools_return_fixed_acknowledgements(self):
         tool_dir = ROOT / "ai" / "workspace" / ".opencode" / "tools"
         for name in ("schema_populate.ts", "schema_add_table.ts", "schema_add_relationship.ts"):
             source = (tool_dir / name).read_text(encoding="utf-8")
-            self.assertIn("SCHEMII_ACTION:", source)
-            self.assertIn("requiresConfirmation: true", source)
+            self.assertIn('return "Proposal arguments received."', source)
+            self.assertNotIn("SCHEMII_ACTION:", source)
             self.assertNotRegex(source, r"\b(?:password|path|url|host|shell|command)\b")
 
 

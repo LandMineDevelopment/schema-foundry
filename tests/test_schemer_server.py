@@ -243,7 +243,7 @@ class SchemerServerTests(unittest.TestCase):
         self.assertEqual(self.request(path, "POST", payload, True)[0], 200)
         self.assertEqual(self.service.calls[-1], (
             "execute_read_only_sql", "shared", "bookstore", "SELECT 1", {
-                "database": "schemii", "expected_profile_fingerprint": "confirmed-profile", "reject_privileged_role": True, "allow_explain": False, "max_rows": 100,
+                "database": "schemii", "expected_profile_fingerprint": "confirmed-profile", "allow_explain": False, "max_rows": 100,
                 "max_columns": 50, "max_result_bytes": 256 * 1024,
             },
         ))

@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from schemii.dashboard_store import mercury_dashboard_record
-from schemii.schemer_ai import dashboard_context, proposal_manifest_fallback, validated_query_result
+from schemii.schemer_ai import dashboard_context, validated_query_result
 
 
 class SchemerAiTests(unittest.TestCase):
@@ -48,19 +48,6 @@ class SchemerAiTests(unittest.TestCase):
         context = dashboard_context(records[0], "metadata", records, [])
         self.assertLessEqual(len(context.encode()), 64 * 1024)
         self.assertTrue(json.loads(context)["truncated"])
-
-    def test_fallback_accepts_only_bounded_schemer_actions(self):
-        action = {"type": "dashboard_open", "dashboardId": "dashboard_mercury", "expectedRevision": 0, "title": "Mercury", "requiresConfirmation": True}
-        response = {"text": "Review this.\nSCHEMER_PROPOSALS:" + json.dumps([action]), "parts": [{"type": "text", "text": "fallback"}], "actions": []}
-        repaired = proposal_manifest_fallback(response)
-        self.assertEqual(repaired["actions"], [action])
-        self.assertNotIn("SCHEMER_PROPOSALS", repaired["text"])
-        rejected = proposal_manifest_fallback({"text": "SCHEMER_PROPOSALS:" + json.dumps([{"type": "add_table"}]), "parts": [], "actions": []})
-        self.assertEqual(rejected["actions"], [])
-        read = {"type": "read_query", "profileId": "shared", "database": "demo", "namespace": "public", "sql": "SELECT 1"}
-        response = {"text": "SCHEMER_PROPOSALS:" + json.dumps([read]), "parts": [], "actions": []}
-        self.assertEqual(proposal_manifest_fallback(response)["actions"], [])
-        self.assertEqual(proposal_manifest_fallback(response, allow_data=True)["actions"], [read])
 
     def test_data_context_accepts_only_exact_bounded_query_results(self):
         record = mercury_dashboard_record()

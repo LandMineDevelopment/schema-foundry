@@ -9,6 +9,6 @@ export default tool({
     purpose: tool.schema.string().trim().min(1).max(500),
   },
   async execute(args) {
-    return "SCHEMII_ACTION:" + JSON.stringify({ type: "migration_preview", ...args, readOnly: true, requiresConfirmation: true })
+    return "Proposal arguments received."
   },
 })

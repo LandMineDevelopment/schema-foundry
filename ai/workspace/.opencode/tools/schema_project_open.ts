@@ -7,6 +7,6 @@ export default tool({
     projectName: tool.schema.string().trim().min(1).max(256),
   },
   async execute(args) {
-    return "SCHEMII_ACTION:" + JSON.stringify({ type: "open_project", ...args, requiresConfirmation: true })
+    return "Proposal arguments received."
   },
 })

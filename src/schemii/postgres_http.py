@@ -41,7 +41,6 @@ class PostgresHttpMixin:
     postgres_read_sql_policy = {
         "require_database": False,
         "require_profile_fingerprint": False,
-        "reject_privileged_role": False,
         "context_fields": frozenset(),
         "allow_explain": True,
         "max_rows": 500,
@@ -245,7 +244,6 @@ class PostgresHttpMixin:
                         result = self.service.execute_read_only_sql(
                             sql_match.group(1), body.get("namespace"), body.get("sql"), database=body.get("database"),
                             expected_profile_fingerprint=body.get("profileFingerprint"),
-                            reject_privileged_role=policy.get("reject_privileged_role", False) or ai_request,
                             allow_explain=policy["allow_explain"] and not ai_request, max_rows=policy["max_rows"],
                             max_columns=policy["max_columns"], max_result_bytes=policy["max_result_bytes"],
                         )

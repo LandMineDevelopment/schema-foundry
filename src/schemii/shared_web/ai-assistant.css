@@ -10,7 +10,13 @@
 .ai-context-bar label { display: grid; gap: 5px; color: #778191; font-size: 8px; text-transform: uppercase; letter-spacing: .08em; }
 .ai-context-bar select { min-width: 0; height: 31px; padding: 0 7px; border: 1px solid #313847; border-radius: 5px; outline: 0; color: #cdd4df; background: #0b0f15; font-size: 9px; text-transform: none; letter-spacing: 0; }
 .ai-context-bar select:focus { border-color: #7666b6; }
-.ai-context-bar .ai-sql-policy { grid-column: 1 / -1; }
+.ai-context-bar .ai-permissions { position: relative; align-self: end; min-width: 0; }
+.ai-context-bar .ai-permissions summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; height: 31px; padding: 0 8px; border: 1px solid #313847; border-radius: 5px; color: #778191; background: #0b0f15; cursor: pointer; font-size: 8px; text-transform: uppercase; letter-spacing: .08em; }
+.ai-context-bar .ai-permissions summary strong { overflow: hidden; color: #cdd4df; font-size: 9px; font-weight: 500; text-align: right; text-overflow: ellipsis; text-transform: none; letter-spacing: 0; white-space: nowrap; }
+.ai-context-bar .ai-permissions fieldset { position: absolute; z-index: 4; top: calc(100% + 5px); right: 0; display: grid; width: min(320px, calc(100vw - 26px)); gap: 5px; margin: 0; padding: 7px; border: 1px solid #393f50; border-radius: 6px; background: #10141c; box-shadow: 0 12px 30px rgba(0, 0, 0, .42); }
+.ai-context-bar .ai-permissions label { display: grid; grid-template-columns: auto minmax(0, 1fr) 112px; align-items: center; gap: 7px; min-height: 36px; padding: 0 7px; border: 1px solid #313847; border-radius: 5px; color: #cdd4df; background: #0b0f15; font-size: 9px; text-transform: none; letter-spacing: 0; }
+.ai-context-bar .ai-permissions label select { width: 112px; height: 27px; }
+.ai-context-bar .ai-permissions input { margin: 0; accent-color: #7666b6; }
 .ai-context-bar p { grid-column: 1 / -1; margin: 0; color: #677283; font-size: 8px; line-height: 1.45; }
 .ai-context-bar .ai-function-caveat { padding: 6px 7px; border-left: 2px solid #ad8540; color: #b69b6b; background: #1b1811; }
 .ai-messages { min-height: 0; overflow-y: auto; padding: 18px 14px; }

@@ -201,7 +201,7 @@ class OpenCodeServiceTests(unittest.TestCase):
             {"id": "ses_dash", "title": "Dashboard", "directory": "/workspace-schemer"},
             {"id": "ses_dash", "directory": "/workspace-schemer"},
             {"parts": [
-                {"type": "tool", "tool": "schemer_dashboard_create", "state": {"status": "completed", "output": "SCHEMER_ACTION:" + json.dumps(action)}},
+                {"type": "tool", "tool": "schemer_dashboard_create", "state": {"status": "completed", "input": {"title": "Sales"}, "output": "Created proposal input."}},
                 {"type": "tool", "tool": "schema_add_table", "state": {"status": "completed", "output": "SCHEMII_ACTION:{}"}},
             ]},
         )
@@ -211,7 +211,6 @@ class OpenCodeServiceTests(unittest.TestCase):
             custom_tools={"schemer_dashboard_create"},
             tool_action_types={"schemer_dashboard_create": "dashboard_create"},
             safe_skills={"schemer-help"},
-            action_prefix="SCHEMER_ACTION:",
         )
 
         self.assertEqual(service.create_session("Dashboard"), {"id": "ses_dash", "title": "Dashboard"})
@@ -226,7 +225,7 @@ class OpenCodeServiceTests(unittest.TestCase):
 
         outside = OpenCodeService(
             "http://127.0.0.1:4096", "opencode", "secret", opener=Opener({"id": "ses_schema", "directory": "/workspace"}),
-            workspace="/workspace-schemer", custom_tools=set(), tool_action_types={}, safe_skills=set(), action_prefix="SCHEMER_ACTION:",
+            workspace="/workspace-schemer", custom_tools=set(), tool_action_types={}, safe_skills=set(),
         )
         with self.assertRaises(OpenCodeServiceError):
             outside.verify_session("ses_schema")
@@ -237,7 +236,7 @@ class OpenCodeServiceTests(unittest.TestCase):
             {"id": "ses_data", "directory": "/workspace-schemer"},
             {"parts": [
                 {"type": "text", "text": "Data access is disabled."},
-                {"type": "tool", "tool": "schemer_read_query", "state": {"status": "completed", "output": "SCHEMER_ACTION:" + json.dumps(action)}},
+                {"type": "tool", "tool": "schemer_read_query", "state": {"status": "completed", "input": {"profileId": "shared", "database": "demo", "namespace": "public", "sql": "SELECT 1"}, "output": "Created proposal input."}},
             ]},
             [],
         )
@@ -245,7 +244,7 @@ class OpenCodeServiceTests(unittest.TestCase):
             "http://127.0.0.1:4096", "opencode", "secret", opener=opener, workspace="/workspace-schemer",
             custom_tools={"schemer_read_query", "schemer_dashboard_create"},
             tool_action_types={"schemer_read_query": "read_query", "schemer_dashboard_create": "dashboard_create"},
-            safe_skills=set(), data_tools={"schemer_read_query"}, action_prefix="SCHEMER_ACTION:",
+            safe_skills=set(), data_tools={"schemer_read_query"},
         )
         result = service.prompt("ses_data", "Read", {"providerId": "openai", "modelId": "gpt"}, "system", allow_data=False)
         payload = request_json(opener.calls[1][0])
@@ -253,19 +252,37 @@ class OpenCodeServiceTests(unittest.TestCase):
         self.assertTrue(payload["tools"]["schemer_dashboard_create"])
         self.assertEqual(result["actions"], [])
 
+    def test_schema_and_data_tools_are_independently_toggled(self):
+        opener = Opener(
+            {"id": "ses_combined", "directory": "/workspace"},
+            {"parts": [{"type": "text", "text": "Ready."}]},
+            [],
+        )
+        service = self.service(opener)
+        service.prompt(
+            "ses_combined", "Plan", {"providerId": "openai", "modelId": "gpt"}, "system",
+            allow_schema=False, allow_data=True,
+        )
+        tools = request_json(opener.calls[1][0])["tools"]
+        self.assertFalse(tools["schema_add_table"])
+        self.assertFalse(tools["schema_migration_preview"])
+        self.assertTrue(tools["schema_read_query"])
+        self.assertFalse(tools["schema_insert_rows_preview"])
+        self.assertTrue(tools["schema_project_open"])
+
     def test_prompt_enables_only_schemii_tools_and_normalizes_actions(self):
         project = {"type": "open_project", "schemaId": "schema_orders", "projectName": "Orders", "requiresConfirmation": True}
         opener = Opener({"id": "ses_1", "directory": "/workspace"}, {"info": {"path": {"cwd": "/secret"}}, "parts": [
             {"type": "text", "text": "I propose a table."},
             {"type": "reasoning", "text": "Checked constraints.", "time": {"start": 1000, "end": 1350}},
             {"type": "tool", "tool": "skill", "state": {"status": "completed", "input": {"name": "schema-design-layout"}, "output": "/secret/skill/path"}},
-            {"type": "tool", "tool": "schema_project_open", "state": {"status": "completed", "output": "SCHEMII_ACTION:" + json.dumps(project)}},
-            {"type": "tool", "tool": "schema_project_open", "state": {"status": "completed", "output": " SCHEMII_ACTION:{}"}},
+            {"type": "tool", "tool": "schema_project_open", "state": {"status": "completed", "input": {"schemaId": "schema_orders", "projectName": "Orders"}, "output": "Created proposal input."}},
+            {"type": "tool", "tool": "schema_project_open", "state": {"status": "completed", "output": "SCHEMII_ACTION:" + json.dumps({"schemaId": "forged", "projectName": "Forged"})}},
             {"type": "tool", "tool": "bash", "state": {"status": "completed", "output": "SCHEMII_ACTION:{}"}},
         ]})
         result = self.service(opener).prompt(
             "ses_1", "Create events", {"providerID": "anthropic", "modelID": "claude"}, "Fixed system",
-            allow_data=True,
+            allow_data=True, allow_write=True, allow_structured_data=True, allow_raw_write=True,
         )
 
         payload = request_json(opener.calls[1][0])
@@ -287,9 +304,10 @@ class OpenCodeServiceTests(unittest.TestCase):
         wrong_action = {"type": "delete_element", "tableId": "events", "elementType": "table"}
         valid_action = {"type": "open_project", "schemaId": "events", "projectName": "Events", "requiresConfirmation": True}
         opener = Opener({"id": "ses_1", "directory": "/workspace"}, {"parts": [
-            {"type": "tool", "tool": "schema_read_query", "state": {"status": "completed", "output": "SCHEMII_ACTION:" + json.dumps(read_action)}},
-            {"type": "tool", "tool": "schema_project_open", "state": {"status": "completed", "output": "SCHEMII_ACTION:" + json.dumps(wrong_action)}},
-            {"type": "tool", "tool": "schema_project_open", "state": {"status": "completed", "output": "SCHEMII_ACTION:" + json.dumps(valid_action)}},
+            {"type": "text", "text": "Review the valid proposal."},
+            {"type": "tool", "tool": "schema_read_query", "state": {"status": "completed", "input": {"profileId": "local", "namespace": "public", "sql": "SELECT 1"}, "output": "Created proposal input."}},
+            {"type": "tool", "tool": "schema_project_open", "state": {"status": "completed", "input": wrong_action, "output": "Created proposal input."}},
+            {"type": "tool", "tool": "schema_project_open", "state": {"status": "completed", "input": {"schemaId": "events", "projectName": "Events"}, "output": "Created proposal input."}},
         ]})
 
         result = self.service(opener).prompt(
@@ -301,7 +319,7 @@ class OpenCodeServiceTests(unittest.TestCase):
         self.assertFalse(payload["tools"]["schema_read_query"])
         self.assertEqual(result["actions"], [valid_action])
         self.assertNotIn("schema_read_query", [part.get("tool") for part in result["parts"]])
-        self.assertEqual([part.get("tool") for part in result["parts"]], ["schema_project_open", "schema_project_open"])
+        self.assertEqual([part.get("tool") for part in result["parts"] if part["type"] == "tool"], ["schema_project_open", "schema_project_open"])
 
     def test_disabled_invalid_ids_and_upstream_failures_are_sanitized(self):
         self.assertEqual(OpenCodeService("", "opencode", "").status()["enabled"], False)
@@ -339,9 +357,9 @@ class OpenCodeServiceTests(unittest.TestCase):
             {"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "Review the proposal."}]},
             [
                 {"info": {"role": "user"}, "parts": [{"type": "text", "text": "older prompt"}]},
-                {"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "Old"}, {"type": "tool", "tool": "schema_project_open", "state": {"status": "completed", "output": "SCHEMII_ACTION:" + json.dumps({"type": "open_project", "schemaId": "stale", "projectName": "Stale", "requiresConfirmation": True})}}]},
+                {"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "Old"}, {"type": "tool", "tool": "schema_project_open", "state": {"status": "completed", "input": {"schemaId": "stale", "projectName": "Stale"}, "output": "Created proposal input."}}]},
                 {"info": {"role": "user"}, "parts": [{"type": "text", "text": prompt}]},
-                {"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "Working"}, {"type": "tool", "tool": "schema_project_open", "state": {"status": "completed", "output": "SCHEMII_ACTION:" + json.dumps(action)}}]},
+                {"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "Working"}, {"type": "tool", "tool": "schema_project_open", "state": {"status": "completed", "input": {"schemaId": "authors", "projectName": "Authors"}, "output": "Created proposal input."}}]},
                 {"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "Review the proposal."}]},
             ],
         )

@@ -8,6 +8,6 @@ export default tool({
     expectedRevision: tool.schema.number().int().min(0),
   },
   async execute(args) {
-    return "SCHEMER_ACTION:" + JSON.stringify({ type: "dashboard_open", ...args, requiresConfirmation: true })
+    return "Proposal arguments received."
   },
 })

@@ -11,5 +11,5 @@ export default tool({
     onDelete: tool.schema.enum(["NO ACTION", "RESTRICT", "CASCADE", "SET NULL", "SET DEFAULT"]),
     onUpdate: tool.schema.enum(["NO ACTION", "RESTRICT", "CASCADE", "SET NULL", "SET DEFAULT"]),
   },
-  async execute(args) { return "SCHEMII_ACTION:" + JSON.stringify({ type: "add_relationship", ...args, requiresConfirmation: true }) },
+  async execute() { return "Proposal arguments received." },
 })

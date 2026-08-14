@@ -117,6 +117,7 @@ class PostgresServiceTests(unittest.TestCase):
     def test_profile_secret_redaction_permissions_and_blank_update(self):
         self.assertNotIn("password", self.profile)
         self.assertNotIn("password", self.service.list_profiles()[0])
+        self.assertRegex(self.service.list_profiles()[0]["contextFingerprint"], r"^[0-9a-f]{16}$")
         store = Path(self.temporary_directory.name) / "postgres_profiles.json"
         if os.name != "nt":
             self.assertEqual(stat.S_IMODE(Path(self.temporary_directory.name).stat().st_mode), 0o700)
@@ -945,17 +946,20 @@ class PostgresServiceTests(unittest.TestCase):
         mismatch = Connection(responses={"SELECT current_database() AS database": [{"database": "other"}]})
         service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: mismatch)
         with self.assertRaises(PostgresServiceError) as error:
-            service.execute_read_only_sql("local", "public", "SELECT 1", database="demo", reject_privileged_role=True)
+            service.execute_read_only_sql("local", "public", "SELECT 1", database="demo")
         self.assertEqual(error.exception.code, "database_changed")
         self.assertFalse(any(sql == "SELECT 1" for sql, _ in mismatch.executed))
 
         privileged = Connection(responses={
             "SELECT current_database() AS database": [{"database": "demo", "rolsuper": True, "rolbypassrls": False}],
+            "SELECT EXISTS": [{"exists": True}],
+            "SELECT 1": {"columns": ["value"], "rows": [(1,)]},
         })
         service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: privileged)
-        with self.assertRaises(PostgresServiceError) as error:
-            service.execute_read_only_sql("local", "public", "SELECT 1", database="demo", reject_privileged_role=True)
-        self.assertEqual(error.exception.code, "unsafe_database_role")
+        result = service.execute_read_only_sql("local", "public", "SELECT 1", database="demo")
+        self.assertEqual(result["rows"], [[1]])
+        self.assertEqual(privileged.executed[0][0], "SET TRANSACTION READ ONLY")
+        self.assertEqual(privileged.rollbacks, 1)
 
         missing = Connection(responses={
             "SELECT current_database() AS database": [{"database": "demo"}],

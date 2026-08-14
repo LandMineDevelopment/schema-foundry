@@ -2,6 +2,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import json
 from pathlib import Path
 
 
@@ -34,7 +35,8 @@ class AiAuthorityTests(unittest.TestCase):
         self.proposal_context = {
             "application": "schemii", "session_id": "session-1",
             "resource": "schema-1", "access": "write",
-            "binding": {"revision": 3},
+            "authorization_target": {"profileId": "local"},
+            "schema_concurrency": {"revision": 3},
         }
         self.result_context = {
             "application": "schemii", "session_id": "session-1",
@@ -126,7 +128,9 @@ class AiAuthorityTests(unittest.TestCase):
         envelope = self.register_proposal()
         for key, value in (
             ("application", "schemer"), ("session_id", "other"),
-            ("resource", "other"), ("access", "read"), ("binding", {"revision": 4}),
+            ("resource", "other"), ("access", "read"),
+            ("authorization_target", {"profileId": "other"}),
+            ("schema_concurrency", {"revision": 4}),
         ):
             context = {**self.proposal_context, key: value}
             self.assert_error(
@@ -159,16 +163,22 @@ class AiAuthorityTests(unittest.TestCase):
             envelope["id"], claim["claimToken"], application="schemii", session_id="session-1",
         )
 
-    def test_proposal_payload_and_binding_are_owned_copies(self):
+    def test_proposal_payload_and_context_are_owned_copies(self):
         action = {"type": "change", "items": [{"name": "before"}]}
-        binding = {"revision": {"value": 1}}
-        context = {**self.proposal_context, "binding": binding}
+        target = {"profileId": {"value": "local"}}
+        concurrency = {"revision": {"value": 1}}
+        context = {**self.proposal_context, "authorization_target": target, "schema_concurrency": concurrency}
         envelope = self.authority.register_proposal(**context, action=action)
         action["items"][0]["name"] = "outside"
-        binding["revision"]["value"] = 2
+        target["profileId"]["value"] = "outside"
+        concurrency["revision"]["value"] = 2
         envelope["action"]["items"][0]["name"] = "public"
-        envelope["binding"]["revision"]["value"] = 3
-        expected = {**self.proposal_context, "binding": {"revision": {"value": 1}}}
+        envelope["authorizationTarget"]["profileId"]["value"] = "public"
+        envelope["schemaConcurrency"]["revision"]["value"] = 3
+        expected = {
+            **self.proposal_context, "authorization_target": {"profileId": {"value": "local"}},
+            "schema_concurrency": {"revision": {"value": 1}},
+        }
         claim = self.authority.claim_proposal(envelope["id"], **expected)
         self.assertEqual(claim["action"]["items"][0]["name"], "before")
         claim["action"]["items"][0]["name"] = "returned"
@@ -339,6 +349,56 @@ class AiAuthorityTests(unittest.TestCase):
         repeated = replacement.create_operation(envelope["id"], **self.proposal_context)
         self.assertEqual(repeated["id"], finished["id"])
         self.assertFalse(repeated["executionOwner"])
+
+    def test_operation_retry_ignores_advanced_concurrency_but_not_target_changes(self):
+        envelope = self.register_proposal()
+        first = self.authority.create_operation(envelope["id"], **self.proposal_context)
+        advanced = {**self.proposal_context, "schema_concurrency": {"revision": 4}}
+        repeated = self.authority.create_operation(envelope["id"], **advanced)
+        self.assertEqual(repeated["id"], first["id"])
+        self.assertFalse(repeated["executionOwner"])
+        self.assert_error(
+            "proposal_binding_mismatch",
+            lambda: self.authority.create_operation(
+                envelope["id"], **{**advanced, "authorization_target": {"profileId": "other"}},
+            ),
+        )
+
+    def test_operation_record_is_an_owned_internal_snapshot(self):
+        envelope = self.authority.register_proposal(
+            **self.proposal_context, action={"type": "add_table"},
+            policy_binding={"capability": "schema", "policyRevision": 2, "origin": "model", "configuredMode": "automatic", "effectiveMode": "automatic"},
+        )
+        operation = self.authority.create_operation(envelope["id"], **self.proposal_context)
+        record = self.authority.operation_record(operation["id"], application="schemii", session_id="session-1")
+        self.assertEqual(record["authorizationTarget"], self.proposal_context["authorization_target"])
+        self.assertEqual(record["schemaConcurrency"], self.proposal_context["schema_concurrency"])
+        self.assertEqual(record["policyBinding"]["capability"], "schema")
+        record["authorizationTarget"]["profileId"] = "changed"
+        again = self.authority.operation_record(operation["id"], application="schemii", session_id="session-1")
+        self.assertEqual(again["authorizationTarget"]["profileId"], "local")
+
+    def test_legacy_records_are_migrated_to_separate_contexts(self):
+        envelope = self.register_proposal()
+        operation = self.authority.create_operation(envelope["id"], **self.proposal_context)
+        for directory, record_id in ((self.authority.proposal_dir, envelope["id"]), (self.authority.operation_dir, operation["id"])):
+            path = directory / f"{record_id}.json"
+            record = json.loads(path.read_text())
+            record["version"] = 1
+            record["binding"] = {
+                "schemaId": record["resource"], **record.pop("schemaConcurrency"),
+                "target": record.pop("authorizationTarget"),
+            }
+            path.write_text(json.dumps(record))
+
+        replacement = AiAuthority(Path(self.temporary_directory.name), "schemii", clock=self.clock)
+
+        proposal_record = json.loads((replacement.proposal_dir / f"{envelope['id']}.json").read_text())
+        operation_record = replacement.operation_record(operation["id"], application="schemii", session_id="session-1")
+        self.assertEqual(proposal_record["version"], 2)
+        self.assertNotIn("binding", proposal_record)
+        self.assertEqual(operation_record["authorizationTarget"], self.proposal_context["authorization_target"])
+        self.assertEqual(operation_record["schemaConcurrency"], self.proposal_context["schema_concurrency"])
 
     def test_operation_execution_has_one_owner_across_threads(self):
         envelope = self.register_proposal()

@@ -8,5 +8,5 @@ const changes = tool.schema.object({
 export default tool({
   description: "Propose updating one active saved-schema column selected by stable IDs.",
   args: { tableId: tool.schema.string().min(1).max(128), columnId: tool.schema.string().min(1).max(128), changes },
-  async execute(args) { return "SCHEMII_ACTION:" + JSON.stringify({ type: "update_column", ...args, requiresConfirmation: true }) },
+  async execute() { return "Proposal arguments received." },
 })

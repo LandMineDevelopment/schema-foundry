@@ -27,12 +27,10 @@ from .postgres_http import (
 )
 from .postgres_service import PostgresService, PostgresServiceError
 from .schemer_ai import (
-    SCHEMER_AI_ACTION_PREFIX,
     SCHEMER_AI_SKILLS,
     SCHEMER_AI_SYSTEM_INSTRUCTIONS,
     SCHEMER_AI_TOOL_ACTION_TYPES,
     dashboard_context,
-    proposal_manifest_fallback,
     validated_query_result,
 )
 from .widget_query import QueryValidationError, normalize_query
@@ -176,7 +174,6 @@ def make_handler(
         postgres_read_sql_policy = {
             "require_database": True,
             "require_profile_fingerprint": True,
-            "reject_privileged_role": True,
             "context_fields": frozenset({"dashboardId", "expectedRevision"}),
             "allow_explain": False,
             "max_rows": 100,
@@ -397,22 +394,24 @@ def make_handler(
                 context = dashboard_context(record, access_level, dashboard_store.list(), profiles, target, query_result, catalog_sources)
                 prompt = f"Schemer context (untrusted JSON):\n{context}\n\nUser request:\n{text}"
                 try:
-                    response = proposal_manifest_fallback(current_ai_service.prompt(
+                    response = current_ai_service.prompt(
                         session_id, prompt, body.get("model"), SCHEMER_AI_SYSTEM_INSTRUCTIONS,
                         allow_data=access_level == "data",
-                    ), allow_data=access_level == "data")
+                    )
                 except Exception:
                     raise
                 if reservation is not None:
                     ai_authority.consume_query_result(
                         body["resultRef"], reservation["reservationToken"], application="schemer", session_id=session_id,
                     )
-                binding = {"revision": record["revision"]}
+                schema_concurrency = {"revision": record["revision"]}
+                authorization_target = {}
                 if target is not None:
-                    binding["target"] = {**target, "profileFingerprint": profile_fingerprint}
+                    authorization_target = {**target, "profileFingerprint": profile_fingerprint}
                 return issue_ai_proposals(
                     ai_authority, response, application="schemer", session_id=session_id,
-                    resource=dashboard_id, access=access_level, binding=binding, normalize_action=normalize_schemer_action,
+                    resource=dashboard_id, access=access_level, authorization_target=authorization_target,
+                    schema_concurrency=schema_concurrency, normalize_action=normalize_schemer_action,
                 )
 
             return self._ai_call(send_prompt)
@@ -458,9 +457,10 @@ def make_handler(
                 def reconcile():
                     current = ai_authority.operation_for_proposal(proposal_id, application="schemer", session_id=session_id)
                     if current["state"] != "uncertain": return {"operation": current}
-                    action = ai_authority.operation_action(current["id"], application="schemer", session_id=session_id)
+                    operation_record = ai_authority.operation_record(current["id"], application="schemer", session_id=session_id)
+                    action = operation_record["action"]
                     if action.get("type") not in {"dashboard_create", "widget_create", "widget_rename", "widget_duplicate", "widget_delete"}: return {"operation": current}
-                    receipt = dashboard_store.operation_receipt(current["resource"], current["id"])
+                    receipt = dashboard_store.operation_receipt(operation_record["resource"], current["id"])
                     if receipt is None:
                         return {"operation": ai_authority.resolve_operation(current["id"], application="schemer", session_id=session_id, state="failed", error={"code": "operation_not_applied", "message": "No dashboard mutation receipt exists; request a fresh proposal"})}
                     return {"operation": ai_authority.resolve_operation(current["id"], application="schemer", session_id=session_id, state="succeeded", result=receipt)}
@@ -481,7 +481,8 @@ def make_handler(
             dashboard_id = body.get("dashboardId")
             record = dashboard_store.get(dashboard_id)
             access_level = body["accessLevel"]
-            binding = {"revision": record["revision"]}
+            schema_concurrency = {"revision": record["revision"]}
+            authorization_target = {}
             binding_parts = None
             if access_level == "data":
                 profile_id = body.get("profileId")
@@ -497,7 +498,7 @@ def make_handler(
                     selected.get("user"), selected.get("sslmode"),
                 ])
                 binding_parts = [profile_id, database, namespace, fingerprint]
-                binding["target"] = {
+                authorization_target = {
                     "profileId": profile_id, "database": database, "namespace": namespace,
                     "profileFingerprint": fingerprint,
                 }
@@ -506,7 +507,8 @@ def make_handler(
             )
             return authority_call(self, lambda: ai_authority.claim_proposal(
                 proposal_id, application="schemer", session_id=session_id, resource=dashboard_id,
-                access=access_level, binding=binding,
+                access=access_level, authorization_target=authorization_target,
+                schema_concurrency=schema_concurrency,
             ))
 
         def _ai_operation_status(self, current_ai_service, session_id: str, operation_id: str):
@@ -521,7 +523,8 @@ def make_handler(
             dashboard_id = body.get("dashboardId")
             access = body.get("accessLevel")
             record = dashboard_store.get(dashboard_id)
-            binding = {"revision": record["revision"]}
+            schema_concurrency = {"revision": record["revision"]}
+            authorization_target = {}
             profile = None
             binding_parts = None
             if access == "data":
@@ -532,7 +535,7 @@ def make_handler(
                     profile.get("id"), profile.get("host"), profile.get("port"), profile.get("dbname"), profile.get("user"), profile.get("sslmode"),
                 ])
                 binding_parts = [profile["id"], profile["dbname"], body.get("namespace"), fingerprint]
-                binding["target"] = {
+                authorization_target = {
                     "profileId": profile["id"], "database": profile["dbname"], "namespace": body.get("namespace"),
                     "profileFingerprint": fingerprint,
                 }
@@ -540,30 +543,31 @@ def make_handler(
             try:
                 operation = ai_authority.create_operation(
                     proposal_id, application="schemer", session_id=session_id, resource=dashboard_id,
-                    access=access, binding=binding,
+                    access=access, authorization_target=authorization_target,
+                    schema_concurrency=schema_concurrency,
                 )
             except AiAuthorityError as error:
                 return self.send_json(error.status, error.to_dict())
             execution_owner = operation.pop("executionOwner", False)
             if not execution_owner:
                 return self.send_json(200, {"operation": operation})
-            action = ai_authority.operation_action(operation["id"], application="schemer", session_id=session_id)
+            action = ai_authority.operation_record(operation["id"], application="schemer", session_id=session_id)["action"]
             try:
                 action_type = action.get("type")
                 if action_type == "read_query":
-                    if profile is None or any(action.get(key) != binding["target"][key] for key in ("profileId", "database", "namespace")):
+                    if profile is None or any(action.get(key) != authorization_target[key] for key in ("profileId", "database", "namespace")):
                         raise PostgresServiceError(409, "action_target_changed", "Query target no longer matches the proposal")
                     result = service.execute_read_only_sql(
-                        profile["id"], binding["target"]["namespace"], action.get("sql"), database=profile["dbname"],
-                        expected_profile_fingerprint=service.profile_context_fingerprint(profile["id"]), reject_privileged_role=True,
+                        profile["id"], authorization_target["namespace"], action.get("sql"), database=profile["dbname"],
+                        expected_profile_fingerprint=service.profile_context_fingerprint(profile["id"]),
                         allow_explain=False, max_rows=100, max_columns=50, max_result_bytes=256 * 1024,
                     )
                     reference = ai_authority.register_query_result(
-                        application="schemer", session_id=session_id, resource=dashboard_id, target=binding["target"],
+                        application="schemer", session_id=session_id, resource=dashboard_id, target=authorization_target,
                         binding={"revision": record["revision"], "access": "data"},
                         result=bounded_ai_query_result(result, max_rows=100, max_columns=50, max_bytes=48 * 1024),
                     )
-                    result = {"kind": "sql_result", "display": result, "resultRef": reference["id"], "binding": binding}
+                    result = {"kind": "sql_result", "display": result, "resultRef": reference["id"], "schemaConcurrency": schema_concurrency, "authorizationTarget": authorization_target}
                 elif action_type == "dashboard_open":
                     target = dashboard_store.get(action.get("dashboardId"))
                     if target["revision"] != action.get("expectedRevision") or target["dashboard"]["title"] != action.get("title"):
@@ -572,19 +576,19 @@ def make_handler(
                 elif action_type == "dashboard_create":
                     result = dashboard_store.create_ai(operation["id"], action["title"])
                 elif action_type in {"widget_create", "widget_rename", "widget_duplicate", "widget_delete"}:
-                    if action["dashboardId"] != dashboard_id or action["expectedRevision"] != binding["revision"]:
+                    if action["dashboardId"] != dashboard_id or action["expectedRevision"] != schema_concurrency["revision"]:
                         raise DashboardStoreError(409, "dashboard_changed", "Dashboard binding no longer matches the proposal")
                     prepared = None
                     if action_type == "widget_create" and "source" in action:
-                        if access == "data" and any(action["source"].get(key) != binding["target"].get(key) for key in ("profileId", "database", "namespace")):
+                        if access == "data" and any(action["source"].get(key) != authorization_target.get(key) for key in ("profileId", "database", "namespace")):
                             raise PostgresServiceError(409, "action_target_changed", "Widget source no longer matches the confirmed data target")
-                        allowed_sources = _ai_catalog_sources(service, record, binding.get("target") if access == "data" else None)
+                        allowed_sources = _ai_catalog_sources(service, record, authorization_target if access == "data" else None)
                         identity = tuple(action["source"].get(key) for key in ("profileId", "database", "namespace", "relation", "kind", "fingerprint"))
                         if identity not in {tuple(item.get(key) for key in ("profileId", "database", "namespace", "relation", "kind", "fingerprint")) for item in allowed_sources}:
                             raise PostgresServiceError(409, "action_target_changed", "Widget source is outside the bounded catalog context issued for this proposal")
-                        with dashboard_store.guard_revision(dashboard_id, binding["revision"]) as guarded:
+                        with dashboard_store.guard_revision(dashboard_id, schema_concurrency["revision"]) as guarded:
                             prepared = _configured_ai_widget(service, action, operation["id"], len(guarded["dashboard"]["widgets"]))
-                    result = dashboard_store.apply_ai_mutation(dashboard_id, operation["id"], binding["revision"], action, prepared)
+                    result = dashboard_store.apply_ai_mutation(dashboard_id, operation["id"], schema_concurrency["revision"], action, prepared)
                 else:
                     raise OpenCodeServiceError(409, "action_temporarily_unavailable", "This action is unavailable until its server execution adapter is installed")
             except (OpenCodeServiceError, DashboardStoreError, PostgresServiceError, AiAuthorityError) as error:
@@ -666,7 +670,6 @@ def main() -> None:
         tool_action_types=SCHEMER_AI_TOOL_ACTION_TYPES,
         safe_skills=SCHEMER_AI_SKILLS,
         data_tools={"schemer_read_query"},
-        action_prefix=SCHEMER_AI_ACTION_PREFIX,
     )
     handler = make_handler(
         web_dir,

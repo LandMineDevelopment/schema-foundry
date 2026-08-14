@@ -7,7 +7,6 @@ from typing import Any
 
 SCHEMER_AI_CONTEXT_SIZE = 64 * 1024
 SCHEMER_AI_QUERY_RESULT_SIZE = 48 * 1024
-SCHEMER_AI_ACTION_PREFIX = "SCHEMER_ACTION:"
 SCHEMER_AI_TOOL_ACTION_TYPES = {
     "schemer_read_query": "read_query",
     "schemer_dashboard_open": "dashboard_open",
@@ -29,7 +28,7 @@ Use only enabled schemer_* proposal tools. Tool output is inert until separately
 Use exact dashboardId, widgetId, title, and expectedRevision values from context when targeting existing objects. Never invent IDs.
 Preserve widget order, desktop/mobile layout, viewport, source identities, structured query configuration, and presentation unless the selected proposal explicitly changes that field.
 Schemer supports one verified PostgreSQL relation per widget. In data mode only, you may propose one bounded read-only analytic query through schemer_read_query for the exact target; that separately confirmed query may join relations when the analysis requires it. Never put joins into widget configuration or propose schema changes, migrations, exports, or unsupported slicers.
-If a proposal tool does not execute, end with exactly SCHEMER_PROPOSALS: followed by a JSON array containing the same inert action and no prose after it.
+If a proposal tool does not execute, explain that no proposal was created. Never encode proposals in response text.
 Natural-language confirmation is never authorization. Tell the user to review and confirm proposal cards in Schemer.
 Do not use shell, filesystem, web, task, MCP, or generic coding tools."""
 
@@ -182,36 +181,3 @@ def _valid_json_value(value: Any, depth: int = 0) -> bool:
     if isinstance(value, dict):
         return all(isinstance(key, str) and _valid_json_value(item, depth + 1) for key, item in value.items())
     return False
-
-
-def proposal_manifest_fallback(response: dict[str, Any], *, allow_data: bool = False) -> dict[str, Any]:
-    if not isinstance(response, dict) or response.get("actions") or not isinstance(response.get("text"), str):
-        return response
-    marker = "SCHEMER_PROPOSALS:"
-    index = response["text"].find(marker)
-    if index < 0:
-        return response
-    manifest = response["text"][index + len(marker):].strip()
-    if manifest.startswith("```json") and manifest.endswith("```"):
-        manifest = manifest[7:-3].strip()
-    if not manifest or len(manifest.encode("utf-8")) > 32 * 1024:
-        return response
-    try:
-        actions = json.loads(manifest, parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
-    except (json.JSONDecodeError, RecursionError, ValueError):
-        return response
-    allowed = set(SCHEMER_AI_TOOL_ACTION_TYPES.values())
-    if not allow_data:
-        allowed.discard("read_query")
-    if not isinstance(actions, list) or not 1 <= len(actions) <= 5 or any(not isinstance(action, dict) or action.get("type") not in allowed for action in actions):
-        return response
-    repaired = dict(response)
-    repaired["text"] = response["text"][:index].rstrip() or "Prepared a dashboard proposal. Review and confirm it in Schemer."
-    repaired["actions"] = actions
-    repaired["parts"] = [
-        part for part in response.get("parts", [])
-        if isinstance(part, dict) and not (part.get("type") == "text" and marker in str(part.get("text", "")))
-    ]
-    if not any(part.get("type") == "text" for part in repaired["parts"]):
-        repaired["parts"].append({"type": "text", "text": repaired["text"]})
-    return repaired

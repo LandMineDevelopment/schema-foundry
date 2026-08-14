@@ -1,12 +1,61 @@
 from __future__ import annotations
 
 import copy
+import json
+import math
 import re
 from typing import Any
 
 
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 NAME = re.compile(r"^[^\x00-\x1f\x7f]{1,63}$")
+SCHEMA_ACTIONS = {
+    "create_project", "populate_schema", "add_table", "rename_table", "add_column", "update_column",
+    "delete_element", "add_relationship", "migration_preview",
+}
+SCHEMII_ACTION_CAPABILITIES = {
+    "create_project": "schema", "populate_schema": "schema", "add_table": "schema",
+    "rename_table": "schema", "add_column": "schema", "update_column": "schema",
+    "delete_element": "schema", "add_relationship": "schema", "schema_batch": "schema",
+    "migration_preview": "schema", "migration_apply": "schema", "data_read": "structured",
+    "insert_rows_preview": "write", "create_view_preview": "write", "postgres_write_apply": "write",
+    "schema_read_query": "rawread", "raw_write": "rawwrite",
+}
+
+
+def schemii_action_capability(action: Any) -> str | None:
+    if not isinstance(action, dict) or not isinstance(action.get("type"), str):
+        raise ValueError("action type is invalid")
+    action_type = action["type"]
+    if action_type in {"connection_setup", "open_project", "open_connection"}:
+        return None
+    capability = SCHEMII_ACTION_CAPABILITIES.get(action_type)
+    if capability is None:
+        raise ValueError("unsupported action")
+    if action_type == "schema_batch":
+        actions = action.get("actions")
+        if not isinstance(actions, list) or not actions or any(schemii_action_capability(item) != "schema" for item in actions):
+            raise ValueError("schema batch capability is invalid")
+    return capability
+
+
+def schemii_action_approval_floor(action: Any) -> str | None:
+    action_type = action.get("type") if isinstance(action, dict) else None
+    if action_type in {"connection_setup", "open_project", "open_connection", "schema_read_query", "raw_write", "delete_element"}:
+        return "every_action"
+    if action_type == "schema_batch" and any(item.get("type") == "delete_element" for item in action.get("actions", []) if isinstance(item, dict)):
+        return "every_action"
+    if action_type == "migration_preview" and action.get("destructivePolicy") == "allow-preview":
+        return "every_action"
+    if action_type == "migration_apply" and action.get("destructive") is True:
+        return "every_action"
+    return None
+
+
+def _has_permission(access: str, permission: str) -> bool:
+    if access in {"data", "schema-data", "schema-read-write"} and permission in {"rawread", "write"}:
+        return True
+    return permission in access.split("-")
 
 
 def normalize_schemii_action(action: Any, access: str) -> dict[str, Any]:
@@ -17,13 +66,30 @@ def normalize_schemii_action(action: Any, access: str) -> dict[str, Any]:
         field = "action" if "action" in action else "type"
         approval = "requiresApproval" if "requiresApproval" in action else "requiresConfirmation"
         _exact(action, {field, "profileId", "namespace", "sql", "purpose", "readOnly", approval})
-        if access != "data" or action.get("readOnly") is not True or action.get(approval) is not True:
+        if not _has_permission(access, "rawread") or action.get("readOnly") is not True or action.get(approval) is not True:
             raise ValueError("query action is not authorized")
         return {
             "type": action_type, "profileId": _id(action.get("profileId")),
             "namespace": _name(action.get("namespace")), "sql": _sql(action.get("sql")),
             "purpose": _text(action.get("purpose"), 500), "readOnly": True, "requiresConfirmation": True,
         }
+    if action_type == "data_read":
+        _exact(action, {"type", "profileId", "namespace", "relation", "offset", "limit", "purpose", "readOnly", "requiresConfirmation"})
+        if not _has_permission(access, "structured") or action.get("readOnly") is not True:
+            raise ValueError("structured data read is not authorized")
+        _confirmation(action)
+        offset, limit = action.get("offset"), action.get("limit")
+        if isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset <= 10_000_000:
+            raise ValueError("offset is invalid")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 50:
+            raise ValueError("limit is invalid")
+        return {"type": action_type, "profileId": _id(action.get("profileId")), "namespace": _name(action.get("namespace")), "relation": _name(action.get("relation")), "offset": offset, "limit": limit, "purpose": _text(action.get("purpose"), 500), "readOnly": True, "requiresConfirmation": True}
+    if action_type == "raw_write":
+        _exact(action, {"type", "profileId", "namespace", "sql", "purpose", "requiresConfirmation"})
+        if not _has_permission(access, "rawwrite"):
+            raise ValueError("raw write is not authorized")
+        _confirmation(action)
+        return {"type": action_type, "profileId": _id(action.get("profileId")), "namespace": _name(action.get("namespace")), "sql": _sql(action.get("sql"), maximum=100_000), "purpose": _text(action.get("purpose"), 500), "requiresConfirmation": True}
     if action_type == "open_project":
         _exact(action, {"type", "schemaId", "projectName", "requiresConfirmation"})
         if action.get("requiresConfirmation") is not True:
@@ -45,6 +111,8 @@ def normalize_schemii_action(action: Any, access: str) -> dict[str, Any]:
             "requiresPasswordEntry": True, "requiresConfirmation": True,
         }
     if action_type == "create_project":
+        if not _has_permission(access, "schema"):
+            raise ValueError("project creation is not authorized")
         _exact(action, {"type", "projectName", "requiresConfirmation"})
         _confirmation(action)
         return {"type": action_type, "projectName": _text(action.get("projectName"), 256), "requiresConfirmation": True}
@@ -56,6 +124,8 @@ def normalize_schemii_action(action: Any, access: str) -> dict[str, Any]:
             "database": _name(action.get("database")), "namespace": _name(action.get("namespace")), "requiresConfirmation": True,
         }
     if action_type == "migration_preview":
+        if not _has_permission(access, "schema"):
+            raise ValueError("schema preview is not authorized")
         _exact(action, {"type", "profileId", "namespace", "destructivePolicy", "purpose", "readOnly", "requiresConfirmation"})
         _confirmation(action)
         if action.get("readOnly") is not True or action.get("destructivePolicy") not in {"reject", "allow-preview"}:
@@ -65,7 +135,35 @@ def normalize_schemii_action(action: Any, access: str) -> dict[str, Any]:
             "destructivePolicy": action["destructivePolicy"], "purpose": _text(action.get("purpose"), 500),
             "readOnly": True, "requiresConfirmation": True,
         }
+    if action_type == "insert_rows_preview":
+        _exact(action, {"type", "profileId", "namespace", "relation", "rows", "purpose", "readOnly", "requiresConfirmation"})
+        if not _has_permission(access, "write") or action.get("readOnly") is not True:
+            raise ValueError("row insertion preview is not authorized")
+        _confirmation(action)
+        rows = _insert_rows(action.get("rows"))
+        return {
+            "type": action_type, "profileId": _id(action.get("profileId")),
+            "namespace": _name(action.get("namespace")), "relation": _name(action.get("relation")),
+            "rows": rows, "purpose": _text(action.get("purpose"), 500),
+            "readOnly": True, "requiresConfirmation": True,
+        }
+    if action_type == "create_view_preview":
+        _exact(action, {"type", "profileId", "namespace", "relation", "definition", "purpose", "readOnly", "requiresConfirmation"})
+        if not _has_permission(access, "write") or action.get("readOnly") is not True:
+            raise ValueError("view creation preview is not authorized")
+        _confirmation(action)
+        definition = _sql(action.get("definition"))
+        if not re.match(r"^CREATE\s+VIEW\b", definition, re.I):
+            raise ValueError("only CREATE VIEW is supported")
+        return {
+            "type": action_type, "profileId": _id(action.get("profileId")),
+            "namespace": _name(action.get("namespace")), "relation": _name(action.get("relation")),
+            "definition": definition, "purpose": _text(action.get("purpose"), 500),
+            "readOnly": True, "requiresConfirmation": True,
+        }
     if action_type == "populate_schema":
+        if not _has_permission(access, "schema"):
+            raise ValueError("schema mutation is not authorized")
         _exact(action, {"type", "purpose", "tables", "relationships", "requiresConfirmation"})
         _confirmation(action)
         tables = _list(action.get("tables"), 1, 20, lambda item: _table_definition(item, require_purpose=True))
@@ -73,24 +171,32 @@ def normalize_schemii_action(action: Any, access: str) -> dict[str, Any]:
         _unique_names(tables, "table")
         return {"type": action_type, "purpose": _text(action.get("purpose"), 500), "tables": tables, "relationships": relationships, "requiresConfirmation": True}
     if action_type == "add_table":
+        if not _has_permission(access, "schema"):
+            raise ValueError("schema mutation is not authorized")
         _exact_optional(action, {"type", "name", "purpose", "columns", "requiresConfirmation"}, {"profileId", "namespace"})
         _confirmation(action)
         result = {"type": action_type, **_table_definition({key: action[key] for key in ("name", "purpose", "columns")}, require_purpose=True), "requiresConfirmation": True}
         return _optional_target(action, result)
     if action_type == "rename_table":
+        if not _has_permission(access, "schema"):
+            raise ValueError("schema mutation is not authorized")
         _exact_optional(action, {"type", "tableId", "newName", "requiresConfirmation"}, {"profileId", "namespace"})
         _confirmation(action)
         return _optional_target(action, {"type": action_type, "tableId": _id(action.get("tableId")), "newName": _name(action.get("newName")), "requiresConfirmation": True})
     if action_type == "add_column":
-        _exact_optional(action, {"type", "tableId", "name", "type", "nullable", "requiresConfirmation"}, {"profileId", "namespace", "default"})
+        if not _has_permission(access, "schema"):
+            raise ValueError("schema mutation is not authorized")
+        _exact_optional(action, {"type", "tableId", "name", "columnType", "nullable", "requiresConfirmation"}, {"profileId", "namespace", "default"})
         _confirmation(action)
         if not isinstance(action.get("nullable"), bool):
             raise ValueError("nullable is invalid")
-        result = {"type": action_type, "tableId": _id(action.get("tableId")), "name": _name(action.get("name")), "type": _column_type(action.get("type")), "nullable": action["nullable"], "requiresConfirmation": True}
+        result = {"type": action_type, "tableId": _id(action.get("tableId")), "name": _name(action.get("name")), "columnType": _column_type(action.get("columnType")), "nullable": action["nullable"], "requiresConfirmation": True}
         if "default" in action:
             result["default"] = _default(action["default"], nullable=False)
         return _optional_target(action, result)
     if action_type == "update_column":
+        if not _has_permission(access, "schema"):
+            raise ValueError("schema mutation is not authorized")
         _exact_optional(action, {"type", "tableId", "columnId", "changes", "requiresConfirmation"}, {"profileId", "namespace"})
         _confirmation(action)
         changes = action.get("changes")
@@ -105,6 +211,8 @@ def normalize_schemii_action(action: Any, access: str) -> dict[str, Any]:
         if "default" in changes: normalized["default"] = _default(changes["default"], nullable=True)
         return _optional_target(action, {"type": action_type, "tableId": _id(action.get("tableId")), "columnId": _id(action.get("columnId")), "changes": normalized, "requiresConfirmation": True})
     if action_type == "delete_element":
+        if not _has_permission(access, "schema"):
+            raise ValueError("schema mutation is not authorized")
         _exact_optional(action, {"type", "elementType", "tableId", "reason", "destructive", "requiresConfirmation"}, {"profileId", "namespace", "columnId", "impact"})
         _confirmation(action)
         if action.get("destructive") is not True or action.get("elementType") not in {"table", "column"}:
@@ -118,6 +226,8 @@ def normalize_schemii_action(action: Any, access: str) -> dict[str, Any]:
             result["impact"] = copy.deepcopy(action["impact"])
         return _optional_target(action, result)
     if action_type == "add_relationship":
+        if not _has_permission(access, "schema"):
+            raise ValueError("schema mutation is not authorized")
         required = {"type", "fromTableName", "fromColumnName", "toTableName", "toColumnName", "onDelete", "onUpdate", "requiresConfirmation"}
         optional = {"profileId", "namespace", "fromTableId", "fromColumnId", "toTableId", "toColumnId", "constraintName"}
         _exact_optional(action, required, optional)
@@ -284,12 +394,50 @@ def _text(value: Any, maximum: int) -> str:
     return copy.deepcopy(value)
 
 
-def _sql(value: Any) -> str:
-    if not isinstance(value, str) or not value.strip() or value != value.strip() or len(value.encode("utf-8")) > 10_000 or "\x00" in value:
+def _sql(value: Any, maximum: int = 10_000) -> str:
+    if not isinstance(value, str) or not value.strip() or value != value.strip() or len(value.encode("utf-8")) > maximum or "\x00" in value:
         raise ValueError("SQL is invalid")
     if any(ord(char) < 32 and char not in "\n\r\t" for char in value):
         raise ValueError("SQL is invalid")
     return value
+
+
+def _insert_rows(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not 1 <= len(value) <= 100:
+        raise ValueError("rows must contain 1 to 100 items")
+    normalized = []
+    columns = None
+    for row in value:
+        if not isinstance(row, dict) or not 1 <= len(row) <= 50:
+            raise ValueError("each row must contain 1 to 50 columns")
+        current = tuple(row)
+        if columns is None:
+            columns = current
+        elif set(current) != set(columns):
+            raise ValueError("all rows must use the same columns")
+        normalized_row = {}
+        for name in columns:
+            normalized_row[_name(name)] = _json_value(row[name])
+        normalized.append(normalized_row)
+    try:
+        encoded = json.dumps(normalized, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise ValueError("row values must be finite JSON values") from exc
+    if len(encoded) > 24 * 1024:
+        raise ValueError("row values are too large")
+    return normalized
+
+
+def _json_value(value: Any) -> Any:
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("row values must be finite JSON values")
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return copy.deepcopy(value)
+    if isinstance(value, list):
+        return [_json_value(item) for item in value]
+    if isinstance(value, dict) and all(isinstance(key, str) for key in value):
+        return {key: _json_value(item) for key, item in value.items()}
+    raise ValueError("row values must be JSON values")
 
 
 def _revision(value: Any) -> int:

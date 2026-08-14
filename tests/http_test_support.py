@@ -59,6 +59,7 @@ class FakePostgresService:
         self.view_operation = "upsert"
         self.view_expectation = {"kind": "view", "fingerprint": "a" * 64}
         self.view_saved_id = "view_summary"
+        self.ai_write_results = {}
 
     def list_profiles(self):
         return self.profiles
@@ -179,6 +180,39 @@ class FakePostgresService:
 
     def update_ai_migration_result(self, plan_id, result):
         self.calls.append(("update_ai_migration_result", plan_id, result))
+        return result
+
+    def preview_ai_insert_rows(self, operation_id, profile_id, database, namespace, relation, rows, schema_binding):
+        self.calls.append(("preview_ai_insert_rows", operation_id, profile_id, database, namespace, relation, rows, schema_binding))
+        return {"id": None, "previewOnly": True, "applyPlanId": "ai_plan_insert", "planDigest": "a" * 64, "kind": "insert_rows", "rowCount": len(rows), "columns": list(rows[0]), "rows": rows, "steps": [], "warnings": []}
+
+    def preview_ai_create_view(self, operation_id, profile_id, database, namespace, relation, definition, schema_binding):
+        self.calls.append(("preview_ai_create_view", operation_id, profile_id, database, namespace, relation, definition, schema_binding))
+        return {"id": None, "previewOnly": True, "applyPlanId": "ai_plan_view", "planDigest": "b" * 64, "kind": "create_view", "steps": [{"action": "create", "objectType": "view", "name": relation, "sql": definition + ";", "destructive": False}], "warnings": []}
+
+    def apply_ai_postgres_write(self, operation_id, plan_id, profile_id, database, namespace, relation, expected_kind, expected_review_digest):
+        self.calls.append(("apply_ai_postgres_write", operation_id, plan_id, profile_id, database, namespace, relation, expected_kind, expected_review_digest))
+        target = {"profileId": profile_id, "database": database, "namespace": namespace, "relation": relation}
+        if expected_kind == "insert_rows":
+            result = {"kind": "rows_inserted", "operationId": operation_id, "planId": plan_id, "target": target, "insertedRowCount": 2}
+            self.ai_write_results[plan_id] = result
+            return result
+        result = {
+            "kind": "view_created", "operationId": operation_id, "planId": plan_id, "target": target,
+            "schemaBinding": {"schemaId": "schema_one", "revision": 1, "layoutToken": self.view_layout_token},
+            "descriptor": {**target, "kind": "view", "fingerprint": "b" * 64},
+            "desiredDefinition": f'CREATE VIEW "{namespace}"."{relation}" AS SELECT 1', "queryDefinition": "SELECT 1",
+        }
+        self.ai_write_results[plan_id] = result
+        return result
+
+    def reconcile_ai_postgres_write(self, plan_id, profile_id):
+        self.calls.append(("reconcile_ai_postgres_write", plan_id, profile_id))
+        return self.ai_write_results.get(plan_id, {"kind": "rows_inserted", "planId": plan_id, "insertedRowCount": 2})
+
+    def update_ai_postgres_write_result(self, plan_id, result):
+        self.calls.append(("update_ai_postgres_write_result", plan_id, result))
+        self.ai_write_results[plan_id] = result
         return result
 
     def apply(self, profile_id, plan_id, confirm_destructive):

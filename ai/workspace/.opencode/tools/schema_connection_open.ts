@@ -9,6 +9,6 @@ export default tool({
     namespace: tool.schema.string().trim().min(1).max(63),
   },
   async execute(args) {
-    return "SCHEMII_ACTION:" + JSON.stringify({ type: "open_connection", ...args, requiresConfirmation: true })
+    return "Proposal arguments received."
   },
 })

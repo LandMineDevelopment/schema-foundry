@@ -17,6 +17,18 @@ TYPE_ALIASES = {
 }
 
 
+def apply_schema_actions(record: dict[str, Any], actions: list[dict[str, Any]], operation_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    if not isinstance(actions, list) or not actions:
+        raise SchemaStoreError(400, "validation_error", "Schema actions are invalid")
+    changed, impact = [], []
+    current = record
+    for index, action in enumerate(actions):
+        current, receipt = apply_schema_action(current, action, operation_id if len(actions) == 1 else f"{operation_id}:{index}")
+        changed.extend(receipt["changed"])
+        impact.extend(receipt["impact"])
+    return current, {"actionType": actions[0]["type"] if len(actions) == 1 else "schema_batch", "changed": changed, "impact": impact}
+
+
 def apply_schema_action(record: dict[str, Any], action: dict[str, Any], operation_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
     schema = record["schema"]
     action_type = action["type"]
@@ -44,7 +56,7 @@ def apply_schema_action(record: dict[str, Any], action: dict[str, Any], operatio
         changed.append({"kind": "table", "id": table["id"]})
     elif action_type == "add_column":
         table = _table(schema, action["tableId"])
-        column = _new_column(action, operation_id, "column")
+        column = _new_column({**action, "type": action["columnType"]}, operation_id, "column")
         table["columns"].append(column)
         _sync_primary_key(table, operation_id)
         changed.append({"kind": "column", "id": column["id"]})

@@ -280,7 +280,7 @@ class SchemaStore:
         self, schema_id: str, expected_revision: int, layout_token: str,
         profile_id: str, database: str, namespace: str, relation: str,
         kind: str | None, definition: str | None, query_definition: str | None, fingerprint: str | None,
-        *, operation: str, expected_absent: bool, saved_view_id: str | None,
+        *, operation: str, expected_absent: bool, saved_view_id: str | None, receipt_id: str | None = None,
     ) -> dict[str, Any]:
         if operation not in {"upsert", "delete"} or not isinstance(expected_absent, bool):
             raise SchemaStoreError(400, "invalid_schema_binding", "expectedAbsent is invalid")
@@ -290,6 +290,9 @@ class SchemaStore:
             if found is None:
                 raise SchemaStoreError(404, "not_found", "Schema was not found")
             path, record = found
+            receipts = record.get("aiViewMutationReceipts", {})
+            if receipt_id is not None and isinstance(receipts, dict) and isinstance(receipts.get(receipt_id), dict):
+                return json.loads(json.dumps(receipts[receipt_id]))
             self._require_view_binding(record, expected_revision, layout_token, profile_id, database, namespace)
             views = record["schema"].get("views", [])
             indexes = [
@@ -326,14 +329,20 @@ class SchemaStore:
                 })
             stored["revision"] = expected_revision + 1
             stored["updatedAt"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            result = {
+                "status": "saved", "revision": stored["revision"],
+                "updatedAt": stored["updatedAt"], "layoutToken": schema_layout_token(stored),
+            }
+            if receipt_id is not None:
+                if not isinstance(receipt_id, str) or not re.fullmatch(r"ai_plan_[A-Za-z0-9_-]{1,120}", receipt_id):
+                    raise SchemaStoreError(400, "invalid_schema_binding", "View mutation receipt is invalid")
+                receipts = stored.setdefault("aiViewMutationReceipts", {})
+                receipts[receipt_id] = result
             try:
                 write_json(path, stored)
             except OSError as exc:
                 raise SchemaStoreError(500, "schema_store_error", "Schema file could not be saved") from exc
-            return {
-                "status": "saved", "revision": stored["revision"],
-                "updatedAt": stored["updatedAt"], "layoutToken": schema_layout_token(stored),
-            }
+            return result
 
     def save(
         self,
@@ -374,6 +383,10 @@ class SchemaStore:
                     )
 
             stored = dict(record)
+            if found:
+                for key in ("aiOperationReceipts", "aiViewMutationReceipts", "lastAiMigrationSync"):
+                    if key in existing_record:
+                        stored[key] = json.loads(json.dumps(existing_record[key]))
             stored.pop("layoutToken", None)
             stored["revision"] = current_revision + 1
             stored["updatedAt"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -439,6 +452,26 @@ class SchemaStore:
             except OSError as exc:
                 raise SchemaStoreError(500, "schema_store_error", "Schema file could not be saved") from exc
             return json.loads(json.dumps(receipt))
+
+    def preview_ai_mutation(self, schema_id: str, expected_revision: Any, expected_layout_token: Any, transform) -> dict[str, Any]:
+        """Apply an AI transform to an owned copy without persisting it."""
+        schema_id = self.validate_id(schema_id)
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 1:
+            raise SchemaStoreError(400, "invalid_schema_binding", "expectedRevision is invalid")
+        if not isinstance(expected_layout_token, str) or not LAYOUT_TOKEN_PATTERN.fullmatch(expected_layout_token):
+            raise SchemaStoreError(400, "invalid_schema_binding", "layoutToken is invalid")
+        with self._schema_guard(schema_id):
+            found = self._find(schema_id)
+            if found is None:
+                raise SchemaStoreError(404, "not_found", "Schema was not found")
+            record = found[1]
+            if record.get("revision", 0) != expected_revision:
+                raise SchemaStoreError(409, "schema_conflict", "Schema changed in another session; reload before continuing", currentRevision=record.get("revision", 0))
+            if schema_layout_token(record) != expected_layout_token:
+                raise SchemaStoreError(409, "layout_conflict", "Saved layout changed; hard-refresh before continuing")
+            candidate, result = transform(json.loads(json.dumps(record)))
+            self._validate_record(candidate, schema_id)
+            return {"record": json.loads(json.dumps(candidate)), "mutation": json.loads(json.dumps(result))}
 
     def create_ai_project(self, operation_id: str, project_name: str) -> dict[str, Any]:
         if not isinstance(operation_id, str) or not SCHEMA_ID_PATTERN.fullmatch(operation_id):

@@ -64,7 +64,7 @@
   function createAiAssistant(options) {
     const {
       sessionClient, root, trigger, settingsDialog, historyDialog, storageKey, getContext,
-      buildMessagePayload, createSessionTitle, contextKey = () => null, parseSession = session => ({ title: session.title || "Untitled chat", key: null }),
+      buildMessagePayload, buildSessionPayload, createSessionTitle, contextKey = () => null, parseSession = session => ({ title: session.title || "Untitled chat", key: null }),
       buildProposalClaimPayload, buildHistoryQuery, renderAction, validateAction, handleOperationResult, toolLabels = {}, skillLabels = {}, labels = {},
       onOpenChange = () => {}, onAccessChange = () => {}, onNewChat = () => {}, state: suppliedState,
       canViewSession = () => true, extraBusyControls = [],
@@ -399,7 +399,7 @@
         },
         finish(outcome) {
           if (finished) return; clearInterval(timer); retryAt = null; tick(); finished = true;
-          const failed = outcome === "error"; details.classList.remove("active"); details.classList.add(failed ? "failed" : "completed"); title.classList.remove("shimmer"); title.textContent = failed ? "Agent stopped" : "Completed";
+          const failed = outcome === "error"; details.classList.remove("active"); details.classList.add(failed ? "failed" : "completed"); title.classList.remove("shimmer"); title.textContent = failed ? "Agent stopped" : "Assistant response ready";
           setStage("model", failed ? "Response failed" : "Model finished", failed ? "error" : "completed"); if (!failed) setStage("delivered", "Response delivered", "completed");
           if (!failed) setTimeout(() => { details.open = false; }, 650);
         }
@@ -454,7 +454,9 @@
 
     async function executeProposal(proposal, capture) {
       const context = buildProposalClaimPayload ? buildProposalClaimPayload(capture, elements.access.value) : {};
-      const body = { ...context, confirmation: { accepted: true, mode: "explicit" } };
+      const policy = proposal.policyBinding ?? {};
+      const mode = policy.effectiveMode === "once_per_chat" ? "once_per_chat" : "every_action";
+      const body = { ...context, policyRevision: policy.policyRevision, confirmation: { accepted: true, mode } };
       try {
         const response = await proposalRequest(proposal, "execute", body);
         if (response.operation?.state === "running") return waitForOperation(proposal, response.operation);
@@ -523,6 +525,11 @@
       if (!renderedText && response.text) appendMessage("assistant", response.text);
       for (const item of response.proposals ?? []) {
         const proposal = { ...item, sessionId };
+        if (proposal.operation) {
+          if (proposal.operation.state === "succeeded") handleOperationResult?.(proposal.operation.result, capture);
+          else if (proposal.operation.error?.message) appendMessage("assistant", `Automatic action failed: ${proposal.operation.error.message}`);
+          continue;
+        }
         if (renderAction) renderAction(proposal, capture, api);
         else renderGenericAction(proposal, capture);
       }
@@ -532,8 +539,10 @@
     async function ensureSession(model, capture, key) {
       if (state.sessionId && state.contextKey === key) return state.sessionId;
       state.sessionId = null;
-      const title = boundedUtf8Text(createSessionTitle ? createSessionTitle(capture, elements.access.value) : labels.sessionTitle || "Assistant chat", 256);
-      const session = await request("/api/ai/sessions", { method: "POST", body: JSON.stringify({ title, model }) });
+      const payload = buildSessionPayload
+        ? buildSessionPayload(capture, elements.access.value, model)
+        : { title: boundedUtf8Text(createSessionTitle ? createSessionTitle(capture, elements.access.value) : labels.sessionTitle || "Assistant chat", 256), model };
+      const session = await request("/api/ai/sessions", { method: "POST", body: JSON.stringify(payload) });
       state.sessionId = session.id; state.contextKey = key;
       return session.id;
     }
@@ -648,7 +657,10 @@
     settingsClose.addEventListener("click", () => settingsDialog.close());
     historyClose.addEventListener("click", () => historyDialog.close());
     elements.model.addEventListener("change", () => { rememberModel(); setBusy(state.busy); });
-    elements.access.addEventListener("change", () => onAccessChange(elements.access.value, api));
+    elements.access.addEventListener("change", () => {
+      resetConversation("Access changed. The next message starts a new conversation bound to this disclosure level and target.");
+      onAccessChange(elements.access.value, api);
+    });
     elements.form.addEventListener("submit", event => { event.preventDefault(); const text = elements.prompt.value.trim(); if (!text) return; elements.prompt.value = ""; sendMessage(text); });
     elements.prompt.addEventListener("keydown", event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); elements.form.requestSubmit(); } });
     document.addEventListener("keydown", event => { if (event.key === "Escape" && root.classList.contains("open") && !settingsDialog.open && !historyDialog.open) setOpen(false); });

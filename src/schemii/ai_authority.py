@@ -69,26 +69,33 @@ class AiAuthority:
         self.lock_path = self.root / ".lock"
         self._lock = threading.RLock()
         self._ensure_directories()
+        with self._store_lock():
+            self._migrate_records()
 
     def register_proposal(
         self, *, application: str, session_id: str, resource: str, access: str,
-        action: dict[str, Any], binding: dict[str, Any] | None = None,
+        action: dict[str, Any], authorization_target: dict[str, Any] | None = None,
+        schema_concurrency: dict[str, Any] | None = None,
+        policy_binding: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self._require_application(application)
         session_id = _identity(session_id, "session_id")
         resource = _identity(resource, "resource")
         access = _identity(access, "access")
         action = self._payload(action, "action", require_dict=True)
-        binding = self._payload({} if binding is None else binding, "binding", require_dict=True)
+        authorization_target = self._payload({} if authorization_target is None else authorization_target, "authorization_target", require_dict=True)
+        schema_concurrency = self._payload({} if schema_concurrency is None else schema_concurrency, "schema_concurrency", require_dict=True)
+        policy_binding = self._payload({} if policy_binding is None else policy_binding, "policy_binding", require_dict=True)
         with self._store_lock():
             now = self._now_ms()
             self._prepare(now)
             self._require_capacity()
             proposal_id = self._new_id("proposal", self.proposal_dir)
             record = {
-                "version": 1, "kind": "proposal", "id": proposal_id, "application": self.application,
+                "version": 2, "kind": "proposal", "id": proposal_id, "application": self.application,
                 "sessionId": session_id, "resource": resource, "access": access,
-                "action": action, "binding": binding, "state": "ready",
+                "action": action, "authorizationTarget": authorization_target,
+                "schemaConcurrency": schema_concurrency, "policyBinding": policy_binding, "state": "ready",
                 "createdAtMs": now, "expiresAtMs": now + round(self.proposal_ttl * 1000),
                 "claim": None, "consumedAtMs": None, "uncertainAtMs": None,
             }
@@ -97,9 +104,9 @@ class AiAuthority:
 
     def list_proposals(
         self, *, application: str, session_id: str, resource: str, access: str,
-        binding: dict[str, Any] | None = None,
+        authorization_target: dict[str, Any] | None = None, schema_concurrency: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        context = self._proposal_context(application, session_id, resource, access, binding)
+        context = self._proposal_context(application, session_id, resource, access, authorization_target, schema_concurrency)
         with self._store_lock():
             self._prepare(self._now_ms())
             return [
@@ -121,10 +128,11 @@ class AiAuthority:
 
     def claim_proposal(
         self, proposal_id: str, *, application: str, session_id: str, resource: str,
-        access: str, binding: dict[str, Any] | None = None,
+        access: str, authorization_target: dict[str, Any] | None = None,
+        schema_concurrency: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         proposal_id = _record_id(proposal_id, "proposal")
-        context = self._proposal_context(application, session_id, resource, access, binding)
+        context = self._proposal_context(application, session_id, resource, access, authorization_target, schema_concurrency)
         with self._store_lock():
             now = self._now_ms()
             self._prepare(now)
@@ -165,17 +173,18 @@ class AiAuthority:
 
     def create_operation(
         self, proposal_id: str, *, application: str, session_id: str, resource: str,
-        access: str, binding: dict[str, Any] | None = None,
+        access: str, authorization_target: dict[str, Any] | None = None,
+        schema_concurrency: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         proposal_id = _record_id(proposal_id, "proposal")
-        context = self._proposal_context(application, session_id, resource, access, binding)
+        context = self._proposal_context(application, session_id, resource, access, authorization_target, schema_concurrency)
         with self._store_lock():
             now = self._now_ms()
             self._prepare(now)
             existing = self._operation_for_proposal(proposal_id)
             if existing is not None:
                 self._require_operation_owner(existing, session_id)
-                if (existing["resource"], existing["access"], existing["binding"]) != (context[1], context[2], context[3]):
+                if (existing["resource"], existing["access"], existing["authorizationTarget"]) != (context[1], context[2], context[3]):
                     raise AiAuthorityError(403, "proposal_binding_mismatch", "Operation is not valid for this authority context")
                 return {**self._public_operation(existing), "executionOwner": False}
             proposal = self._read(self.proposal_dir, proposal_id, "proposal")
@@ -186,9 +195,11 @@ class AiAuthority:
                 raise AiAuthorityError(409, "proposal_outcome_uncertain", "Proposal outcome is uncertain; refresh authoritative state")
             operation_id = self._new_id("operation", self.operation_dir)
             operation = {
-                "version": 1, "kind": "operation", "id": operation_id, "application": self.application,
+                "version": 2, "kind": "operation", "id": operation_id, "application": self.application,
                 "proposalId": proposal_id, "sessionId": session_id, "resource": resource,
-                "access": access, "binding": copy.deepcopy(proposal["binding"]),
+                "access": access, "authorizationTarget": copy.deepcopy(proposal["authorizationTarget"]),
+                "schemaConcurrency": copy.deepcopy(proposal["schemaConcurrency"]),
+                "policyBinding": copy.deepcopy(proposal["policyBinding"]),
                 "action": copy.deepcopy(proposal["action"]), "state": "running",
                 "createdAtMs": now, "updatedAtMs": now,
                 "expiresAtMs": now + round(self.operation_ttl * 1000),
@@ -210,12 +221,20 @@ class AiAuthority:
             self._require_operation_owner(record, session_id)
             return self._public_operation(record)
 
-    def operation_action(self, operation_id: str, *, application: str, session_id: str) -> dict[str, Any]:
+    def proposal_record(self, proposal_id: str, *, application: str, session_id: str) -> dict[str, Any]:
+        self._require_application(application)
+        with self._store_lock():
+            self._prepare(self._now_ms())
+            record = self._read(self.proposal_dir, _record_id(proposal_id, "proposal"), "proposal")
+            self._require_proposal_owner(record, session_id)
+            return copy.deepcopy(record)
+
+    def operation_record(self, operation_id: str, *, application: str, session_id: str) -> dict[str, Any]:
         self._require_application(application)
         with self._store_lock():
             record = self._read(self.operation_dir, _record_id(operation_id, "operation"), "operation")
             self._require_operation_owner(record, session_id)
-            return copy.deepcopy(record["action"])
+            return copy.deepcopy(record)
 
     def operation_for_proposal(self, proposal_id: str, *, application: str, session_id: str) -> dict[str, Any]:
         self._require_application(application)
@@ -226,6 +245,16 @@ class AiAuthority:
                 raise AiAuthorityError(404, "operation_not_started", "Proposal operation has not started")
             self._require_operation_owner(record, session_id)
             return self._public_operation(record)
+
+    def operation_record_for_proposal(self, proposal_id: str, *, application: str, session_id: str) -> dict[str, Any]:
+        self._require_application(application)
+        with self._store_lock():
+            self._prepare(self._now_ms())
+            record = self._operation_for_proposal(_record_id(proposal_id, "proposal"))
+            if record is None:
+                raise AiAuthorityError(404, "operation_not_started", "Proposal operation has not started")
+            self._require_operation_owner(record, session_id)
+            return copy.deepcopy(record)
 
     def finish_operation(
         self, operation_id: str, *, application: str, session_id: str, state: str,
@@ -377,6 +406,34 @@ class AiAuthority:
         self.lock_path.touch(mode=0o600, exist_ok=True)
         os.chmod(self.lock_path, 0o600)
 
+    def _migrate_records(self) -> None:
+        for directory, kind in ((self.proposal_dir, "proposal"), (self.operation_dir, "operation")):
+            for path in sorted(directory.glob("*.json")):
+                try:
+                    record = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as error:
+                    raise AiAuthorityError(500, "authority_store_error", "AI authority storage could not be read") from error
+                if not isinstance(record, dict) or record.get("version") != 1 or record.get("kind") != kind:
+                    continue
+                binding = record.pop("binding", None)
+                if not isinstance(binding, dict):
+                    raise AiAuthorityError(500, "authority_store_error", "AI authority storage contains an invalid legacy binding")
+                binding = copy.deepcopy(binding)
+                schema_id = binding.pop("schemaId", None)
+                if schema_id is not None and schema_id != record.get("resource"):
+                    raise AiAuthorityError(500, "authority_store_error", "AI authority storage contains a mismatched legacy resource")
+                target = binding.pop("target", {})
+                if not isinstance(target, dict):
+                    raise AiAuthorityError(500, "authority_store_error", "AI authority storage contains an invalid legacy target")
+                record.update({"version": 2, "authorizationTarget": target, "schemaConcurrency": binding, "policyBinding": {}})
+                self._write(directory, record)
+        for directory, kind in ((self.proposal_dir, "proposal"), (self.operation_dir, "operation")):
+            for path in sorted(directory.glob("*.json")):
+                record = json.loads(path.read_text(encoding="utf-8"))
+                if record.get("version") == 2 and record.get("kind") == kind and "policyBinding" not in record:
+                    record["policyBinding"] = {}
+                    self._write(directory, record)
+
     @contextmanager
     def _store_lock(self) -> Iterator[None]:
         with self._lock:
@@ -434,11 +491,12 @@ class AiAuthority:
         except (OSError, json.JSONDecodeError) as error:
             raise AiAuthorityError(500, "authority_store_error", "AI authority storage could not be read") from error
         required = {
-            "proposal": {"version", "kind", "id", "application", "sessionId", "resource", "access", "action", "binding", "state", "createdAtMs", "expiresAtMs", "claim", "consumedAtMs", "uncertainAtMs"},
+            "proposal": {"version", "kind", "id", "application", "sessionId", "resource", "access", "action", "authorizationTarget", "schemaConcurrency", "policyBinding", "state", "createdAtMs", "expiresAtMs", "claim", "consumedAtMs", "uncertainAtMs"},
             "query_result": {"version", "kind", "id", "application", "sessionId", "resource", "target", "result", "binding", "state", "createdAtMs", "expiresAtMs", "reservation", "consumedAtMs"},
-            "operation": {"version", "kind", "id", "application", "proposalId", "sessionId", "resource", "access", "binding", "action", "state", "createdAtMs", "updatedAtMs", "expiresAtMs", "leaseExpiresAtMs", "result", "error"},
+            "operation": {"version", "kind", "id", "application", "proposalId", "sessionId", "resource", "access", "authorizationTarget", "schemaConcurrency", "policyBinding", "action", "state", "createdAtMs", "updatedAtMs", "expiresAtMs", "leaseExpiresAtMs", "result", "error"},
         }[kind]
-        if not isinstance(record, dict) or set(record) != required or record.get("version") != 1 or record.get("kind") != kind or record.get("application") != self.application or path.name != f"{record.get('id')}.json":
+        expected_version = 1 if kind == "query_result" else 2
+        if not isinstance(record, dict) or set(record) != required or record.get("version") != expected_version or record.get("kind") != kind or record.get("application") != self.application or path.name != f"{record.get('id')}.json":
             raise AiAuthorityError(500, "authority_store_error", "AI authority storage contains an invalid record")
         if (
             not isinstance(record.get("createdAtMs"), int) or not isinstance(record.get("expiresAtMs"), int)
@@ -448,10 +506,11 @@ class AiAuthority:
         states = {"proposal": {"ready", "claimed", "consumed", "uncertain"}, "query_result": {"ready", "reserved", "consumed"}, "operation": {"running", "succeeded", "failed", "uncertain"}}[kind]
         if record.get("state") not in states:
             raise AiAuthorityError(500, "authority_store_error", "AI authority storage contains an invalid record")
-        if kind == "proposal" and not isinstance(record.get("action"), dict):
+        if kind == "proposal" and (not isinstance(record.get("action"), dict) or not isinstance(record.get("authorizationTarget"), dict) or not isinstance(record.get("schemaConcurrency"), dict) or not isinstance(record.get("policyBinding"), dict)):
             raise AiAuthorityError(500, "authority_store_error", "AI authority storage contains an invalid record")
         if kind == "operation" and (
-            not isinstance(record.get("action"), dict) or not isinstance(record.get("updatedAtMs"), int)
+            not isinstance(record.get("action"), dict) or not isinstance(record.get("authorizationTarget"), dict)
+            or not isinstance(record.get("schemaConcurrency"), dict) or not isinstance(record.get("policyBinding"), dict) or not isinstance(record.get("updatedAtMs"), int)
             or (record["state"] == "running") != isinstance(record.get("leaseExpiresAtMs"), int)
         ):
             raise AiAuthorityError(500, "authority_store_error", "AI authority storage contains an invalid record")
@@ -488,13 +547,17 @@ class AiAuthority:
         if _identity(application, "application") != self.application:
             raise AiAuthorityError(403, code, "Authority belongs to another application")
 
-    def _proposal_context(self, application: str, session_id: str, resource: str, access: str, binding: Any) -> tuple[Any, ...]:
+    def _proposal_context(self, application: str, session_id: str, resource: str, access: str, authorization_target: Any, schema_concurrency: Any) -> tuple[Any, ...]:
         self._require_application(application)
-        return (_identity(session_id, "session_id"), _identity(resource, "resource"), _identity(access, "access"), self._payload({} if binding is None else binding, "binding", require_dict=True))
+        return (
+            _identity(session_id, "session_id"), _identity(resource, "resource"), _identity(access, "access"),
+            self._payload({} if authorization_target is None else authorization_target, "authorization_target", require_dict=True),
+            self._payload({} if schema_concurrency is None else schema_concurrency, "schema_concurrency", require_dict=True),
+        )
 
     @staticmethod
     def _proposal_matches(record: dict[str, Any], context: tuple[Any, ...]) -> bool:
-        return (record["sessionId"], record["resource"], record["access"], record["binding"]) == context
+        return (record["sessionId"], record["resource"], record["access"], record["authorizationTarget"], record["schemaConcurrency"]) == context
 
     def _require_proposal_binding(self, record: dict[str, Any], context: tuple[Any, ...]) -> None:
         if not self._proposal_matches(record, context):
@@ -543,7 +606,12 @@ class AiAuthority:
 
     @staticmethod
     def _public_proposal(record: dict[str, Any]) -> dict[str, Any]:
-        return {"id": record["id"], "application": record["application"], "sessionId": record["sessionId"], "resource": record["resource"], "access": record["access"], "action": copy.deepcopy(record["action"]), "binding": copy.deepcopy(record["binding"]), "state": record["state"]}
+        return {
+            "id": record["id"], "application": record["application"], "sessionId": record["sessionId"],
+            "resource": record["resource"], "access": record["access"], "action": copy.deepcopy(record["action"]),
+            "authorizationTarget": copy.deepcopy(record["authorizationTarget"]),
+            "schemaConcurrency": copy.deepcopy(record["schemaConcurrency"]), "policyBinding": copy.deepcopy(record["policyBinding"]), "state": record["state"],
+        }
 
     @staticmethod
     def _public_result(record: dict[str, Any]) -> dict[str, Any]:

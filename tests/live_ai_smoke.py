@@ -15,6 +15,13 @@ from urllib.request import Request, urlopen
 
 SCENARIOS = (
     {
+        "name": "table-create",
+        "prompt": "Create one table named contract_events in the active saved design with a UUID primary key id and a non-null text column event_name. Do not apply a PostgreSQL migration.",
+        "skill": "schema-design-layout",
+        "tool": "schema_add_table",
+        "action": "add_table",
+    },
+    {
         "name": "project-create",
         "prompt": "Create a new local Schemii project named Free Model Contract Test. Do not modify the current project.",
         "skill": None,
@@ -109,6 +116,12 @@ def validate_response(response: dict[str, Any], scenario: dict[str, Any], *, nat
                 errors.append("connection fallback unexpectedly included a password field")
             elif profile.get("requiresPasswordEntry") is not True:
                 errors.append("connection fallback did not require UI password entry")
+        elif scenario["action"] == "add_table":
+            table = matching[0]
+            if table.get("name") != "contract_events":
+                errors.append("table proposal did not preserve the requested name")
+            elif not isinstance(table.get("columns"), list) or len(table["columns"]) != 2:
+                errors.append("table proposal did not include the requested columns")
         if len(actions) != 1:
             errors.append(f"expected exactly one inert action, got {len(actions)}")
     else:

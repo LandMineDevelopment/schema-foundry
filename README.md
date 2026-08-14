@@ -329,7 +329,7 @@ Edit `.env`, then run the normal Schemii launcher. Do not replace the launcher w
 
 The default stack starts the pinned OpenCode sidecar and waits for its authenticated health check. Provider authentication, model selection, disclosure levels, confirmation boundaries, chat persistence, and limitations are documented in [`docs/AI_ASSISTANT.md`](docs/AI_ASSISTANT.md).
 
-OpenCode runs in a read-only workspace with shell, filesystem, web, dynamic MCP, and unrelated tools denied. Proposal tools produce inert actions that the server replaces with expiring, context-bound, one-use proposal envelopes. Schemii validates actions and requires UI confirmation before writes, navigation, database contact, or migration workflows. AI can open migration preview but cannot bypass the exact reviewed-plan apply flow.
+OpenCode runs in a read-only workspace with shell, filesystem, web, dynamic MCP, and unrelated tools denied. Proposal tools produce inert actions that the server replaces with expiring, context-bound, one-use proposal envelopes. Schemii validates actions and requires UI confirmation before writes, navigation, database contact, or migration workflows. AI can preview migrations, structured row insertion, and expected-absent ordinary-view creation, but only Schemii can issue each separate durable apply proposal. Inserts use parameterized structured values, and uncertain commits reconcile by PostgreSQL transaction ID rather than retrying.
 
 ## Troubleshooting
 
@@ -372,7 +372,7 @@ Most users do not need configuration. These launcher and Compose variables are t
 | `SCHEMII_POSTGRES_DB` | Included PostgreSQL database name |
 | `SCHEMII_POSTGRES_USER` | Included PostgreSQL user |
 | `SCHEMII_POSTGRES_PASSWORD` | Included PostgreSQL password |
-| `SCHEMII_OPENCODE_TIMEOUT` | AI request timeout, default `120` seconds; accepted range `1`–`300` |
+| `SCHEMII_OPENCODE_TIMEOUT` | AI request timeout, default `300` seconds; accepted range `1`–`300` |
 
 Native Schemii variables include `SCHEMII_HOST`, `SCHEMII_PORT`, `SCHEMII_CONFIG_DIR`, `SCHEMII_SCHEMA_DIR`, and `SCHEMII_BEHIND_LOOPBACK_PROXY`. Native Schemer variables include `SCHEMER_HOST`, `SCHEMER_PORT`, `SCHEMER_CONFIG_DIR`, `SCHEMER_DASHBOARD_DIR`, `SCHEMER_BEHIND_LOOPBACK_PROXY`, `SCHEMER_OPENCODE_URL`, `SCHEMER_OPENCODE_USERNAME`, `SCHEMER_OPENCODE_PASSWORD`, and `SCHEMER_OPENCODE_TIMEOUT`. `SCHEMER_DASHBOARD_DIR` defaults to `~/.local/share/schemer/dashboards`; the AI timeout defaults to 120 seconds and accepts `1`–`300`. `compose.schemer.ai.yaml` intentionally maps Schemer's OpenCode connection and timeout from the shared `SCHEMII_OPENCODE_*` Compose values.
 

@@ -7,7 +7,7 @@ const column = tool.schema.object({
 })
 
 export default tool({
-  description: "Propose adding one complete table to the active saved schema.",
+  description: "Use when the user asks to create, add, or design one table. Propose one complete table in the active saved Schemii design after UI confirmation; do not directly create it in PostgreSQL.",
   args: { name: tool.schema.string().trim().min(1).max(63), purpose: tool.schema.string().trim().min(1).max(500), columns: tool.schema.array(column).min(1).max(50) },
-  async execute(args) { return "SCHEMII_ACTION:" + JSON.stringify({ type: "add_table", ...args, requiresConfirmation: true }) },
+  async execute() { return "Proposal arguments received." },
 })

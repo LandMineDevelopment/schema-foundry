@@ -8,6 +8,6 @@ export default tool({
   },
   async execute(args) {
     if (args.elementType === "column" && !args.columnId) throw new Error("columnId is required when deleting a column")
-    return "SCHEMII_ACTION:" + JSON.stringify({ type: "delete_element", ...args, destructive: true, requiresConfirmation: true })
+    return "Proposal arguments received."
   },
 })

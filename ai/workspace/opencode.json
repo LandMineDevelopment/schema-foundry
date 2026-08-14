@@ -47,9 +47,12 @@
       "migration-safety": "allow",
       "schema-design-layout": "allow",
       "read-only-query-safety": "allow",
-      "target-selection": "allow"
+      "target-selection": "allow",
+      "postgres-write-safety": "allow"
     },
     "schema_read_query": "allow",
+    "schema_data_read": "allow",
+    "schema_raw_write": "allow",
     "schema_populate": "allow",
     "schema_add_table": "allow",
     "schema_rename_table": "allow",
@@ -61,6 +64,8 @@
     "schema_connection_open": "allow",
     "schema_migration_preview": "allow",
     "schema_connection_setup": "allow",
-    "schema_project_open": "allow"
+    "schema_project_open": "allow",
+    "schema_insert_rows_preview": "allow",
+    "schema_create_view_preview": "allow"
   }
 }

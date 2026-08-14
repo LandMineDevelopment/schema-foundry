@@ -50,3 +50,5 @@ Each disabled action requires all of the following before its tool is restored:
 - [ ] Updated user-facing capability documentation.
 
 Schemii saved-schema mutation, local project creation, exact connection opening, durable migration preview, and separately confirmed transactional migration apply adapters satisfy these criteria. Schemer dashboard creation and widget create, rename, duplicate, and delete adapters also satisfy these criteria.
+
+Schemii structured row insertion and expected-absent ordinary-view creation also satisfy this boundary: models emit preview proposals only, Schemii issues separate apply proposals, plans persist with restrictive permissions, apply rechecks the exact profile/database/namespace/relation and saved revision/layout binding, and uncertain commits reconcile through PostgreSQL transaction status without replaying the write. View synchronization is narrow and receipt-backed; inserts never mutate saved schema layout.

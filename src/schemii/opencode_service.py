@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import re
 import time
@@ -22,9 +23,10 @@ MAX_HISTORY_MESSAGES = 100
 MAX_HISTORY_TEXT_SIZE = 512 * 1024
 OPENCODE_WORKSPACE = "/workspace"
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
-ACTION_PREFIX = "SCHEMII_ACTION:"
 CUSTOM_TOOLS = {
     "schema_read_query",
+    "schema_data_read",
+    "schema_raw_write",
     "schema_connection_setup",
     "schema_project_open",
     "schema_project_create",
@@ -37,9 +39,13 @@ CUSTOM_TOOLS = {
     "schema_add_relationship",
     "schema_connection_open",
     "schema_migration_preview",
+    "schema_insert_rows_preview",
+    "schema_create_view_preview",
 }
 TOOL_ACTION_TYPES = {
     "schema_read_query": "schema_read_query",
+    "schema_data_read": "data_read",
+    "schema_raw_write": "raw_write",
     "schema_connection_setup": "connection_setup",
     "schema_project_open": "open_project",
     "schema_project_create": "create_project",
@@ -52,6 +58,8 @@ TOOL_ACTION_TYPES = {
     "schema_add_relationship": "add_relationship",
     "schema_connection_open": "open_connection",
     "schema_migration_preview": "migration_preview",
+    "schema_insert_rows_preview": "insert_rows_preview",
+    "schema_create_view_preview": "create_view_preview",
 }
 SAFE_SKILLS = {
     "schemii-help",
@@ -60,6 +68,7 @@ SAFE_SKILLS = {
     "schema-design-layout",
     "read-only-query-safety",
     "target-selection",
+    "postgres-write-safety",
 }
 PROMPT_TOOLS = {
     **{name: True for name in CUSTOM_TOOLS},
@@ -148,7 +157,10 @@ class OpenCodeService:
         tool_action_types: dict[str, str] | None = None,
         safe_skills: set[str] | None = None,
         data_tools: set[str] | None = None,
-        action_prefix: str = ACTION_PREFIX,
+        write_tools: set[str] | None = None,
+        structured_data_tools: set[str] | None = None,
+        raw_write_tools: set[str] | None = None,
+        schema_tools: set[str] | None = None,
         request=Request,
         opener=_open_without_redirects,
     ):
@@ -164,11 +176,16 @@ class OpenCodeService:
         self.tool_action_types = dict(TOOL_ACTION_TYPES if tool_action_types is None else tool_action_types)
         self.safe_skills = set(SAFE_SKILLS if safe_skills is None else safe_skills)
         self.data_tools = set(({"schema_read_query"} & self.custom_tools) if data_tools is None else data_tools)
-        if self.data_tools - self.custom_tools or set(self.tool_action_types) != self.custom_tools or any(not SAFE_ID.fullmatch(name) for name in self.custom_tools | self.safe_skills):
+        self.write_tools = set(({"schema_insert_rows_preview", "schema_create_view_preview"} & self.custom_tools) if write_tools is None else write_tools)
+        self.structured_data_tools = set(({"schema_data_read"} & self.custom_tools) if structured_data_tools is None else structured_data_tools)
+        self.raw_write_tools = set(({"schema_raw_write"} & self.custom_tools) if raw_write_tools is None else raw_write_tools)
+        default_schema_tools = {
+            "schema_project_create", "schema_populate", "schema_add_table", "schema_rename_table", "schema_add_column",
+            "schema_update_column", "schema_delete_element", "schema_add_relationship", "schema_migration_preview",
+        }
+        self.schema_tools = set((default_schema_tools & self.custom_tools) if schema_tools is None else schema_tools)
+        if (self.data_tools | self.write_tools | self.structured_data_tools | self.raw_write_tools | self.schema_tools) - self.custom_tools or set(self.tool_action_types) != self.custom_tools or any(not SAFE_ID.fullmatch(name) for name in self.custom_tools | self.safe_skills):
             raise ValueError("OpenCode tool or skill policy is invalid")
-        if not isinstance(action_prefix, str) or not action_prefix or len(action_prefix) > 64 or any(ord(char) < 33 or ord(char) > 126 for char in action_prefix):
-            raise ValueError("OpenCode action prefix is invalid")
-        self.action_prefix = action_prefix
         self.prompt_tools = {
             **{name: True for name in self.custom_tools},
             **{name: enabled for name, enabled in PROMPT_TOOLS.items() if name not in CUSTOM_TOOLS},
@@ -674,16 +691,24 @@ class OpenCodeService:
             raise OpenCodeServiceError(502, "opencode_error", "OpenCode returned an invalid session response")
         return {"deleted": True}
 
-    def prompt(self, session_id: Any, text: Any, model: Any, system: Any, *, allow_data: bool = False) -> dict[str, Any]:
+    def prompt(self, session_id: Any, text: Any, model: Any, system: Any, *, allow_data: bool = False, allow_write: bool = False, allow_structured_data: bool = False, allow_raw_write: bool = False, allow_schema: bool = True) -> dict[str, Any]:
         session_id = self.verify_session(session_id)
         text = _bounded_text(text, MAX_PROMPT_SIZE, "text")
         model = _model(model)
         system = _bounded_text(system, MAX_TEXT_SIZE, "system")
-        if not isinstance(allow_data, bool):
-            raise OpenCodeServiceError(400, "validation_error", "allow_data is invalid")
+        if any(not isinstance(value, bool) for value in (allow_data, allow_write, allow_structured_data, allow_raw_write, allow_schema)):
+            raise OpenCodeServiceError(400, "validation_error", "AI tool permissions are invalid")
         prompt_tools = dict(self.prompt_tools)
         for tool in self.data_tools:
             prompt_tools[tool] = allow_data
+        for tool in self.write_tools:
+            prompt_tools[tool] = allow_write
+        for tool in self.structured_data_tools:
+            prompt_tools[tool] = allow_structured_data
+        for tool in self.raw_write_tools:
+            prompt_tools[tool] = allow_raw_write
+        for tool in self.schema_tools:
+            prompt_tools[tool] = allow_schema
         payload = {
             "model": model,
             "system": system,
@@ -707,6 +732,14 @@ class OpenCodeService:
         allowed_tools = set(self.custom_tools)
         if not allow_data:
             allowed_tools -= self.data_tools
+        if not allow_write:
+            allowed_tools -= self.write_tools
+        if not allow_structured_data:
+            allowed_tools -= self.structured_data_tools
+        if not allow_raw_write:
+            allowed_tools -= self.raw_write_tools
+        if not allow_schema:
+            allowed_tools -= self.schema_tools
         normalized = self._normalize_message(result, allowed_tools)
         if not normalized["actions"]:
             normalized["actions"] = self._recover_prompt_actions(session_id, text, allowed_tools)
@@ -783,17 +816,11 @@ class OpenCodeService:
                 safe_output = output.encode("utf-8")[:min(MAX_ACTION_SIZE, remaining)].decode("utf-8", "ignore")
                 tool_output_size += len(safe_output.encode("utf-8"))
                 safe_part["output"] = safe_output
-                if output.startswith(self.action_prefix) and len(actions) < MAX_ACTIONS and len(output.encode("utf-8")) <= MAX_ACTION_SIZE:
-                    try:
-                        action = json.loads(
-                            output[len(self.action_prefix):],
-                            parse_constant=_reject_json_constant,
-                        )
-                    except (json.JSONDecodeError, RecursionError, ValueError):
-                        action = None
-                    action_type = action.get("type", action.get("action")) if isinstance(action, dict) else None
-                    if isinstance(action, dict) and action_type == self.tool_action_types[part["tool"]]:
-                        actions.append(action)
+            tool_input = state.get("input")
+            if state.get("status") == "completed" and isinstance(tool_input, dict) and len(actions) < MAX_ACTIONS:
+                action = self._adapt_tool_call(part["tool"], tool_input)
+                if action is not None:
+                    actions.append(action)
             parts.append(safe_part)
         text = "\n".join(text_items).encode("utf-8")[:MAX_TEXT_SIZE].decode("utf-8", "ignore")
         if not text and not actions:
@@ -803,3 +830,20 @@ class OpenCodeService:
                 "The AI provider returned an empty response. Try another free model.",
             )
         return {"text": text, "parts": parts, "actions": actions}
+
+    def _adapt_tool_call(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
+        action_type = self.tool_action_types.get(tool_name)
+        if action_type is None:
+            return None
+        action = copy.deepcopy(arguments)
+        if any(key in action for key in ("type", "action", "requiresApproval", "requiresConfirmation", "readOnly", "destructive", "requiresPasswordEntry")):
+            return None
+        action["type"] = action_type
+        action["requiresConfirmation"] = True
+        if action_type in {"schema_read_query", "data_read", "migration_preview", "insert_rows_preview", "create_view_preview", "read_query"}:
+            action["readOnly"] = True
+        if action_type == "connection_setup":
+            action["requiresPasswordEntry"] = True
+        if action_type in {"delete_element", "widget_delete"}:
+            action["destructive"] = True
+        return action

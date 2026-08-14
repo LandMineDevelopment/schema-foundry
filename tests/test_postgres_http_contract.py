@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from schemii.dashboard_store import DashboardStore
 from schemii.ai_authority import AiAuthority
+from schemii.ai_chat_store import AiChatStore
 from schemii.schema_store import SchemaStore
 from schemii.schemer_server import make_handler as make_schemer_handler
 from schemii.server import make_handler as make_schemii_handler
@@ -25,6 +26,7 @@ class PostgresHttpContractTests(unittest.TestCase):
                 "schemii": lambda service: make_schemii_handler(
                     ROOT / "src/schemii/web", service, SchemaStore(root / "schemas"),
                     "session-token", server_id="schemii-contract", ai_authority=AiAuthority(root / "authority", "schemii"),
+                    ai_chat_store=AiChatStore(root / "chats"),
                 ),
                 "schemer": lambda service: make_schemer_handler(
                     ROOT / "src/schemii/schemer_web", service, DashboardStore(root / "dashboards"),

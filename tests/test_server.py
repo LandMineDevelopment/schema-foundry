@@ -10,8 +10,11 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from schemii.schema_store import SchemaStore, SchemaStoreError
 from schemii.ai_authority import AiAuthority
-from schemii.server import CONTENT_SECURITY_POLICY, _is_local_request, _proposal_manifest_fallback, make_handler
+from schemii.ai_chat_store import AiChatStore
+from schemii.postgres_service import PostgresService, PostgresServiceError
+from schemii.server import CONTENT_SECURITY_POLICY, _is_local_request, make_handler
 from tests.http_test_support import FakePostgresService, RunningHttpServer
+from tests.test_ai_postgres_writes import TARGET, WriteConnection
 
 
 class FakeAIService:
@@ -57,8 +60,8 @@ class FakeAIService:
         self.calls.append(("delete_session", session_id))
         return {"deleted": True}
 
-    def prompt(self, session_id, text, model, system, *, allow_data=False):
-        self.calls.append(("prompt", session_id, text, model, system, allow_data))
+    def prompt(self, session_id, text, model, system, *, allow_data=False, allow_write=False, allow_structured_data=False, allow_raw_write=False, allow_schema=True):
+        self.calls.append(("prompt", session_id, text, model, system, allow_data, allow_write, allow_structured_data, allow_raw_write, allow_schema))
         return self.prompt_response
 
     def verify_session(self, session_id):
@@ -93,10 +96,12 @@ class ServerTests(unittest.TestCase):
         self.ai_service = FakeAIService()
         self.example_installer = FakeExampleInstaller()
         self.store = SchemaStore(Path(self.temporary_directory.name) / "schemas")
+        self.chat_store = AiChatStore(Path(self.temporary_directory.name) / "chats")
         handler = make_handler(
             ROOT / "src" / "schemii" / "web", self.service, self.store, "session-token",
             server_id="server-start-id",
             ai_authority=AiAuthority(Path(self.temporary_directory.name) / "authority", "schemii"),
+            ai_chat_store=self.chat_store,
             ai_service=self.ai_service,
             example_installer=self.example_installer,
         )
@@ -195,7 +200,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(
             self.service.calls[-1],
             ("execute_read_only_sql", "local", "public", "SELECT 1 AS answer", {
-                "database": None, "expected_profile_fingerprint": None, "reject_privileged_role": False, "allow_explain": True, "max_rows": 500,
+                "database": None, "expected_profile_fingerprint": None, "allow_explain": True, "max_rows": 500,
                 "max_columns": 100, "max_result_bytes": 1024 * 1024,
             }),
         )
@@ -449,11 +454,15 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(json.loads(delete_body), {"deleted": "schema_one"})
 
     def test_ai_routes_require_session_and_forward_auth_and_sessions(self):
+        self.store.save(
+            "schema_one", {"id": "schema_one", "schema": {"projectName": "Schema chat", "tables": [], "relationships": [], "functions": []}},
+            expected_layout_token=None, layout_protocol=None,
+        )
         requests = [
             ("/api/ai/auth/api", "POST", {"providerId": "anthropic", "key": "secret"}),
             ("/api/ai/auth/oauth/authorize", "POST", {"providerId": "anthropic", "method": 1, "inputs": {"region": "us"}}),
             ("/api/ai/auth/oauth/callback", "POST", {"providerId": "anthropic", "method": 1, "code": "code"}),
-            ("/api/ai/sessions", "POST", {"title": "Schema chat", "model": {"providerID": "anthropic", "modelID": "claude"}}),
+            ("/api/ai/sessions", "POST", {"schemaId": "schema_one", "accessLevel": "metadata", "model": {"providerID": "anthropic", "modelID": "claude"}}),
             ("/api/ai/auth/anthropic", "DELETE", None),
             ("/api/ai/sessions/ses_1", "DELETE", None),
         ]
@@ -470,31 +479,12 @@ class ServerTests(unittest.TestCase):
         self.assertIn(("delete_api_key", "anthropic"), self.ai_service.calls)
         self.assertIn(("delete_session", "ses_1"), self.ai_service.calls)
 
-    def test_schema_manifest_fallback_is_bounded_inert_and_hidden_from_chat_text(self):
-        action = {"type": "open_project", "schemaId": "schema_orders", "projectName": "Orders", "requiresConfirmation": True}
-        visible = "Prepared a complete teaching schema."
-        manifest = "SCHEMII_PROPOSALS:" + json.dumps([action])
-        response = {"text": f"{visible}\n{manifest}", "parts": [{"type": "text", "text": f"{visible}\n{manifest}"}], "actions": []}
-
-        repaired = _proposal_manifest_fallback(response)
-
-        self.assertEqual(repaired["actions"], [action])
-        self.assertEqual(repaired["text"], visible)
-        self.assertEqual(repaired["parts"], [{"type": "text", "text": visible}])
-        self.assertNotIn("SCHEMII_PROPOSALS", json.dumps(repaired["parts"]))
-        creation = {**response, "text": 'SCHEMII_PROPOSALS:[{"type":"create_project","projectName":"Demo","requiresConfirmation":true}]'}
-        self.assertEqual(_proposal_manifest_fallback(creation)["actions"][0]["type"], "create_project")
-        mixed = {**response, "text": 'SCHEMII_PROPOSALS:[{"type":"unknown_action"}]'}
-        self.assertIs(_proposal_manifest_fallback(mixed), mixed)
-        query = {**response, "text": 'SCHEMII_PROPOSALS:[{"type":"schema_read_query","sql":"SELECT 1"}]'}
-        self.assertIs(_proposal_manifest_fallback(query), query)
-        self.assertEqual(_proposal_manifest_fallback(query, allow_data=True)["actions"][0]["type"], "schema_read_query")
-        existing = {**response, "actions": [{"type": "add_table"}]}
-        self.assertIs(_proposal_manifest_fallback(existing), existing)
-
     def test_ai_history_routes_require_session_and_return_normalized_history(self):
         self.store.save(
-            "schema_one", {"id": "schema_one", "schema": {"projectName": "Demo", "tables": [], "relationships": [], "functions": []}},
+            "schema_one", {"id": "schema_one", "schema": {
+                "projectName": "Demo", "tables": [], "relationships": [], "functions": [],
+                "postgres": {"sourceProfileId": "local", "database": "demo", "namespace": "public"},
+            }},
             expected_layout_token=None, layout_protocol=None,
         )
         self.ai_service.session_title = "SCHEMII_CONTEXT:schema_one:schema Schema chat"
@@ -512,6 +502,9 @@ class ServerTests(unittest.TestCase):
     def test_ai_activity_stream_requires_session_and_returns_only_normalized_events(self):
         path = "/api/ai/sessions/ses_1/activity"
         self.assertEqual(self.request(path)[0], 403)
+        self.chat_store.create("ses_1", "schema_one", {}, ["schema"], {
+            permission: "every_action" for permission in ("schema", "structured", "write", "rawread", "rawwrite")
+        })
 
         status, body, headers = self.request(path, authorized=True)
 
@@ -578,20 +571,20 @@ class ServerTests(unittest.TestCase):
         for secret in ("profile-secret", "other-secret", "table-secret", "row-secret", "db.internal", "reports.internal", "admin", "reader", "/home/user", "/private", "configPath"):
             self.assertNotIn(secret, context_and_text)
         self.assertFalse(any(item[0] == "list_namespaces" for item in self.service.calls))
-        self.assertIn("proposals are not executed", call[4].lower())
-        self.assertIn("local project creation execute in the schemii backend", call[4].lower())
+        self.assertIn("configured approval policy", call[4].lower())
+        self.assertIn("executes every action in schemii's backend", call[4].lower())
+        self.assertIn("enable its matching permission checkbox", call[4].lower())
+        self.assertIn("do not claim the capability is unsupported", call[4].lower())
         self.assertNotIn("schema_migration_apply", call[4].lower())
         self.assertFalse(call[5])
+        self.assertFalse(call[6])
+        self.assertFalse(call[7])
+        self.assertFalse(call[8])
+        self.assertTrue(call[9])
 
         payload["accessLevel"] = "data"
         payload.update({"profileId": "local", "database": "demo", "namespace": "public"})
         self.assertEqual(self.request("/api/ai/sessions/ses_1/messages", "POST", payload, authorized=True)[0], 409)
-        from schemii.ai_http import ai_context_fingerprint
-        profile_fingerprint = ai_context_fingerprint(["local", "db.internal", 5432, "demo", "admin", None])
-        self.ai_service.session_title = f"SCHEMII_CONTEXT:schema_one:data:{ai_context_fingerprint(['local', 'demo', 'public', profile_fingerprint])} Demo chat"
-        self.assertEqual(self.request("/api/ai/sessions/ses_1/messages", "POST", payload, authorized=True)[0], 200)
-        self.assertTrue(self.ai_service.calls[-1][5])
-        self.assertNotIn("row-secret", self.ai_service.calls[-1][2])
 
     def test_ai_proposal_execution_is_idempotent_and_one_use(self):
         self.store.save(
@@ -614,7 +607,7 @@ class ServerTests(unittest.TestCase):
         self.assertNotIn("actions", response)
         proposal = response["proposals"][0]
         path = f"/api/ai/sessions/ses_1/proposals/{proposal['proposalId']}"
-        execute_body = {"schemaId": "schema_one", "accessLevel": "schema", "confirmation": {"accepted": True, "mode": "explicit"}}
+        execute_body = {"schemaId": "schema_one", "accessLevel": "schema", "policyRevision": 1, "confirmation": {"accepted": True, "mode": "every_action"}}
         status, body, _ = self.request(path + "/execute", "POST", execute_body, authorized=True)
         self.assertEqual(status, 200)
         operation = json.loads(body)["operation"]
@@ -624,6 +617,32 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(repeated["id"], operation["id"])
         reconciled = json.loads(self.request(path + "/reconcile", "POST", execute_body, authorized=True)[1])["operation"]
         self.assertEqual(reconciled["id"], operation["id"])
+
+    def test_sibling_schema_proposals_are_one_atomic_batch(self):
+        saved = self.store.save(
+            "schema_one", {"id": "schema_one", "schema": {"projectName": "Demo", "tables": [{
+                "id": "table_one", "name": "events", "columns": [{"id": "column_id", "name": "id", "type": "uuid", "primary": True, "nullable": False, "unique": True, "default": ""}],
+                "uniqueConstraints": [], "checks": [], "indexes": [], "triggers": [], "x": 10, "y": 20, "color": "#f4b942",
+            }], "relationships": [], "functions": []}}, expected_layout_token=None, layout_protocol=None,
+        )
+        self.ai_service.session_title = "SCHEMII_CONTEXT:schema_one:schema Demo chat"
+        self.ai_service.prompt_response = {"text": "Review.", "parts": [], "actions": [
+            {"type": "add_column", "tableId": "table_one", "name": "name", "columnType": "text", "nullable": False, "requiresConfirmation": True},
+            {"type": "add_column", "tableId": "table_one", "name": "description", "columnType": "text", "nullable": True, "requiresConfirmation": True},
+        ]}
+        message = {"text": "Add columns", "model": {}, "schemaId": "schema_one", "accessLevel": "schema"}
+        response = json.loads(self.request("/api/ai/sessions/ses_1/messages", "POST", message, authorized=True)[1])
+        self.assertEqual(len(response["proposals"]), 1)
+        proposal = response["proposals"][0]
+        self.assertEqual(proposal["action"]["type"], "schema_batch")
+        self.assertEqual([item["name"] for item in proposal["action"]["actions"]], ["name", "description"])
+        execute = {"schemaId": "schema_one", "accessLevel": "schema", "policyRevision": 1, "confirmation": {"accepted": True, "mode": "every_action"}}
+        operation = json.loads(self.request(f"/api/ai/sessions/ses_1/proposals/{proposal['proposalId']}/execute", "POST", execute, authorized=True)[1])["operation"]
+        self.assertEqual(operation["state"], "succeeded")
+        after = self.store.get("schema_one")
+        self.assertEqual(after["revision"], saved["revision"] + 1)
+        self.assertEqual([column["name"] for column in after["schema"]["tables"][0]["columns"]], ["id", "name", "description"])
+        self.assertEqual((after["schema"]["tables"][0]["x"], after["schema"]["tables"][0]["y"], after["schema"]["tables"][0]["color"]), (10, 20, "#f4b942"))
 
     def test_ai_proposal_claim_rejects_changed_schema_revision(self):
         original = self.store.save(
@@ -646,9 +665,39 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertEqual(json.loads(body)["error"]["code"], "proposal_binding_mismatch")
 
+    def test_schema_preflight_does_not_persist_and_post_save_preview_uses_new_binding(self):
+        saved = self.store.save(
+            "schema_one", {"id": "schema_one", "schema": {
+                "projectName": "Demo", "tables": [], "relationships": [], "functions": [],
+                "postgres": {"sourceProfileId": "local", "database": "demo", "namespace": "public"},
+            }}, expected_layout_token=None, layout_protocol=None,
+        )
+        self.service.profiles = [{"id": "local", "name": "Local", "host": "127.0.0.1", "port": 5432, "dbname": "demo", "user": "reader"}]
+        from schemii.ai_http import ai_context_fingerprint
+        fingerprint = self.service.profile_context_fingerprint("local")
+        self.ai_service.session_title = f"SCHEMII_CONTEXT:schema_one:schema-write:{ai_context_fingerprint(['local', 'demo', 'public', fingerprint])} Demo"
+        self.ai_service.prompt_response = {"text": "Review.", "parts": [], "actions": [{
+            "type": "add_table", "name": "events", "purpose": "Events", "columns": [{"name": "id", "type": "uuid"}], "requiresConfirmation": True,
+        }]}
+        message = {"text": "Add events", "model": {}, "schemaId": "schema_one", "accessLevel": "schema-write", "profileId": "local", "database": "demo", "namespace": "public"}
+        response = json.loads(self.request("/api/ai/sessions/ses_1/messages", "POST", message, authorized=True)[1])
+        self.assertEqual(self.store.get("schema_one")["revision"], saved["revision"])
+        self.assertTrue(response["proposals"][0]["preflight"]["migration"]["previewOnly"])
+        proposal = response["proposals"][0]
+        execute = {"policyRevision": 1, "confirmation": {"accepted": True, "mode": "every_action"}}
+        operation = json.loads(self.request(f"/api/ai/sessions/ses_1/proposals/{proposal['proposalId']}/execute", "POST", execute, authorized=True)[1])["operation"]
+        result = operation["result"]
+        self.assertEqual(result["revision"], saved["revision"] + 1)
+        self.assertEqual(result["migrationPreview"]["schemaBinding"]["revision"], result["revision"])
+        self.assertEqual(result["migrationPreview"]["schemaBinding"]["layoutToken"], result["layoutToken"])
+        self.assertEqual(result["migrationPreview"]["applyProposal"]["action"]["type"], "migration_apply")
+
     def test_ai_connection_open_and_migration_preview_use_exact_profile(self):
         self.store.save(
-            "schema_one", {"id": "schema_one", "schema": {"projectName": "Demo", "tables": [], "relationships": [], "functions": []}},
+            "schema_one", {"id": "schema_one", "schema": {
+                "projectName": "Demo", "tables": [], "relationships": [], "functions": [],
+                "postgres": {"sourceProfileId": "local", "database": "demo", "namespace": "public"},
+            }},
             expected_layout_token=None, layout_protocol=None,
         )
         self.service.profiles = [{
@@ -656,7 +705,7 @@ class ServerTests(unittest.TestCase):
         }]
         self.ai_service.session_title = "SCHEMII_CONTEXT:schema_one:schema Demo chat"
         message = {"text": "Open local", "model": {}, "schemaId": "schema_one", "accessLevel": "schema"}
-        execute = {"schemaId": "schema_one", "accessLevel": "schema", "confirmation": {"accepted": True, "mode": "explicit"}}
+        execute = {"schemaId": "schema_one", "accessLevel": "schema", "policyRevision": 1, "confirmation": {"accepted": True, "mode": "every_action"}}
 
         self.ai_service.prompt_response = {"text": "Review.", "parts": [], "actions": [{
             "type": "open_connection", "profileId": "local", "name": "Local", "database": "demo", "namespace": "public", "requiresConfirmation": True,
@@ -669,6 +718,18 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(operation["result"]["command"]["type"], "select_postgres_profile")
         self.assertIn(("list_namespaces", "local"), self.service.calls)
 
+        from schemii.ai_http import ai_context_fingerprint
+        fingerprint = self.service.profile_context_fingerprint("local")
+        self.chat_store.delete("ses_1")
+        self.ai_service.session_title = f"SCHEMII_CONTEXT:schema_one:schema-read-write:{ai_context_fingerprint(['local', 'demo', 'public', fingerprint])} Demo chat"
+        message = {
+            "text": "Preview migration", "model": {}, "schemaId": "schema_one", "accessLevel": "schema-read-write",
+            "profileId": "local", "database": "demo", "namespace": "public",
+        }
+        execute = {
+            "schemaId": "schema_one", "accessLevel": "schema-read-write", "profileId": "local", "database": "demo",
+            "namespace": "public", "policyRevision": 1, "confirmation": {"accepted": True, "mode": "every_action"},
+        }
         self.ai_service.prompt_response = {"text": "Review.", "parts": [], "actions": [{
             "type": "migration_preview", "profileId": "local", "namespace": "public", "destructivePolicy": "reject",
             "purpose": "Review", "readOnly": True, "requiresConfirmation": True,
@@ -686,6 +747,156 @@ class ServerTests(unittest.TestCase):
         self.assertTrue(any(call[0] == "apply_ai_migration" and call[-1] is True for call in self.service.calls))
         self.assertTrue(any(call[0] == "preview_ai_migration" and call[2:5] == ("local", "demo", "public") for call in self.service.calls))
 
+    def test_ai_insert_uses_confirmed_preview_then_server_issued_apply(self):
+        saved = self.store.save(
+            "schema_one", {"id": "schema_one", "schema": {
+                "projectName": "Demo", "tables": [], "relationships": [], "functions": [], "views": [],
+                "postgres": {"sourceProfileId": "local", "database": "demo", "namespace": "public"},
+            }}, expected_layout_token=None, layout_protocol=None,
+        )
+        self.service.profiles = [{
+            "id": "local", "name": "Local", "host": "127.0.0.1", "port": 5432,
+            "dbname": "demo", "user": "reader", "sslmode": "prefer",
+        }]
+        from schemii.ai_http import ai_context_fingerprint
+        fingerprint = self.service.profile_context_fingerprint("local")
+        self.ai_service.session_title = f"SCHEMII_CONTEXT:schema_one:data:{ai_context_fingerprint(['local', 'demo', 'public', fingerprint])} Demo chat"
+        self.ai_service.prompt_response = {"text": "Review.", "parts": [], "actions": [{
+            "type": "insert_rows_preview", "profileId": "local", "namespace": "public", "relation": "events",
+            "rows": [{"name": "launch"}, {"name": "review"}], "purpose": "Seed events",
+            "readOnly": True, "requiresConfirmation": True,
+        }]}
+        message = {
+            "text": "Insert events", "model": {}, "schemaId": "schema_one", "accessLevel": "data",
+            "profileId": "local", "database": "demo", "namespace": "public",
+        }
+        status, body, _ = self.request("/api/ai/sessions/ses_1/messages", "POST", message, authorized=True)
+        self.assertEqual(status, 200)
+        preview_proposal = json.loads(body)["proposals"][0]
+        execute = {
+            "schemaId": "schema_one", "accessLevel": "data", "profileId": "local", "database": "demo",
+            "namespace": "public", "policyRevision": 1, "confirmation": {"accepted": True, "mode": "every_action"},
+        }
+        preview_path = f"/api/ai/sessions/ses_1/proposals/{preview_proposal['proposalId']}/execute"
+        preview_operation = json.loads(self.request(preview_path, "POST", execute, authorized=True)[1])["operation"]
+        self.assertEqual(preview_operation["result"]["kind"], "postgres_write_plan")
+        preview_call = next(call for call in self.service.calls if call[0] == "preview_ai_insert_rows")
+        self.assertEqual(set(preview_call[-1]), {"schemaId", "revision", "layoutToken"})
+        apply_proposal = preview_operation["result"]["applyProposal"]
+        self.assertEqual(apply_proposal["action"]["type"], "postgres_write_apply")
+        self.assertNotIn("rows", apply_proposal["action"])
+        self.assertEqual(apply_proposal["action"]["reviewedPlan"]["rows"], [{"name": "launch"}, {"name": "review"}])
+        apply_path = f"/api/ai/sessions/ses_1/proposals/{apply_proposal['proposalId']}/execute"
+        applied = json.loads(self.request(apply_path, "POST", execute, authorized=True)[1])["operation"]
+        self.assertEqual(applied["result"]["kind"], "rows_inserted")
+        self.assertEqual(self.store.get("schema_one")["revision"], saved["revision"])
+        self.assertTrue(any(call[0] == "preview_ai_insert_rows" for call in self.service.calls))
+        self.assertTrue(any(call[0] == "apply_ai_postgres_write" for call in self.service.calls))
+
+    def test_ai_raw_write_executes_only_through_server_console_transaction(self):
+        self.store.save(
+            "schema_one", {"id": "schema_one", "schema": {
+                "projectName": "Demo", "tables": [], "relationships": [], "functions": [],
+                "postgres": {"sourceProfileId": "local", "database": "demo", "namespace": "public"},
+            }}, expected_layout_token=None, layout_protocol=None,
+        )
+        self.service.profiles = [{
+            "id": "local", "name": "Local", "host": "127.0.0.1", "port": 5432,
+            "dbname": "demo", "user": "writer", "sslmode": "prefer",
+        }]
+        from schemii.ai_http import ai_context_fingerprint
+        fingerprint = self.service.profile_context_fingerprint("local")
+        access = "schema-structured-write-rawread-rawwrite"
+        self.ai_service.session_title = f"SCHEMII_CONTEXT:schema_one:{access}:{ai_context_fingerprint(['local', 'demo', 'public', fingerprint])} Demo chat"
+        sql = "UPDATE events SET active = true; DELETE FROM events WHERE expired"
+        self.ai_service.prompt_response = {"text": "Review.", "parts": [], "actions": [{
+            "type": "raw_write", "profileId": "local", "namespace": "public", "sql": sql,
+            "purpose": "Refresh events", "requiresConfirmation": True,
+        }]}
+        message = {"text": "Refresh events", "model": {}, "schemaId": "schema_one", "accessLevel": access, "profileId": "local", "database": "demo", "namespace": "public"}
+        execute = {"schemaId": "schema_one", "accessLevel": access, "profileId": "local", "database": "demo", "namespace": "public", "policyRevision": 1, "confirmation": {"accepted": True, "mode": "every_action"}}
+        proposal = json.loads(self.request("/api/ai/sessions/ses_1/messages", "POST", message, authorized=True)[1])["proposals"][0]
+        self.assertEqual(proposal["action"]["sql"], sql)
+        operation = json.loads(self.request(f"/api/ai/sessions/ses_1/proposals/{proposal['proposalId']}/execute", "POST", execute, authorized=True)[1])["operation"]
+        self.assertEqual(operation["state"], "succeeded")
+        grant_call = next(call for call in self.service.calls if call[0] == "create_console_write_grant")
+        execution_call = next(call for call in self.service.calls if call[0] == "execute_console")
+        revoke_call = next(call for call in self.service.calls if call[0] == "revoke_console_write_grant")
+        self.assertTrue(grant_call[2]["confirmed"])
+        self.assertEqual(execution_call[2]["sql"], sql)
+        self.assertEqual(execution_call[2]["mode"], "write")
+        self.assertEqual(revoke_call[2], execution_call[2]["writeGrantId"])
+
+    def test_ai_pre_mutation_service_failure_is_failed_not_uncertain(self):
+        self.test_ai_insert_uses_confirmed_preview_then_server_issued_apply()
+        self.ai_service.prompt_response = {"text": "Review.", "parts": [], "actions": [{
+            "type": "insert_rows_preview", "profileId": "local", "namespace": "public", "relation": "events",
+            "rows": [{"name": "later"}], "purpose": "Seed events", "readOnly": True, "requiresConfirmation": True,
+        }]}
+        fingerprint = self.service.profile_context_fingerprint("local")
+        from schemii.ai_http import ai_context_fingerprint
+        self.ai_service.session_title = f"SCHEMII_CONTEXT:schema_one:data:{ai_context_fingerprint(['local', 'demo', 'public', fingerprint])} Demo chat"
+        message = {"text": "Insert later", "model": {}, "schemaId": "schema_one", "accessLevel": "data", "profileId": "local", "database": "demo", "namespace": "public"}
+        execute = {"schemaId": "schema_one", "accessLevel": "data", "profileId": "local", "database": "demo", "namespace": "public", "policyRevision": 1, "confirmation": {"accepted": True, "mode": "every_action"}}
+        proposal = json.loads(self.request("/api/ai/sessions/ses_1/messages", "POST", message, authorized=True)[1])["proposals"][0]
+        preview = json.loads(self.request(f"/api/ai/sessions/ses_1/proposals/{proposal['proposalId']}/execute", "POST", execute, authorized=True)[1])["operation"]
+        apply_proposal = preview["result"]["applyProposal"]
+
+        def fail_before_mutation(*args):
+            raise PostgresServiceError(500, "plan_store_error", "Plan could not be validated")
+
+        self.service.apply_ai_postgres_write = fail_before_mutation
+        status, body, _ = self.request(f"/api/ai/sessions/ses_1/proposals/{apply_proposal['proposalId']}/execute", "POST", execute, authorized=True)
+        operation = json.loads(body)["operation"]
+        self.assertEqual(status, 500)
+        self.assertEqual(operation["state"], "failed")
+        self.assertEqual(operation["error"]["code"], "plan_store_error")
+
+    def test_ai_view_creation_uses_server_apply_and_preserves_layout(self):
+        layout = {"layers": {"tables": {"viewport": {"x": 12, "y": 34, "zoom": 0.8}, "objects": {}}, "views": {"viewport": {"x": 5, "y": 6, "zoom": 1}, "objects": {}}}}
+        saved = self.store.save(
+            "schema_one", {"id": "schema_one", "schema": {
+                "projectName": "Demo", "tables": [], "relationships": [], "functions": [], "views": [], "layout": layout,
+                "postgres": {"sourceProfileId": "local", "database": "demo", "namespace": "public"},
+            }}, expected_layout_token=None, layout_protocol=None,
+        )
+        self.service.view_layout_token = saved["layoutToken"]
+        self.service.view_expected_absent = True
+        self.service.view_saved_id = None
+        self.service.profiles = [{
+            "id": "local", "name": "Local", "host": "127.0.0.1", "port": 5432,
+            "dbname": "demo", "user": "reader", "sslmode": "prefer",
+        }]
+        from schemii.ai_http import ai_context_fingerprint
+        fingerprint = self.service.profile_context_fingerprint("local")
+        self.ai_service.session_title = f"SCHEMII_CONTEXT:schema_one:data:{ai_context_fingerprint(['local', 'demo', 'public', fingerprint])} Demo chat"
+        self.ai_service.prompt_response = {"text": "Review.", "parts": [], "actions": [{
+            "type": "create_view_preview", "profileId": "local", "namespace": "public", "relation": "summary",
+            "definition": 'CREATE VIEW "public"."summary" AS SELECT 1', "purpose": "Create summary",
+            "readOnly": True, "requiresConfirmation": True,
+        }]}
+        message = {
+            "text": "Create summary", "model": {}, "schemaId": "schema_one", "accessLevel": "data",
+            "profileId": "local", "database": "demo", "namespace": "public",
+        }
+        _, body, _ = self.request("/api/ai/sessions/ses_1/messages", "POST", message, authorized=True)
+        proposal = json.loads(body)["proposals"][0]
+        execute = {
+            "schemaId": "schema_one", "accessLevel": "data", "profileId": "local", "database": "demo",
+            "namespace": "public", "policyRevision": 1, "confirmation": {"accepted": True, "mode": "every_action"},
+        }
+        preview_path = f"/api/ai/sessions/ses_1/proposals/{proposal['proposalId']}/execute"
+        preview = json.loads(self.request(preview_path, "POST", execute, authorized=True)[1])["operation"]["result"]
+        apply_proposal = preview["applyProposal"]
+        self.assertNotIn("definition", apply_proposal["action"])
+        apply_path = f"/api/ai/sessions/ses_1/proposals/{apply_proposal['proposalId']}/execute"
+        operation = json.loads(self.request(apply_path, "POST", execute, authorized=True)[1])["operation"]
+        self.assertEqual(operation["result"]["kind"], "view_created")
+        after = self.store.get("schema_one")
+        self.assertEqual(after["schema"]["layout"], layout)
+        self.assertEqual(after["schema"]["views"][0]["name"], "summary")
+        self.assertEqual(after["revision"], saved["revision"] + 1)
+
     def test_ai_message_metadata_omits_schema_and_rejects_unknown_schema(self):
         record = {"id": "schema_one", "schema": {"projectName": "Demo", "tables": [{"id": "t", "name": "secret_table", "columns": []}], "relationships": [], "functions": []}}
         self.store.save("schema_one", record, expected_layout_token=None, layout_protocol=None)
@@ -697,7 +908,88 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(self.request("/api/ai/sessions/ses_1/messages", "POST", payload, authorized=True)[0], 200)
         self.assertNotIn("secret_table", self.ai_service.calls[-1][2])
         payload["schemaId"] = "missing"
-        self.assertEqual(self.request("/api/ai/sessions/ses_1/messages", "POST", payload, authorized=True)[0], 404)
+        self.assertEqual(self.request("/api/ai/sessions/ses_1/messages", "POST", payload, authorized=True)[0], 409)
+
+
+class RealAiWriteHttpTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary_directory.name)
+        self.ai_service = FakeAIService()
+        self.connections = []
+        self.http = None
+        self._start()
+        self.service.save_profile("local", {
+            "name": "Local", "host": "127.0.0.1", "port": 5432, "dbname": "demo",
+            "user": "reader", "password": "secret", "sslmode": "prefer", "timeout": 5,
+        })
+        self.saved = self.store.save("schema_one", {"id": "schema_one", "schema": {
+            "projectName": "Demo", "tables": [], "relationships": [], "functions": [], "views": [],
+            "postgres": {"sourceProfileId": "local", "database": "demo", "namespace": "public"},
+        }}, expected_layout_token=None, layout_protocol=None)
+        from schemii.ai_http import ai_context_fingerprint
+        fingerprint = self.service.profile_context_fingerprint("local")
+        self.ai_service.session_title = f"SCHEMII_CONTEXT:schema_one:data:{ai_context_fingerprint(['local', 'demo', 'public', fingerprint])} Demo chat"
+
+    def tearDown(self):
+        if self.http is not None:
+            self.http.close()
+        self.service.close()
+        self.temporary_directory.cleanup()
+
+    def _connect(self, **kwargs):
+        connection = WriteConnection()
+        self.connections.append(connection)
+        return connection
+
+    def _start(self):
+        self.service = PostgresService(self.root / "config", connect_factory=self._connect)
+        self.service._inspect_ai_insert_target = lambda *args: TARGET
+        self.store = SchemaStore(self.root / "schemas")
+        self.authority = AiAuthority(self.root / "authority", "schemii")
+        handler = make_handler(
+            ROOT / "src" / "schemii" / "web", self.service, self.store, "session-token",
+            server_id="real-ai-write", ai_authority=self.authority,
+            ai_chat_store=AiChatStore(self.root / "chats"), ai_service=self.ai_service,
+            example_installer=FakeExampleInstaller(),
+        )
+        self.http = RunningHttpServer(handler)
+
+    def _restart(self):
+        self.http.close()
+        self.service.close()
+        self._start()
+
+    def request(self, path, method="GET", payload=None):
+        return self.http.request(path, method, payload, authorized=True)
+
+    def test_real_durable_insert_plan_applies_after_http_restart(self):
+        self.ai_service.prompt_response = {"text": "Review.", "parts": [], "actions": [{
+            "type": "insert_rows_preview", "profileId": "local", "namespace": "public", "relation": "events",
+            "rows": [{"name": "launch"}, {"name": "review"}], "purpose": "Seed events",
+            "readOnly": True, "requiresConfirmation": True,
+        }]}
+        message = {"text": "Insert events", "model": {}, "schemaId": "schema_one", "accessLevel": "data", "profileId": "local", "database": "demo", "namespace": "public"}
+        execute = {"schemaId": "schema_one", "accessLevel": "data", "profileId": "local", "database": "demo", "namespace": "public", "policyRevision": 1, "confirmation": {"accepted": True, "mode": "every_action"}}
+        proposal = json.loads(self.request("/api/ai/sessions/ses_1/messages", "POST", message)[1])["proposals"][0]
+        preview = json.loads(self.request(f"/api/ai/sessions/ses_1/proposals/{proposal['proposalId']}/execute", "POST", execute)[1])["operation"]
+        apply_proposal = preview["result"]["applyProposal"]
+        plan_id = apply_proposal["action"]["planId"]
+        plan_path = self.root / "config" / "ai_migration_plans" / f"{plan_id}.json"
+        stored = json.loads(plan_path.read_text())
+        self.assertEqual(stored["schemaBinding"], {"schemaId": "schema_one", "revision": self.saved["revision"], "layoutToken": self.saved["layoutToken"]})
+        self.assertNotIn("target", stored["schemaBinding"])
+
+        self._restart()
+        status, body, _ = self.request(f"/api/ai/sessions/ses_1/proposals/{apply_proposal['proposalId']}/execute", "POST", execute)
+        operation = json.loads(body)["operation"]
+        self.assertEqual(status, 200)
+        self.assertEqual(operation["state"], "succeeded")
+        self.assertEqual(operation["result"]["insertedRowCount"], 2)
+        inserts = [(sql, params) for sql, params in self.connections[-1].executed if sql.startswith("INSERT INTO")]
+        self.assertEqual(len(inserts), 1)
+        self.assertEqual(json.loads(inserts[0][1][0]), [{"name": "launch"}, {"name": "review"}])
+        self.assertEqual(self.service._read_ai_plan(plan_id)["state"], "succeeded")
 
 
 if __name__ == "__main__":

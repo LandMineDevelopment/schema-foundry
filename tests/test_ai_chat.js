@@ -120,18 +120,47 @@ const libraryLoader = source.slice(source.indexOf("async function loadSchemaLibr
 assert.match(libraryLoader, /postgresProfileRepository\.list\(\)/, "schema library must load redacted saved-profile metadata through the shared repository");
 assert.doesNotMatch(libraryLoader, /namespaces|password/, "opening the schema library must not contact PostgreSQL or expose credentials");
 
-assert.match(source, /if \(!confirm\(`Confirm action:/, "write actions must require explicit confirmation");
+assert.match(source, /if \(!confirm\(confirmationText\)\) return;/, "write actions must require explicit confirmation");
+assert.match(source, /Apply this separately reviewed PostgreSQL write/, "AI PostgreSQL writes must require a separate apply confirmation");
+assert.match(source, /This preview does not write/, "AI PostgreSQL preview confirmation must not imply write authorization");
+assert.match(source, /Previewed, no changes applied/, "successful write previews must not be labeled as completed writes");
+assert.match(source, /Inserted \$\{result\.insertedRowCount\} row\(s\)/, "successful insert cards must show the authoritative inserted row count");
 assert.match(source, /if \(!confirm\("Run this generated read-only SQL query/, "every AI SQL query must require confirmation");
 assert.doesNotMatch(html, /allow-session/, "session-wide AI SQL approval must not be available");
-assert.match(source, /context\.accessLevel === "data" && elements\.aiAccessSelect\.value === "data"/, "SQL actions must require both captured and current data access");
-assert.match(source, /context\.accessLevel !== "data" \|\| elements\.aiAccessSelect\.value !== "data"/, "query execution must reject stale data access");
+assert.match(source, /aiAccessIncludes\(context\.accessLevel, "rawread"\) && aiAccessIncludes\(elements\.aiAccessSelect\.value, "rawread"\)/, "SQL actions must require both captured and current raw-read permission");
+assert.match(source, /!aiAccessIncludes\(context\.accessLevel, "rawread"\) \|\| !aiAccessIncludes\(elements\.aiAccessSelect\.value, "rawread"\)/, "query execution must reject stale raw-read permission");
+assert.match(html, /id="ai-schema-permission"[^>]*type="checkbox"/, "schema permission must be an explicit checkbox");
+assert.match(html, /id="ai-data-read-permission"[^>]*type="checkbox"/, "data-read permission must be an explicit checkbox");
+assert.match(html, /id="ai-write-permission"[^>]*type="checkbox"/, "data-write permission must be an explicit checkbox");
+assert.match(html, /id="ai-raw-read-permission"[^>]*type="checkbox"/, "raw-read permission must be an explicit checkbox");
+assert.match(html, /id="ai-raw-write-permission"[^>]*type="checkbox"/, "raw-write permission must be an explicit checkbox");
+for (const id of ["ai-schema-approval", "ai-data-read-approval", "ai-write-approval", "ai-raw-read-approval", "ai-raw-write-approval"]) {
+  assert.match(html, new RegExp(`id="${id}"`), `${id} must expose approval frequency`);
+}
+assert.match(html, /value="once_per_chat"/, "approval controls must support once-per-chat grants");
+assert.match(html, /value="automatic"/, "approval controls must support server-owned automatic execution");
+assert.match(source, /permissions\.join\("-"\)/, "checked permissions must form one combined chat capability set");
+assert.doesNotMatch(html, /SQL policy|ai-sql-policy/, "read approval must not require a redundant SQL policy control");
 assert.match(source, /postgresProfileForm\.clearPassword\(\)|postgresProfileForm\.fill\(profile\)/, "connection workflows must clear the password field through the shared form contract");
 assert.match(shared, /proposalRequest\(proposal, "execute", body\)/, "confirmed proposals must execute through the server-owned operation boundary");
+assert.match(source, /buildSessionPayload: \(context, accessLevel, model\) => \(\{[\s\S]*schemaId: context\.schemaId, accessLevel/, "Schemii session creation must send context fields for server-owned canonical binding");
+assert.match(source, /approvals: currentAiApprovals\(\)/, "session creation must persist approval policy on the server");
+assert.doesNotMatch(source, /createSessionTitle:/, "Schemii must not create authorization-bearing session titles in the browser");
+assert.doesNotMatch(source, /\^SCHEMII_CONTEXT:/, "Schemii must use application-owned chat records instead of parsing authorization from titles");
+assert.match(source, /const accessLevel = Array\.isArray\(session\.capabilities\)/, "history binding must use server-owned chat capabilities");
+assert.match(source, /buildMessagePayload:[\s\S]*text, model,[\s\S]*resultRef/, "message payloads must omit browser-resubmitted chat authority");
+assert.match(source, /buildProposalClaimPayload: \(\) => \(\{\}\)/, "proposal execution must omit browser-resubmitted chat authority");
+assert.match(shared, /policyRevision: policy\.policyRevision/, "explicit execution must bind to the proposal policy revision");
+assert.doesNotMatch(shared, /confirmation:\s*\{[^}]*mode:\s*"automatic"/, "the browser must never forge automatic approval");
 assert.match(shared, /proposalRequest\(proposal, "reconcile", context\)/, "lost execute responses must reconcile by proposal ID");
 assert.match(shared, /response\.operation\?\.state === "uncertain"[\s\S]*proposalRequest\(proposal, "reconcile", context\)/, "an existing uncertain operation must reconcile even when execute returns HTTP 200");
 assert.match(shared, /history\.pendingProposals[\s\S]*renderAction/, "history restoration must expose only server-returned pending recovery proposals");
 assert.match(source, /renderServerAiProposal\(result\.applyProposal, \{ \.\.\.context, schemaSnapshot: postgresState\.schemaSnapshot \}\)/, "server-issued apply proposals must bind to the exact preview-time schema snapshot");
+assert.match(source, /result\?\.kind === "postgres_write_plan"[\s\S]*renderServerAiProposal\(result\.applyProposal, context\)/, "PostgreSQL apply cards must come only from the server-issued preview result");
+assert.doesNotMatch(source, /type:\s*"postgres_write_apply"/, "the browser must never synthesize a PostgreSQL apply action");
 assert.match(source, /result\.schemaSync\?\.revision/, "post-apply browser refresh must require the server-owned schema synchronization revision");
+assert.match(source, /result\.migrationPreview\?\.status === "ready"[\s\S]*renderServerAiProposal/, "saved schema mutations must render the server-generated migration preview proposal");
+assert.match(source, /migration preview is unavailable/, "post-save preview failure must not mislabel the saved schema mutation as failed");
 assert.doesNotMatch(shared, /claimProposal|completeProposal|"finalize"|"release"/, "browser proposal execution must not coordinate claims or completion");
 const authUi = shared.slice(shared.indexOf("function buildAuthForm"), shared.indexOf("function renderProviders"));
 assert.doesNotMatch(authUi, /localStorage|sessionStorage/, "provider credentials must not use browser storage");
@@ -140,7 +169,7 @@ assert.doesNotMatch(shared, /fetch\([^)]*(?:opencode|provider\.|8080)/i, "AI req
 const targetResolverStart = source.indexOf("function currentAiPostgresTarget");
 const targetResolverEnd = source.indexOf("async function executeAiReadQuery", targetResolverStart);
 const targetContext = vm.createContext({
-  postgresState: { selectedProfileId: null, namespace: "" },
+  postgresState: { selectedProfileId: null, namespace: "", profiles: [] },
   schema: { postgres: { sourceProfileId: "tutorial", namespace: "bookstore" } }
 });
 vm.runInContext(`${source.slice(targetResolverStart, targetResolverEnd)}\nthis.currentAiPostgresTarget = currentAiPostgresTarget;`, targetContext);
@@ -148,11 +177,15 @@ assert.equal(targetContext.currentAiPostgresTarget().profileId, "tutorial", "AI 
 assert.equal(targetContext.currentAiPostgresTarget().namespace, "bookstore", "AI queries must use the design's linked namespace when the connection dialog has not been opened");
 targetContext.postgresState.selectedProfileId = "reporting";
 targetContext.postgresState.namespace = "analytics";
+targetContext.postgresState.profiles = [{ id: "reporting", dbname: "reports", contextFingerprint: "0123456789abcdef" }];
 assert.equal(targetContext.currentAiPostgresTarget().profileId, "reporting", "an explicitly selected profile must override the linked design profile");
 assert.equal(targetContext.currentAiPostgresTarget().namespace, "analytics", "an explicitly selected namespace must override the linked design namespace");
+assert.equal(targetContext.currentAiPostgresTarget().profileFingerprint, "0123456789abcdef", "AI target binding must use the server-issued redacted profile fingerprint");
+assert.doesNotMatch(targetResolverStart >= 0 ? source.slice(targetResolverStart, targetResolverEnd) : "", /aiContextFingerprint\(\[profile\./, "the browser must not independently derive profile identity");
 const queryExecutor = source.slice(source.indexOf("async function executeAiReadQuery"), source.indexOf("async function sendAiMessage"));
 assert.match(queryExecutor, /currentTarget\.profileId !== context\.profileId/, "actions must recheck the effective PostgreSQL profile");
 assert.match(queryExecutor, /currentTarget\.namespace !== context\.namespace/, "actions must recheck the effective PostgreSQL namespace");
+assert.doesNotMatch(source.slice(source.indexOf("async function confirmAiAction"), source.indexOf("function detailAiActionError")), /profileFingerprint !==/, "browser write review must not reject a server-authorized proposal because cached profile metadata lacks its fingerprint");
 assert.match(queryExecutor, /appendAiQueryResult\(result\.display\)/, "successful SQL must display the server operation result instead of model-facing JSON");
 assert.match(queryExecutor, /Tool error for SQL:/, "failed SQL must be returned to the assistant for correction");
 assert.match(queryExecutor, /await sendAiMessage\(text, "tool"\)/, "failed SQL feedback must continue through the bounded assistant context");
@@ -176,6 +209,9 @@ assert.match(styles, /\.schema-library-connection/, "saved schema cards must dis
 assert.match(styles, /\.main-layout\.ai-open \.tool-rail/, "AI chat must visually replace the left tool rail");
 assert.match(sharedStyles, /\.ai-query-result-scroll \{[^}]*overflow: auto/, "wide or long query results must scroll inside the chat panel");
 assert.match(sharedStyles, /\.ai-query-result-table th \{[^}]*position: sticky/, "query result column headings must remain visible while scrolling");
+assert.match(sharedStyles, /\.ai-context-bar \.ai-permissions fieldset \{[^}]*right: 0;[^}]*width: min\(320px, calc\(100vw - 26px\)\)/, "permissions menu must be wide, right-aligned, and viewport-safe");
+assert.match(sharedStyles, /\.ai-context-bar \.ai-permissions label \{[^}]*grid-template-columns: auto minmax\(0, 1fr\) 112px/, "permission rows must align checkboxes, labels, and approval selectors");
+assert.match(sharedStyles, /\.ai-context-bar \.ai-permissions \{[^}]*align-self: end/, "permissions trigger must align with the model selector rather than its label");
 assert.match(shared, /elements\.prompt\.disabled = busy \|\| !state\.available \|\| !elements\.model\.value/, "chat input must remain disabled until a provider model is connected");
 assert.match(shared, /Connect a provider in settings to start chatting/, "chat must explain how to enable a provider");
 assert.match(shared, /free \? "Free access"/, "anonymous free providers must be identified accurately");
@@ -195,6 +231,7 @@ assert.doesNotMatch(activityRenderer, /innerHTML|insertAdjacentHTML|eval\(/, "ag
 assert.match(shared, /requestGeneration !== state\.requestGeneration/, "stale agent responses must not enter a reset conversation");
 const newChat = shared.slice(shared.indexOf("function resetConversation"), shared.indexOf("function formatHistoryDate"));
 assert.doesNotMatch(newChat, /DELETE|delete_session/, "starting a new chat must preserve the prior persistent session");
+assert.match(shared, /elements\.access\.addEventListener\("change", \(\) => \{[\s\S]*resetConversation\("Access changed\./, "changing disclosure access must discard the active session binding before another message can be sent");
 const historyUi = shared.slice(shared.indexOf("async function restoreSession"), shared.indexOf("const api ="));
 assert.match(historyUi, /actions: \[\]/, "restored messages must not recreate historical actionable proposals");
 assert.match(historyUi, /state\.sessionId = resumable \? session\.id : null/, "opening a saved chat must restore its persistent session ID only in the matching context");
@@ -223,16 +260,14 @@ assert.equal(preferenceContext.normalizeStoredAiModel(JSON.stringify({ providerI
 const disclosureStart = source.indexOf("function updateAiAccessDisclosure");
 const disclosureEnd = source.indexOf("const aiAssistant =", disclosureStart);
 const disclosureElements = {
-  aiAccessSelect: { value: "data" }, aiSqlPolicy: { value: "allow-session" },
-  aiSqlPolicyWrap: { hidden: false }, aiFunctionCaveat: { hidden: false }, aiAccessDisclosure: { textContent: "" }
+  aiAccessSelect: { value: "schema-structured-write-rawread-rawwrite" }, aiFunctionCaveat: { hidden: false }, aiAccessDisclosure: { textContent: "" }, aiPermissionsSummary: { textContent: "" }
 };
-const disclosureContext = vm.createContext({ elements: disclosureElements, aiState: { sqlPolicyDeliberatelySelected: true } });
+const disclosureContext = vm.createContext({ elements: disclosureElements });
 vm.runInContext(`${source.slice(disclosureStart, disclosureEnd)}\nthis.updateAiAccessDisclosure = updateAiAccessDisclosure;`, disclosureContext);
 disclosureContext.updateAiAccessDisclosure();
-assert.equal(disclosureElements.aiSqlPolicy.value, "allow-session", "remaining in data access must preserve deliberate SQL policy");
+assert.match(disclosureElements.aiAccessDisclosure.textContent, /schema, data read, data write, raw read, raw write/, "combined permissions must be disclosed together");
 disclosureElements.aiAccessSelect.value = "schema";
 disclosureContext.updateAiAccessDisclosure();
-assert.equal(disclosureElements.aiSqlPolicy.value, "disabled", "leaving data access must disable SQL execution");
-assert.equal(disclosureContext.aiState.sqlPolicyDeliberatelySelected, false, "leaving data access must revoke session SQL approval");
+assert.equal(disclosureElements.aiFunctionCaveat.hidden, true, "leaving data-read permission must hide its query warning");
 
 console.log("AI chat safety and action validation tests passed");

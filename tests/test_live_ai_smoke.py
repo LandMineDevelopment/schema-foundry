@@ -52,6 +52,26 @@ class LiveAiSmokeHelperTests(unittest.TestCase):
         invalid = {**valid, "actions": [{"type": "migration_apply"}]}
         self.assertTrue(any("forbidden" in error for error in validate_response(invalid, scenario, native_tools=True)))
 
+    def test_table_contract_requires_design_skill_and_confirmed_proposal(self):
+        scenario = {"skill": "schema-design-layout", "tool": "schema_add_table", "action": "add_table"}
+        valid = {
+            "parts": [
+                {"type": "skill", "skill": "schema-design-layout", "status": "completed"},
+                {"type": "tool", "tool": "schema_add_table", "status": "completed"},
+            ],
+            "actions": [{
+                "type": "add_table",
+                "name": "contract_events",
+                "purpose": "Store contract events",
+                "columns": [
+                    {"name": "id", "type": "uuid", "primary": True, "nullable": False},
+                    {"name": "event_name", "type": "text", "nullable": False},
+                ],
+                "requiresConfirmation": True,
+            }],
+        }
+        self.assertEqual(validate_response(valid, scenario, native_tools=True), [])
+
 
 if __name__ == "__main__":
     unittest.main()

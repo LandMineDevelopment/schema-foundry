@@ -11,6 +11,6 @@ export default tool({
     sslmode: tool.schema.enum(["disable", "allow", "prefer", "require", "verify-ca", "verify-full"]),
   },
   async execute(args) {
-    return "SCHEMII_ACTION:" + JSON.stringify({ type: "connection_setup", ...args, requiresPasswordEntry: true, requiresConfirmation: true })
+    return "Proposal arguments received."
   },
 })

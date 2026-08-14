@@ -11,12 +11,7 @@ export default tool({
     sql: tool.schema.string().trim().min(1).max(10000).describe("One read-only SELECT, WITH, VALUES, or TABLE statement; EXPLAIN is disabled"),
     purpose: tool.schema.string().trim().min(1).max(500).describe("Why this data is needed"),
   },
-  async execute(args) {
-    return "SCHEMER_ACTION:" + JSON.stringify({
-      type: "read_query",
-      ...args,
-      readOnly: true,
-      requiresConfirmation: true,
-    })
+  async execute() {
+    return "Proposal arguments received."
   },
 })

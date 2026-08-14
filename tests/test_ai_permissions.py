@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from schemii.opencode_service import CUSTOM_TOOLS, PROMPT_TOOLS, SAFE_SKILLS, TOOL_ACTION_TYPES
-from schemii.schemer_ai import SCHEMER_AI_ACTION_PREFIX, SCHEMER_AI_SKILLS, SCHEMER_AI_TOOL_ACTION_TYPES
+from schemii.schemer_ai import SCHEMER_AI_SKILLS, SCHEMER_AI_TOOL_ACTION_TYPES
 
 
 class AiPermissionContractTests(unittest.TestCase):
@@ -35,20 +35,39 @@ class AiPermissionContractTests(unittest.TestCase):
         self.assertFalse(config["lsp"])
         self.assertEqual(config["mcp"], {})
 
-    def test_tool_outputs_match_backend_action_registry_and_confirmation_contract(self):
-        for tool_name, action_type in TOOL_ACTION_TYPES.items():
+    def test_tool_inputs_match_backend_action_registry(self):
+        for tool_name in TOOL_ACTION_TYPES:
             source = (ROOT / f"ai/workspace/.opencode/tools/{tool_name}.ts").read_text()
-            field = "action" if tool_name == "schema_read_query" else "type"
-            self.assertRegex(source, rf'{field}:\s*"{re.escape(action_type)}"')
+            self.assertIn('return "Proposal arguments received."', source)
+            self.assertNotIn("SCHEMII_ACTION:", source)
             self.assertNotRegex(source, re.compile(r"^\s*password\s*:", re.MULTILINE | re.IGNORECASE))
             self.assertNotRegex(source.lower(), r'filesystem|shell|webfetch')
-            if tool_name == "schema_read_query":
-                self.assertIn("readOnly: true", source)
-                self.assertIn("requiresApproval: true", source)
-            elif tool_name == "schema_migration_preview":
-                self.assertIn("readOnly: true", source)
-            else:
-                self.assertIn("requiresConfirmation: true", source)
+
+    def test_agent_guidance_exposes_table_proposals_without_write_bypasses(self):
+        workspace = ROOT / "ai/workspace"
+        instructions = (workspace / "AGENTS.md").read_text()
+        design_skill = (workspace / ".opencode/skills/schema-design-layout/SKILL.md").read_text()
+        help_skill = (workspace / ".opencode/skills/schemii-help/SKILL.md").read_text()
+        target_skill = (workspace / ".opencode/skills/target-selection/SKILL.md").read_text()
+        add_table = (workspace / ".opencode/tools/schema_add_table.ts").read_text()
+        populate = (workspace / ".opencode/tools/schema_populate.ts").read_text()
+        read_query = (workspace / ".opencode/tools/schema_read_query.ts").read_text()
+
+        combined = "\n".join((instructions, design_skill, help_skill, target_skill)).lower()
+        self.assertNotIn("temporarily unavailable", combined)
+        self.assertIn("create, add, design", design_skill.lower())
+        self.assertIn("schema_add_table", design_skill)
+        self.assertIn("schema_populate", design_skill)
+        self.assertIn("durable, confirmed saved-design proposals", instructions.lower())
+        self.assertIn("server-issued apply proposal", help_skill.lower())
+        self.assertIn("do not directly create it in postgresql", add_table.lower())
+        self.assertIn("never insert rows", populate.lower())
+        self.assertIn("cannot insert, update, delete, create tables, or create views", read_query.lower())
+        self.assertIn("only schemii may issue its separate apply proposal", help_skill.lower())
+        self.assertIn("schema_insert_rows_preview", help_skill)
+        self.assertIn("schema_create_view_preview", help_skill)
+        self.assertIn("enable its matching checkbox", instructions)
+        self.assertIn("Do not say the capability is unsupported", instructions)
 
     def test_compose_keeps_workspace_read_only_and_opencode_private_by_default(self):
         ai_compose = (ROOT / "compose.ai.yaml").read_text()
@@ -76,14 +95,12 @@ class AiPermissionContractTests(unittest.TestCase):
         self.assertEqual(permission["*"], "deny")
         for denied in ("bash", "shell", "read", "edit", "write", "apply_patch", "glob", "grep", "list", "webfetch", "websearch", "task", "mcp"):
             self.assertEqual(permission[denied], "deny")
-        for tool_name, action_type in SCHEMER_AI_TOOL_ACTION_TYPES.items():
+        for tool_name in SCHEMER_AI_TOOL_ACTION_TYPES:
             source = (root / f".opencode/tools/{tool_name}.ts").read_text()
-            self.assertIn(f'type: "{action_type}"', source)
-            self.assertIn(SCHEMER_AI_ACTION_PREFIX, source)
-            self.assertIn("requiresConfirmation: true", source)
+            self.assertIn('return "Proposal arguments received."', source)
+            self.assertNotIn("SCHEMER_ACTION:", source)
             self.assertNotRegex(source.lower(), r"password|filesystem|shell")
             if tool_name == "schemer_read_query":
-                self.assertIn("readOnly: true", source)
                 self.assertIn("database:", source)
                 self.assertIn("sql:", source)
             else:
@@ -104,7 +121,7 @@ class AiPermissionContractTests(unittest.TestCase):
         self.assertIn("SCHEMER_OPENCODE_USERNAME: ${SCHEMII_OPENCODE_USERNAME", overlay)
         self.assertIn("SCHEMER_OPENCODE_PASSWORD: ${SCHEMII_OPENCODE_PASSWORD", overlay)
         self.assertIn("SCHEMER_OPENCODE_TIMEOUT: ${SCHEMII_OPENCODE_TIMEOUT:-120}", overlay)
-        self.assertIn("SCHEMII_OPENCODE_TIMEOUT: ${SCHEMII_OPENCODE_TIMEOUT:-120}", ai_compose)
+        self.assertIn("SCHEMII_OPENCODE_TIMEOUT: ${SCHEMII_OPENCODE_TIMEOUT:-300}", ai_compose)
         self.assertIn("./ai/schemer-workspace:/workspace-schemer:ro", overlay)
         self.assertIn("condition: service_healthy", overlay)
         self.assertNotIn("schemii-opencode-data:/", overlay)

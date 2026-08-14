@@ -5,7 +5,7 @@ description: Use for every Schemii database, namespace, saved-schema, query, or 
 
 # Exact Target Selection
 
-Project creation proposals are temporarily unavailable. Direct creation requests to Schemii's normal project controls.
+Local project creation uses `schema_project_create` and requires Schemii UI confirmation. It does not select or contact a live PostgreSQL target.
 
 1. Use an exact listed connection `profileId`. If it is not selected yet, propose opening it with `schema_connection_open`; Schemii must confirm and verify it before any live action.
 2. Treat profile, database, and namespace as separate identities. A familiar namespace name does not identify a database.

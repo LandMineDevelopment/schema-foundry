@@ -81,6 +81,28 @@ class ViewMutationServiceTests(unittest.TestCase):
             with self.subTest(item=item), self.assertRaises(ValidationError):
                 self.service.preview_view_mutation(**item)
 
+    def test_ai_create_view_preview_is_durable_and_rejects_existing_relation(self):
+        def missing(*args):
+            from schemii.postgres_service import NotFoundError
+            raise NotFoundError("missing")
+
+        self.service._inspect_relation_connection = missing
+        preview = self.service.preview_ai_create_view(
+            "operation_view_preview", "local", "demo", "public", "summary",
+            'CREATE VIEW "public"."summary" AS SELECT 1', {"schemaId": "schema_one", "revision": 1, "layoutToken": "0" * 64},
+        )
+        self.assertEqual(preview["kind"], "create_view")
+        self.assertEqual(preview["steps"][0]["action"], "create")
+        restarted = PostgresService(self.temporary_directory.name, connect_factory=self.service._connect_factory)
+        self.assertEqual(restarted._read_ai_plan(preview["applyPlanId"])["kind"], "create_view")
+
+        self.service._inspect_relation_connection = lambda *args: descriptor()
+        with self.assertRaises(ConflictError):
+            self.service.preview_ai_create_view(
+                "operation_existing_view", "local", "demo", "public", "summary",
+                'CREATE VIEW "public"."summary" AS SELECT 1', {"schemaId": "schema_one", "revision": 1, "layoutToken": "0" * 64},
+            )
+
     def test_new_and_existing_materialized_preview_and_kind_conversion_boundary(self):
         def missing(*args):
             from schemii.postgres_service import NotFoundError
@@ -522,6 +544,18 @@ class ViewMutationStoreTests(unittest.TestCase):
         self.assertIn("view_summary", after["schema"]["layout"]["layers"]["views"]["objects"])
         self.assertEqual(result["layoutToken"], self.saved["layoutToken"])
         self.assertEqual(after["custom"], before["custom"])
+
+    def test_normal_save_preserves_server_owned_view_sync_receipts(self):
+        result = self.store.sync_view_after_mutation(
+            "schema_one", self.saved["revision"], self.saved["layoutToken"],
+            "local", "demo", "public", "new_summary", "view", 'CREATE VIEW "public"."new_summary" AS SELECT 1',
+            "SELECT 1", "b" * 64, operation="upsert", expected_absent=True, saved_view_id=None,
+            receipt_id="ai_plan_receipt",
+        )
+        current = self.store.get("schema_one")
+        browser_record = {key: current[key] for key in ("id", "revision", "schema", "updatedAt")}
+        self.store.save("schema_one", browser_record, expected_layout_token=current["layoutToken"], layout_protocol="2")
+        self.assertEqual(self.store.get("schema_one")["aiViewMutationReceipts"]["ai_plan_receipt"], result)
 
 
 @unittest.skipUnless(os.environ.get("SCHEMII_TEST_PG17_DSN"), "SCHEMII_TEST_PG17_DSN is not configured")

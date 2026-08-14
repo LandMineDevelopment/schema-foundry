@@ -14,7 +14,7 @@ const relationship = tool.schema.object({
 })
 
 export default tool({
-  description: "Propose populating the active design atomically with complete tables, columns, keys, and relationships.",
+  description: "Use when the user asks to design or create several tables and relationships. Propose schema definitions in the active saved design after UI confirmation; never insert rows or directly change PostgreSQL.",
   args: { purpose: tool.schema.string().trim().min(1).max(500), tables: tool.schema.array(table).min(1).max(20), relationships: tool.schema.array(relationship).max(50) },
-  async execute(args) { return "SCHEMII_ACTION:" + JSON.stringify({ type: "populate_schema", ...args, requiresConfirmation: true }) },
+  async execute() { return "Proposal arguments received." },
 })
