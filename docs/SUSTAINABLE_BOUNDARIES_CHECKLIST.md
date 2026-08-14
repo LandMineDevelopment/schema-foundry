@@ -60,12 +60,12 @@ Agents must not duplicate another active agent's scope. Research findings that a
 - [x] Checkpoint and push pre-rewrite work to `main` (`692e6e6`).
 - [x] Create `architecture/sustainable-boundaries`.
 - [x] Add durable checklist and handoff notes.
-- [ ] Inventory all browser/server/OpenCode/PostgreSQL routes and persisted records in a versioned interface matrix.
-- [ ] Define target module ownership and dependency direction.
-- [ ] Decide deployment topology for dedicated server-metadata PostgreSQL.
-- [ ] Define failure behavior when metadata PostgreSQL is unavailable.
-- [ ] Define migration/bootstrap/upgrade strategy and local development defaults.
-- [ ] Add architecture decision records for authority storage and migration execution.
+- [x] Inventory all browser/server/OpenCode/PostgreSQL routes and persisted records in a versioned interface matrix.
+- [x] Define target module ownership and dependency direction.
+- [x] Decide deployment topology for dedicated server-metadata PostgreSQL.
+- [x] Define failure behavior when metadata PostgreSQL is unavailable.
+- [x] Define migration/bootstrap/upgrade strategy and local development defaults.
+- [x] Add architecture decision records for authority storage and migration execution.
 
 ## Phase 1 — transactional server authority
 
