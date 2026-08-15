@@ -115,6 +115,12 @@ class AiActionTests(unittest.TestCase):
             "offset": 0, "limit": 25, "purpose": "Inspect events", "readOnly": True, "requiresConfirmation": True,
         }
         self.assertEqual(normalize_schemii_action(structured, "structured")["relation"], "events")
+        for server_owned in (
+            {"database": "demo"}, {"profileFingerprint": "f" * 64},
+            {"source": {"kind": "view", "fingerprint": "a" * 64, "columns": []}},
+        ):
+            with self.subTest(server_owned=server_owned), self.assertRaises(ValueError):
+                normalize_schemii_action({**structured, **server_owned}, "structured")
         with self.assertRaises(ValueError):
             normalize_schemii_action(structured, "rawread")
         raw_write = {

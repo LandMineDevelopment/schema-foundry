@@ -5,18 +5,25 @@ import json
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, ContextManager, FrozenSet
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlparse
 
+from .postgres_common import ValidationError
 from .postgres_console import ConsolePolicy
 
 
-PROFILE_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})(?:/(namespaces|relations|relation|fingerprint|test|introspect|preview|deletion-impact))?$")
+PROFILE_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})(?:/(namespaces|relations|relation|lineage|fingerprint|test|introspect|preview|deletion-impact))?$")
 DATA_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/data$")
 SQL_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/sql$")
 CONSOLE_EXECUTIONS_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/console/executions$")
 CONSOLE_EXECUTION_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/console/executions/([^/]+)$")
+CONSOLE_RESULT_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/console/executions/([^/]+)/results/([^/]+)$")
+CONSOLE_SETTINGS_PATH = "/api/postgres/console/settings"
 CONSOLE_WRITE_GRANTS_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/console/write-grants$")
 CONSOLE_WRITE_GRANT_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/console/write-grants/([^/]+)$")
+CONSOLE_TRANSACTIONS_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/console/transactions$")
+CONSOLE_TRANSACTION_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/console/transactions/([^/]+)$")
+CONSOLE_TRANSACTION_EXECUTIONS_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/console/transactions/([^/]+)/executions$")
+CONSOLE_TRANSACTION_FINISH_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/console/transactions/([^/]+)/(commit|rollback)$")
 RELATION_PREVIEW_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/relation/preview$")
 RELATION_VERIFY_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/relation/verify$")
 RELATION_VERIFY_BATCH_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/relation/verify-batch$")
@@ -86,9 +93,41 @@ class PostgresHttpMixin:
     def _has_postgres_capability(self, capability: str) -> bool:
         return capability in self.postgres_route_policy.capabilities
 
+    def _postgres_capability_unavailable(self, capability: str, surface: str) -> bool:
+        if not self._authorize_postgres():
+            return True
+        alternatives = {
+            POSTGRES_SCHEMA_CAPABILITY: "Use Schemii for saved-schema introspection and migration.",
+            POSTGRES_RELATION_QUERY_CAPABILITY: "Use Schemer for structured dashboard queries, or use Console for reviewed SQL.",
+            POSTGRES_READ_SQL_CAPABILITY: "Use the application's Console surface for reviewed SQL when available.",
+            POSTGRES_CONSOLE_CAPABILITY: "Use an application that exposes the shared PostgreSQL Console.",
+            POSTGRES_CONSOLE_WRITE_CAPABILITY: "Use a Console surface whose local application policy allows reviewed writes.",
+            POSTGRES_PROFILE_CAPABILITY: "Configure the PostgreSQL profile in Schemii or Schemer.",
+            POSTGRES_CATALOG_CAPABILITY: "Use an application that exposes PostgreSQL catalog browsing.",
+        }
+        self.send_json(403, {"error": {
+            "code": "capability_unavailable",
+            "message": "This PostgreSQL route is recognized but unavailable in the current application",
+            "details": {
+                "application": self.postgres_route_policy.application,
+                "requiredCapability": capability,
+                "requiredSurface": surface,
+                "reason": "The current application policy does not expose this surface",
+                "safeAlternative": alternatives[capability],
+            },
+        }})
+        return True
+
+    @staticmethod
+    def _catalog_query(parsed, allowed: set[str], required: set[str]) -> dict[str, str]:
+        query = parse_qs(parsed.query, keep_blank_values=True)
+        if set(query) - allowed or required - set(query) or any(len(values) != 1 for values in query.values()):
+            raise ValidationError("Catalog query parameters are invalid")
+        return {("page_size" if key == "pageSize" else key): values[0] for key, values in query.items()}
+
     def _postgres_service_call(self, callback, status: int = 200):
         path = getattr(self, "path", "").split("?", 1)[0]
-        if "/console/executions" in path:
+        if "/console/" in path:
             return self._service_call(callback, status)
         execution_class = "read" if any(part in path for part in (
             "/data", "/sql", "/relation/preview", "/relation/query", "/relation/detail",
@@ -120,6 +159,56 @@ class PostgresHttpMixin:
 
     def _handle_postgres_get(self, parsed) -> bool:
         path = parsed.path
+        get_capability = None
+        if path == CONSOLE_SETTINGS_PATH or any(pattern.fullmatch(path) for pattern in (CONSOLE_RESULT_PATH, CONSOLE_EXECUTION_PATH, CONSOLE_TRANSACTION_PATH)):
+            get_capability = (POSTGRES_CONSOLE_CAPABILITY, "PostgreSQL Console")
+        elif path == "/api/postgres/profiles":
+            get_capability = (POSTGRES_PROFILE_CAPABILITY, "PostgreSQL profiles")
+        elif DATA_PATH.fullmatch(path):
+            get_capability = (POSTGRES_SCHEMA_CAPABILITY, "table data preview")
+        else:
+            recognized_profile = PROFILE_PATH.fullmatch(path)
+            if recognized_profile and recognized_profile.group(2) in {"namespaces", "relations", "relation", "lineage"}:
+                get_capability = (POSTGRES_CATALOG_CAPABILITY, "PostgreSQL catalog")
+            elif recognized_profile and recognized_profile.group(2) == "fingerprint":
+                get_capability = (POSTGRES_SCHEMA_CAPABILITY, "schema fingerprint")
+            elif recognized_profile and recognized_profile.group(2) == "deletion-impact":
+                get_capability = (POSTGRES_PROFILE_CAPABILITY, "profile deletion review")
+        if get_capability and not self._has_postgres_capability(get_capability[0]):
+            return self._postgres_capability_unavailable(*get_capability)
+        if path == CONSOLE_SETTINGS_PATH and self._has_postgres_capability(POSTGRES_CONSOLE_CAPABILITY):
+            if self._authorize_postgres():
+                self._postgres_service_call(self.service.console_settings)
+            return True
+        result_match = CONSOLE_RESULT_PATH.fullmatch(path)
+        if result_match and self._has_postgres_capability(POSTGRES_CONSOLE_CAPABILITY):
+            if self._authorize_postgres():
+                query = self._catalog_query(
+                    parsed, {"consoleId", "database", "namespace", "statementIndex", "resultIndex", "cursor"},
+                    {"consoleId", "database", "namespace", "statementIndex", "resultIndex", "cursor"},
+                )
+                self._postgres_service_call(lambda: self.service.console_result_page(
+                    result_match.group(1), result_match.group(2), result_match.group(3), query["consoleId"],
+                    query["database"], query["namespace"], query["statementIndex"], query["resultIndex"],
+                    query["cursor"], self.postgres_session_binding, self.postgres_server_id,
+                ))
+            return True
+        execution_match = CONSOLE_EXECUTION_PATH.fullmatch(path)
+        if execution_match and self._has_postgres_capability(POSTGRES_CONSOLE_CAPABILITY):
+            if self._authorize_postgres():
+                query = self._catalog_query(parsed, {"consoleId", "database", "namespace"}, {"consoleId", "database", "namespace"})
+                self._postgres_service_call(lambda: self.service.console_execution_status(
+                    execution_match.group(1), execution_match.group(2), query["consoleId"], query["database"],
+                    query["namespace"], self.postgres_session_binding, self.postgres_server_id,
+                ))
+            return True
+        transaction_match = CONSOLE_TRANSACTION_PATH.fullmatch(path)
+        if transaction_match and self._has_postgres_capability(POSTGRES_CONSOLE_CAPABILITY):
+            if self._authorize_postgres():
+                self._postgres_service_call(lambda: self.service.console_transaction_status(
+                    transaction_match.group(1), transaction_match.group(2), self.postgres_session_binding, self.postgres_server_id,
+                ))
+            return True
         if path == "/api/postgres/profiles" and self._has_postgres_capability(POSTGRES_PROFILE_CAPABILITY):
             if self._authorize_postgres():
                 self._postgres_service_call(lambda: {"profiles": self.service.list_profiles()})
@@ -141,7 +230,7 @@ class PostgresHttpMixin:
             return True
         profile_match = PROFILE_PATH.fullmatch(path)
         action = profile_match.group(2) if profile_match else None
-        catalog_action = action in {"namespaces", "relations", "relation"}
+        catalog_action = action in {"namespaces", "relations", "relation", "lineage"}
         schema_action = action == "fingerprint"
         if profile_match and (
             (catalog_action and self._has_postgres_capability(POSTGRES_CATALOG_CAPABILITY))
@@ -153,11 +242,17 @@ class PostgresHttpMixin:
             if profile_match.group(2) == "deletion-impact":
                 self._postgres_service_call(lambda: self._profile_deletion_impact(profile_match.group(1)))
             elif profile_match.group(2) == "namespaces":
-                self._postgres_service_call(lambda: {"namespaces": self.service.list_namespaces(profile_match.group(1))})
+                self._postgres_service_call(lambda: self.service.list_namespace_page(
+                    profile_match.group(1),
+                    **self._catalog_query(parsed, {"database", "scope", "pageSize", "cursor"}, {"database"}),
+                ))
             elif profile_match.group(2) == "relations":
-                query = parse_qs(parsed.query)
                 self._postgres_service_call(lambda: self.service.list_relations(
-                    profile_match.group(1), query.get("database", [None])[0], query.get("namespace", [None])[0]
+                    profile_match.group(1),
+                    **self._catalog_query(
+                        parsed, {"database", "namespace", "kind", "search", "pageSize", "cursor"},
+                        {"database", "namespace"},
+                    ),
                 ))
             elif profile_match.group(2) == "relation":
                 query = parse_qs(parsed.query)
@@ -165,6 +260,17 @@ class PostgresHttpMixin:
                     profile_match.group(1), query.get("database", [None])[0], query.get("namespace", [None])[0],
                     query.get("relation", [None])[0], query.get("expectedKind", [None])[0],
                     query.get("expectedFingerprint", [None])[0]
+                ))
+            elif profile_match.group(2) == "lineage":
+                query = self._catalog_query(
+                    parsed,
+                    {"database", "namespace", "relation", "direction", "expectedKind", "expectedFingerprint", "pageSize", "cursor"},
+                    {"database", "namespace", "relation", "direction", "expectedKind", "expectedFingerprint"},
+                )
+                self._postgres_service_call(lambda: self.service.list_relation_lineage(
+                    profile_match.group(1), query["database"], query["namespace"], query["relation"], query["direction"],
+                    expected_kind=query["expectedKind"], expected_fingerprint=query["expectedFingerprint"],
+                    page_size=query.get("page_size"), cursor=query.get("cursor"),
                 ))
             else:
                 namespace = parse_qs(parsed.query).get("namespace", [None])[0]
@@ -182,6 +288,9 @@ class PostgresHttpMixin:
             return True
         sql_match = SQL_PATH.fullmatch(path)
         console_match = CONSOLE_EXECUTIONS_PATH.fullmatch(path)
+        transactions_match = CONSOLE_TRANSACTIONS_PATH.fullmatch(path)
+        transaction_executions_match = CONSOLE_TRANSACTION_EXECUTIONS_PATH.fullmatch(path)
+        transaction_finish_match = CONSOLE_TRANSACTION_FINISH_PATH.fullmatch(path)
         write_grants_match = CONSOLE_WRITE_GRANTS_PATH.fullmatch(path)
         relation_preview_match = RELATION_PREVIEW_PATH.fullmatch(path)
         relation_verify_match = RELATION_VERIFY_PATH.fullmatch(path)
@@ -193,18 +302,18 @@ class PostgresHttpMixin:
         saved_widget_detail_match = SAVED_WIDGET_DETAIL_PATH.fullmatch(path)
         profile_match = PROFILE_PATH.fullmatch(path)
         if sql_match and not self._has_postgres_capability(POSTGRES_READ_SQL_CAPABILITY):
-            return False
-        if console_match and not self._has_postgres_capability(POSTGRES_CONSOLE_CAPABILITY):
-            return False
+            return self._postgres_capability_unavailable(POSTGRES_READ_SQL_CAPABILITY, "read-only SQL")
+        if any((console_match, transactions_match, transaction_executions_match, transaction_finish_match)) and not self._has_postgres_capability(POSTGRES_CONSOLE_CAPABILITY):
+            return self._postgres_capability_unavailable(POSTGRES_CONSOLE_CAPABILITY, "PostgreSQL Console")
         if write_grants_match and not self._has_postgres_capability(POSTGRES_CONSOLE_WRITE_CAPABILITY):
-            return False
+            return self._postgres_capability_unavailable(POSTGRES_CONSOLE_WRITE_CAPABILITY, "Console writes")
         if any((relation_preview_match, relation_verify_match, relation_verify_batch_match, relation_query_match, relation_temporal_series_match, relation_detail_match, saved_widget_query_match, saved_widget_detail_match)) and not self._has_postgres_capability(POSTGRES_RELATION_QUERY_CAPABILITY):
-            return False
+            return self._postgres_capability_unavailable(POSTGRES_RELATION_QUERY_CAPABILITY, "structured relation queries")
         if profile_match and profile_match.group(2) == "test" and not self._has_postgres_capability(POSTGRES_PROFILE_CAPABILITY):
-            return False
+            return self._postgres_capability_unavailable(POSTGRES_PROFILE_CAPABILITY, "profile connection test")
         if profile_match and profile_match.group(2) == "introspect" and not self._has_postgres_capability(POSTGRES_SCHEMA_CAPABILITY):
-            return False
-        if not sql_match and not console_match and not write_grants_match and not relation_preview_match and not relation_verify_match and not relation_verify_batch_match and not relation_query_match and not relation_temporal_series_match and not relation_detail_match and not saved_widget_query_match and not saved_widget_detail_match and not (profile_match and profile_match.group(2) in {"test", "introspect"}):
+            return self._postgres_capability_unavailable(POSTGRES_SCHEMA_CAPABILITY, "schema introspection")
+        if not sql_match and not console_match and not transactions_match and not transaction_executions_match and not transaction_finish_match and not write_grants_match and not relation_preview_match and not relation_verify_match and not relation_verify_batch_match and not relation_query_match and not relation_temporal_series_match and not relation_detail_match and not saved_widget_query_match and not saved_widget_detail_match and not (profile_match and profile_match.group(2) in {"test", "introspect"}):
             return False
         if not self._authorize_postgres():
             return True
@@ -224,16 +333,35 @@ class PostgresHttpMixin:
                 self.send_json(400, {"error": {"code": "validation_error", "message": "Saved widget detail fields are invalid"}})
             else:
                 self._postgres_service_call(lambda: adapter(self, saved_widget_detail_match.group(1), body))
-        elif write_grants_match:
-            grant_fields = {"consoleId", "database", "namespace", "confirmed"}
-            if not isinstance(body, dict) or set(body) != grant_fields:
-                self.send_json(400, {"error": {"code": "validation_error", "message": "Console write grant request fields are invalid"}})
+        elif transaction_finish_match:
+            if not isinstance(body, dict) or set(body) != {"executionId"}:
+                self.send_json(400, {"error": {"code": "validation_error", "message": "Console transaction completion fields are invalid"}})
             else:
-                self._postgres_service_call(lambda: self.service.create_console_write_grant(
-                    write_grants_match.group(1), body, self.postgres_session_binding, self.postgres_server_id,
+                self._postgres_service_call(lambda: self.service.finish_console_transaction(
+                    transaction_finish_match.group(1), transaction_finish_match.group(2), body,
+                    self.postgres_session_binding, self.postgres_server_id, transaction_finish_match.group(3),
+                ))
+        elif transaction_executions_match:
+            if not isinstance(body, dict) or set(body) != {"executionId", "sql"}:
+                self.send_json(400, {"error": {"code": "validation_error", "message": "Console transaction execution fields are invalid"}})
+            else:
+                self._postgres_service_call(lambda: self.service.execute_console_transaction(
+                    transaction_executions_match.group(1), transaction_executions_match.group(2), body,
+                    self.postgres_session_binding, self.postgres_server_id,
+                ))
+        elif transactions_match:
+            fields = {"transactionId", "consoleId", "database", "namespace", "settingsRevision", "profileFingerprint"}
+            if not isinstance(body, dict) or set(body) != fields:
+                self.send_json(400, {"error": {"code": "validation_error", "message": "Console transaction request fields are invalid"}})
+            else:
+                self._postgres_service_call(lambda: self.service.create_console_transaction(
+                    transactions_match.group(1), body, self.postgres_session_binding, self.postgres_server_id,
+                    self.postgres_console_policy,
                 ), 201)
+        elif write_grants_match:
+            self.send_json(410, {"error": {"code": "console_write_grants_retired", "message": "Console write grants are retired; use durable Console settings"}})
         elif console_match:
-            console_fields = {"executionId", "consoleId", "database", "namespace", "sql", "mode", "writeGrantId"}
+            console_fields = {"executionId", "consoleId", "database", "namespace", "sql", "mode", "settingsRevision", "profileFingerprint"}
             if not isinstance(body, dict) or set(body) != console_fields:
                 self.send_json(400, {"error": {"code": "validation_error", "message": "Console execution request fields are invalid"}})
             else:
@@ -351,11 +479,25 @@ class PostgresHttpMixin:
         return True
 
     def _handle_postgres_put(self, path: str) -> bool:
-        if not self._has_postgres_capability(POSTGRES_PROFILE_CAPABILITY):
-            return False
+        if path == CONSOLE_SETTINGS_PATH and not self._has_postgres_capability(POSTGRES_CONSOLE_CAPABILITY):
+            return self._postgres_capability_unavailable(POSTGRES_CONSOLE_CAPABILITY, "PostgreSQL Console settings")
+        if path == CONSOLE_SETTINGS_PATH and self._has_postgres_capability(POSTGRES_CONSOLE_CAPABILITY):
+            if not self._authorize_postgres():
+                return True
+            body = self._body_or_error()
+            fields = {"expectedRevision", "writeIntent", "defaultMode", "statementLimit", "rowPageSize"}
+            if not isinstance(body, dict) or set(body) != fields:
+                self.send_json(400, {"error": {"code": "validation_error", "message": "Console settings fields are invalid"}})
+            else:
+                expected = body["expectedRevision"]
+                settings = {key: body[key] for key in ("writeIntent", "defaultMode", "statementLimit", "rowPageSize")}
+                self._postgres_service_call(lambda: self.service.update_console_settings(expected, settings))
+            return True
         profile_match = PROFILE_PATH.fullmatch(path)
         if not profile_match or profile_match.group(2) is not None:
             return False
+        if not self._has_postgres_capability(POSTGRES_PROFILE_CAPABILITY):
+            return self._postgres_capability_unavailable(POSTGRES_PROFILE_CAPABILITY, "PostgreSQL profiles")
         if not self._authorize_postgres():
             return True
         body = self._body_or_error()
@@ -364,13 +506,27 @@ class PostgresHttpMixin:
         return True
 
     def _handle_postgres_delete(self, path: str) -> bool:
+        recognized_console = CONSOLE_RESULT_PATH.fullmatch(path) or CONSOLE_EXECUTION_PATH.fullmatch(path)
+        if recognized_console and not self._has_postgres_capability(POSTGRES_CONSOLE_CAPABILITY):
+            return self._postgres_capability_unavailable(POSTGRES_CONSOLE_CAPABILITY, "PostgreSQL Console")
+        result_match = CONSOLE_RESULT_PATH.fullmatch(path)
+        if result_match and self._has_postgres_capability(POSTGRES_CONSOLE_CAPABILITY):
+            if self._authorize_postgres():
+                parsed = urlparse(getattr(self, "path", path))
+                query = self._catalog_query(
+                    parsed, {"consoleId", "database", "namespace", "statementIndex", "resultIndex"},
+                    {"consoleId", "database", "namespace", "statementIndex", "resultIndex"},
+                )
+                self._postgres_service_call(lambda: self.service.close_console_result(
+                    result_match.group(1), result_match.group(2), result_match.group(3), query["consoleId"],
+                    query["database"], query["namespace"], query["statementIndex"], query["resultIndex"],
+                    self.postgres_session_binding, self.postgres_server_id,
+                ))
+            return True
         write_grant_match = CONSOLE_WRITE_GRANT_PATH.fullmatch(path)
         if write_grant_match and self._has_postgres_capability(POSTGRES_CONSOLE_WRITE_CAPABILITY):
             if self._authorize_postgres():
-                self._postgres_service_call(lambda: self.service.revoke_console_write_grant(
-                    write_grant_match.group(1), write_grant_match.group(2),
-                    self.postgres_session_binding, self.postgres_server_id,
-                ))
+                self.send_json(410, {"error": {"code": "console_write_grants_retired", "message": "Console write grants are retired; use durable Console settings"}})
             return True
         console_match = CONSOLE_EXECUTION_PATH.fullmatch(path)
         if console_match and self._has_postgres_capability(POSTGRES_CONSOLE_CAPABILITY):
@@ -379,11 +535,11 @@ class PostgresHttpMixin:
                     console_match.group(1), console_match.group(2), self.postgres_session_binding, self.postgres_server_id,
                 ))
             return True
-        if not self._has_postgres_capability(POSTGRES_PROFILE_CAPABILITY):
-            return False
         profile_match = PROFILE_PATH.fullmatch(path)
         if not profile_match or profile_match.group(2) is not None:
             return False
+        if not self._has_postgres_capability(POSTGRES_PROFILE_CAPABILITY):
+            return self._postgres_capability_unavailable(POSTGRES_PROFILE_CAPABILITY, "PostgreSQL profiles")
         if self._authorize_postgres():
             body = self._body_or_error()
             if body is None:

@@ -219,7 +219,7 @@ class MetadataStoreTests(unittest.TestCase):
             for migration in migrations
         ]])
         store = MetadataStore(lambda: connection)
-        self.assertEqual(store.health(), {"ok": True, "version": 4, "expectedVersion": 4})
+        self.assertEqual(store.health(), {"ok": True, "version": 7, "expectedVersion": 7})
         self.assertEqual(connection.commits, 0)
         self.assertEqual(connection.rollbacks, 1)
         self.assertTrue(connection.closed)
@@ -288,6 +288,84 @@ class MetadataStoreTests(unittest.TestCase):
             )
         self.assertEqual(caught.exception.code, "policy_changed")
         self.assertEqual(connection.rollbacks, 1)
+
+    def test_settings_linked_proposal_cannot_be_created_after_agent_revision_changes(self):
+        chat_id = uuid.uuid4()
+        revision_id = uuid.uuid4()
+        snapshot = {
+            "version": 2, "application": "schemii", "agentId": "default",
+            "agentPolicyRevision": 3, "agentPolicyRevisionId": str(revision_id),
+            "agentPolicySchemaVersion": 1, "policyDigest": "a" * 64,
+            "capabilities": {"schema": {"configuredMode": "every_action", "effectiveMode": "every_action", "safetyFloorReason": None}},
+            "bounds": {"rowsDisclosed": None, "rowsWritten": None, "pagesInspected": None, "rawStatements": None, "operationTimeoutMs": None, "agentConcurrency": 1},
+            "disclosureClass": "schema", "targetVerified": False,
+        }
+        policy_binding = {
+            "application": "schemii", "agentId": "default", "agentPolicyRevision": 3,
+            "agentPolicyRevisionId": str(revision_id), "agentPolicySchemaVersion": 1,
+            "chatPolicyRevision": 1, "policyRevision": 1, "canonicalCapability": "schema", "capability": "schema",
+            "configuredMode": "every_action", "effectiveMode": "every_action", "safetyFloorReason": None,
+            "snapshot": snapshot, "disclosureClass": "schema", "origin": "model",
+            "resource": {"kind": "schema", "id": "schema_one", "revision": 4, "layoutToken": "b" * 64},
+            "target": {},
+        }
+        connection = FakeConnection(rows=[
+            {"application_id": "schemii", "state": "active"}, {"exists": 1},
+            {"application_id": "schemii", "resource_kind": "schema", "resource_id": "schema_one", "policy": snapshot,
+             "agent_policy_revision_id": revision_id, "agent_policy_schema_version": 1, "profile_id": None,
+             "database_name": None, "namespace_name": None, "profile_fingerprint": None},
+            {"current_revision": 4},
+        ])
+        with self.assertRaises(MetadataStoreError) as caught:
+            MetadataStore(lambda: connection).create_proposal(
+                str(chat_id), "schema", 1,
+                {"policyBinding": policy_binding, "authorizationTarget": {}, "schemaConcurrency": {"revision": 4, "layoutToken": "b" * 64}},
+                {"type": "add_table"},
+            )
+        self.assertEqual(caught.exception.code, "agent_policy_changed")
+
+    def test_agent_concurrency_is_serialized_in_metadata_before_operation_creation(self):
+        chat_id = uuid.uuid4()
+        revision_id = uuid.uuid4()
+        snapshot = {
+            "version": 2, "application": "schemii", "agentId": "default",
+            "agentPolicyRevision": 3, "agentPolicyRevisionId": str(revision_id),
+            "agentPolicySchemaVersion": 1, "policyDigest": "a" * 64,
+            "capabilities": {"structured_read": {"configuredMode": "automatic", "effectiveMode": "automatic", "safetyFloorReason": None}},
+            "bounds": {"rowsDisclosed": None, "rowsWritten": None, "pagesInspected": None, "rawStatements": None, "operationTimeoutMs": None, "agentConcurrency": 1},
+            "disclosureClass": "data", "targetVerified": True,
+        }
+        target = {"profileId": "local", "database": "demo", "namespace": "public", "profileFingerprint": "c" * 64}
+        policy_binding = {
+            "application": "schemii", "agentId": "default", "agentPolicyRevision": 3,
+            "agentPolicyRevisionId": str(revision_id), "agentPolicySchemaVersion": 1,
+            "chatPolicyRevision": 1, "policyRevision": 1, "canonicalCapability": "structured_read", "capability": "structured_read",
+            "configuredMode": "automatic", "effectiveMode": "automatic", "safetyFloorReason": None,
+            "snapshot": snapshot, "disclosureClass": "data", "origin": "model",
+            "resource": {"kind": "schema", "id": "schema_one", "revision": 4, "layoutToken": "b" * 64},
+            "target": target,
+        }
+        binding = {"policyBinding": policy_binding, "authorizationTarget": target, "schemaConcurrency": {"revision": 4, "layoutToken": "b" * 64}}
+        durable = {
+            "application_id": "schemii", "resource_kind": "schema", "resource_id": "schema_one", "policy": snapshot,
+            "agent_policy_revision_id": revision_id, "agent_policy_schema_version": 1, "profile_id": "local",
+            "database_name": "demo", "namespace_name": "public", "profile_fingerprint": "c" * 64,
+        }
+        connection = FakeConnection(rows=[
+            {"chat_id": chat_id, "capability": "structured_read", "policy_revision": 1, "state": "ready", "binding": binding, "current": True},
+            {"state": "active"}, {"grant_mode": "automatic", "current_revision": 1, "grant_id": None},
+            durable, {"current_revision": 3}, {"current_revision": 3}, {"active_count": 1},
+        ])
+        with self.assertRaises(MetadataStoreError) as caught:
+            MetadataStore(lambda: connection).authorize_and_create_operation(
+                str(uuid.uuid4()), expected_policy_revision=1,
+            )
+        self.assertEqual(caught.exception.code, "agent_concurrency_exhausted")
+        statements = [sql for sql, _ in connection.cursor_value.executions]
+        lock_index = next(index for index, sql in enumerate(statements) if "metadata_agent_settings" in sql and "FOR UPDATE" in sql)
+        count_index = next(index for index, sql in enumerate(statements) if "active_count" in sql)
+        self.assertLess(lock_index, count_index)
+        self.assertFalse(any("INSERT INTO metadata_operations" in sql for sql in statements))
 
     def test_result_release_is_only_pre_dispatch_and_uncertain_scrubs_payload(self):
         delivery_id = uuid.uuid4()

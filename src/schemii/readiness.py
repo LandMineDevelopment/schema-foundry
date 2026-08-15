@@ -6,7 +6,7 @@ from .metadata import MetadataStoreError
 from .opencode_service import OpenCodeService, OpenCodeServiceError
 
 
-def readiness_report(metadata_authority: Any, opencode: OpenCodeService | None, postgres: Any) -> tuple[int, dict[str, Any]]:
+def readiness_report(metadata_authority: Any, opencode: OpenCodeService | None, postgres: Any, maintenance: Any = None) -> tuple[int, dict[str, Any]]:
     components: dict[str, Any] = {}
     ready = True
     try:
@@ -36,6 +36,11 @@ def readiness_report(metadata_authority: Any, opencode: OpenCodeService | None, 
         "required": False, "status": "unknown", "configured": 0, "profiles": {},
     }
     components["postgresExecution"] = execution_metrics() if execution_metrics else {"status": "unknown"}
+    if maintenance is not None:
+        maintenance_health = maintenance.health()
+        components["aiOperationMaintenance"] = maintenance_health
+        if maintenance_health["status"] != "available":
+            ready = False
     report = {"ready": ready, "components": components}
     if ready:
         report["metadata"] = metadata

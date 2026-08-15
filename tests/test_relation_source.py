@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from schemii.relation_source import RelationSourceValidationError, normalize_relation_source
+from tests.capability_test_support import column
 
 
 SOURCE = {
@@ -27,6 +28,15 @@ class RelationSourceTests(unittest.TestCase):
         }
         self.assertEqual(normalize_relation_source(source, expected_profile_id="local"), source)
 
+    def test_versions_catalog_capability_snapshots_without_rewriting_legacy(self):
+        legacy = {**SOURCE, "columns": [{"name": "id", "type": "bigint", "nullable": False, "ordinal": 1}]}
+        self.assertEqual(normalize_relation_source(legacy), legacy)
+        current = {**SOURCE, "snapshotVersion": 2, "columns": [column("id", "bigint", False, 1, oid=20, name="int8", category="N", pattern=False)]}
+        self.assertEqual(normalize_relation_source(current), current)
+        tampered = {**current, "columns": [{**current["columns"][0], "capabilities": {**current["columns"][0]["capabilities"], "sortable": False}}]}
+        with self.assertRaisesRegex(RelationSourceValidationError, "fingerprint"):
+            normalize_relation_source(tampered)
+
     def test_rejects_type_drift_and_profile_mismatch(self):
         for column_type in (" x", "x ", "x" * 513):
             with self.subTest(column_type=len(column_type)), self.assertRaises(RelationSourceValidationError):
@@ -36,6 +46,11 @@ class RelationSourceTests(unittest.TestCase):
                 })
         with self.assertRaises(RelationSourceValidationError):
             normalize_relation_source(SOURCE, expected_profile_id="other")
+
+    def test_accepts_foreign_and_partitioned_tables_as_read_sources(self):
+        for kind in ("foreign_table", "partitioned_table"):
+            with self.subTest(kind=kind):
+                self.assertEqual(normalize_relation_source({**SOURCE, "kind": kind})["kind"], kind)
 
     def test_enforces_postgresql_identifier_bytes_and_ordered_unique_columns(self):
         self.assertEqual(normalize_relation_source({**SOURCE, "relation": "é" * 31})["relation"], "é" * 31)

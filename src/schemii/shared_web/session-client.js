@@ -89,6 +89,7 @@
       error.code = payload.error?.code;
       error.status = response.status;
       error.payload = payload;
+      if (window.SchemiiShared.formatApiError) error.message = window.SchemiiShared.formatApiError(error, defaultMessage);
       throw error;
     }
 

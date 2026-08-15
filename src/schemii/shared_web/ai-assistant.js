@@ -61,12 +61,28 @@
     return bounded;
   }
 
+  const AI_MODE_LABELS = {
+    disabled: "Disabled", every_action: "Every action", once_per_chat: "Once per chat", automatic: "Automatic",
+  };
+  const AI_CAPABILITY_LABELS = {
+    schema: "Schema changes", structured_read: "Structured data read", structured_write: "Structured data write",
+    raw_read: "Raw SQL read", raw_write: "Raw SQL write", dashboard_read: "Dashboard read", dashboard_write: "Dashboard changes",
+  };
+  const AI_BOUND_FIELDS = [
+    ["rowsDisclosed", "Rows disclosed", 1, 10000, "Maximum rows disclosed to the selected provider."],
+    ["rowsWritten", "Rows submitted", 1, 10000, "Maximum primary rows submitted by a bounded structured operation; trigger and rule side effects are not counted."],
+    ["pagesInspected", "Pages inspected", 1, 100, "Maximum catalog or result pages inspected."],
+    ["rawStatements", "Raw statements", 1, 20, "Maximum statements in one raw SQL operation."],
+    ["operationTimeoutMs", "Operation timeout (ms)", 1000, 300000, "Blank means Inherit PostgreSQL. PostgreSQL and connection policy remain authoritative."],
+    ["agentConcurrency", "Agent concurrency", 1, 16, "Maximum concurrent agent operations."],
+  ];
+
   function createAiAssistant(options) {
     const {
       sessionClient, root, trigger, settingsDialog, historyDialog, storageKey, getContext,
       buildMessagePayload, buildSessionPayload, contextKey = () => null, parseSession = session => ({ title: session.title || "Untitled chat", key: null }),
       buildProposalClaimPayload, buildProposalExecutionPayload, buildHistoryQuery, renderAction, validateAction, handleOperationResult, toolLabels = {}, skillLabels = {}, labels = {},
-      onOpenChange = () => {}, onAccessChange = () => {}, onNewChat = () => {}, state: suppliedState,
+      onOpenChange = () => {}, onAccessChange = () => {}, onNewChat = () => {}, onPolicyChange = () => {}, state: suppliedState,
       canViewSession = () => true, extraBusyControls = [],
     } = options;
     if (!sessionClient || !root || !trigger || !settingsDialog || !historyDialog || typeof getContext !== "function") throw new TypeError("AI assistant dependencies are required");
@@ -75,15 +91,17 @@
       model: find("model"), access: find("access"), status: find("status"), railStatus: trigger.querySelector("[data-ai-trigger-status]"),
       messages: find("messages"), prompt: find("prompt"), form: find("form"), send: find("send"), close: find("close"),
       newChat: find("new-chat"), history: find("history"), settings: find("settings"), disclosure: find("disclosure"),
-      settingsStatus: settingsDialog.querySelector("[data-ai-settings-status]"), providers: settingsDialog.querySelector("[data-ai-settings-body]"),
+      settingsStatus: settingsDialog.querySelector("[data-ai-settings-status]"), settingsBody: settingsDialog.querySelector("[data-ai-settings-body]"),
       historyList: historyDialog.querySelector("[data-ai-history-body]"),
     };
     if (Object.entries(elements).some(([key, value]) => !value && !["railStatus", "disclosure"].includes(key))) throw new TypeError("AI assistant markup is incomplete");
     const state = suppliedState || {};
     Object.assign(state, {
-      loaded: false, available: false, version: "", providers: [], default: {}, authMethods: {}, skills: [],
+      loaded: false, available: false, version: "", providers: [], default: {}, authMethods: {}, skills: [], settings: null,
       sessionId: null, contextKey: null, busy: false, requestGeneration: 0, oauth: null,
     });
+    let settingsReturnFocus = null;
+    let historyReturnFocus = null;
     const allowPath = path => typeof path === "string" && path.startsWith("/api/ai/");
     const request = (path, requestOptions = {}) => sessionClient.json(path, requestOptions, { allowPath, defaultMessage: "The AI service request failed" });
     const fetchActivity = (path, requestOptions = {}) => sessionClient.fetch(path, requestOptions, { allowPath, defaultMessage: "Agent activity is unavailable" });
@@ -93,11 +111,11 @@
     if (elements.railStatus) trigger.append(elements.railStatus);
     shared.decorateIconControl(elements.history, { icon: "history", label: "Chat history" });
     shared.decorateIconControl(elements.newChat, { icon: "newChat", label: "New chat" });
-    shared.decorateIconControl(elements.settings, { icon: "settings", label: "Provider settings" });
+    shared.decorateIconControl(elements.settings, { icon: "settings", label: "AI permissions and provider settings" });
     shared.decorateIconControl(elements.close, { icon: "close", label: "Close AI assistant" });
     const settingsClose = settingsDialog.querySelector("[data-ai-settings-close]");
     const historyClose = historyDialog.querySelector("[data-ai-history-close]");
-    shared.decorateIconControl(settingsClose, { icon: "close", label: "Close provider settings" });
+    shared.decorateIconControl(settingsClose, { icon: "close", label: "Close AI settings" });
     shared.decorateIconControl(historyClose, { icon: "close", label: "Close chat history" });
 
     function storedModel() {
@@ -120,7 +138,34 @@
       if (open) {
         loadStatus();
         requestAnimationFrame(() => elements.prompt.focus());
-      } else if (root.contains(document.activeElement)) trigger.focus();
+      } else {
+        if (settingsDialog.open) closeSettings(false);
+        if (historyDialog.open) closeHistory(false);
+        requestAnimationFrame(() => trigger.focus());
+      }
+    }
+
+    function setNestedDialogOpen(open) {
+      root.inert = open || !root.classList.contains("open");
+      root.setAttribute("aria-hidden", String(open || !root.classList.contains("open")));
+    }
+
+    function focusablePanelControls() {
+      return [...root.querySelectorAll('button:not([disabled]), select:not([disabled]), textarea:not([disabled]), input:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])')]
+        .filter(control => !control.hidden && control.getAttribute("aria-hidden") !== "true" && control.getClientRects().length);
+    }
+
+    function trapPanelFocus(event) {
+      if (event.key !== "Tab" || !root.classList.contains("open") || settingsDialog.open || historyDialog.open) return;
+      const controls = focusablePanelControls();
+      if (!controls.length) return;
+      const first = controls[0];
+      const last = controls.at(-1);
+      if (event.shiftKey && (document.activeElement === first || !root.contains(document.activeElement))) {
+        event.preventDefault(); last.focus();
+      } else if (!event.shiftKey && (document.activeElement === last || !root.contains(document.activeElement))) {
+        event.preventDefault(); first.focus();
+      }
     }
 
     function setBusy(busy) {
@@ -128,7 +173,7 @@
       elements.send.disabled = busy || !state.available || !elements.model.value;
       elements.prompt.disabled = busy || !state.available || !elements.model.value;
       for (const control of [elements.newChat, elements.history, elements.settings, elements.access, elements.model]) control.disabled = busy || (control === elements.model && !elements.model.value);
-      for (const control of extraBusyControls) control.disabled = busy;
+      for (const control of extraBusyControls) control.disabled = busy || control.dataset.aiUnavailable === "true";
       elements.send.textContent = busy ? "Working..." : "Send";
     }
 
@@ -261,8 +306,8 @@
       return form;
     }
 
-    function renderProviders() {
-      elements.providers.replaceChildren();
+    function renderProviders(container) {
+      container.replaceChildren();
       for (const provider of state.providers) {
         const card = document.createElement("article"); card.className = "ai-provider-card";
         const heading = document.createElement("div"); heading.className = "ai-provider-heading";
@@ -283,17 +328,122 @@
           for (const method of methods) card.append(buildAuthForm(provider, method));
           if (!methods.length) { const note = document.createElement("p"); note.textContent = "This provider did not advertise a supported authentication method."; card.append(note); }
         }
-        elements.providers.append(card);
+        container.append(card);
       }
     }
 
-    async function loadStatus(renderSettings = false) {
+    function invalidatePendingProposals() {
+      state.requestGeneration += 1;
+      state.sessionId = null;
+      state.contextKey = null;
+      for (const card of elements.messages.querySelectorAll(".ai-action-card:not(.applied)")) {
+        card.classList.add("revoked");
+        card.querySelectorAll("button").forEach(button => { button.disabled = true; });
+        if (!card.querySelector(".ai-action-revoked")) {
+          const notice = document.createElement("p");
+          notice.className = "ai-action-revoked";
+          notice.textContent = "Revoked because AI permissions or limits changed. Request a new proposal.";
+          card.append(notice);
+        }
+      }
+    }
+
+    function renderPolicyEditor() {
+      elements.settingsBody.replaceChildren();
+      const settings = state.settings;
+      const policySection = document.createElement("section");
+      policySection.className = "ai-policy-section";
+      const heading = document.createElement("div");
+      heading.className = "ai-settings-section-head";
+      const headingCopy = document.createElement("div");
+      const title = document.createElement("h3"); title.textContent = "Permissions and limits";
+      const intro = document.createElement("p"); intro.textContent = "These application settings are authoritative. Chat disclosure and exact-target context can only narrow them.";
+      headingCopy.append(title, intro); heading.append(headingCopy); policySection.append(heading);
+      if (!settings) {
+        const unavailable = document.createElement("p"); unavailable.className = "ai-settings-empty"; unavailable.textContent = "AI policy settings are unavailable.";
+        policySection.append(unavailable);
+      } else {
+        const form = document.createElement("form"); form.className = "ai-policy-form"; form.dataset.aiPolicyForm = "";
+        const capabilities = document.createElement("fieldset");
+        const capabilityLegend = document.createElement("legend"); capabilityLegend.textContent = "Product-supported capabilities"; capabilities.append(capabilityLegend);
+        for (const [name, authority] of Object.entries(settings.capabilities ?? {})) {
+          const row = document.createElement("label"); row.className = "ai-policy-capability";
+          const copy = document.createElement("span"); const label = document.createElement("strong"); label.textContent = AI_CAPABILITY_LABELS[name] || name;
+          const effective = document.createElement("small");
+          effective.textContent = authority.effectiveMode === authority.configuredMode
+            ? `Effective: ${AI_MODE_LABELS[authority.effectiveMode]}`
+            : `Configured: ${AI_MODE_LABELS[authority.configuredMode]}; effective: ${AI_MODE_LABELS[authority.effectiveMode]} because this action has a non-relaxable safety floor.`;
+          copy.append(label, effective);
+          const select = document.createElement("select"); select.name = name; select.setAttribute("aria-label", `${label.textContent} mode`);
+          for (const mode of Object.keys(AI_MODE_LABELS)) {
+            const option = document.createElement("option"); option.value = mode; option.textContent = AI_MODE_LABELS[mode]; option.selected = authority.configuredMode === mode; select.append(option);
+          }
+          row.append(copy, select); capabilities.append(row);
+        }
+        const limits = document.createElement("fieldset"); limits.className = "ai-policy-limits";
+        const limitsLegend = document.createElement("legend"); limitsLegend.textContent = "User bounds"; limits.append(limitsLegend);
+        const limitsHelp = document.createElement("p"); limitsHelp.textContent = "Blank values mean no user bound, except operation timeout, which inherits PostgreSQL. Transport pagination, response-size limits, and process ceilings still apply separately."; limits.append(limitsHelp);
+        for (const [name, labelText, minimum, maximum, description] of AI_BOUND_FIELDS) {
+          const label = document.createElement("label"); const copy = document.createElement("span"); const strong = document.createElement("strong"); strong.textContent = labelText;
+          const help = document.createElement("small"); help.id = `ai-bound-${name}-help`; help.textContent = description; copy.append(strong, help);
+          const input = document.createElement("input"); input.type = "number"; input.name = name; input.min = String(minimum); input.max = String(maximum); input.step = "1";
+          input.value = settings.bounds?.[name] == null ? "" : String(settings.bounds[name]); input.placeholder = name === "operationTimeoutMs" ? "Inherit PostgreSQL" : "No user bound";
+          input.setAttribute("aria-describedby", help.id); label.append(copy, input); limits.append(label);
+        }
+        const actions = document.createElement("div"); actions.className = "ai-policy-actions";
+        const revision = document.createElement("span"); revision.textContent = `Revision ${settings.revision}`;
+        const save = document.createElement("button"); save.type = "submit"; save.className = "button button-primary"; save.textContent = "Save permissions";
+        actions.append(revision, save); form.append(capabilities, limits, actions); policySection.append(form);
+        form.addEventListener("submit", async event => {
+          event.preventDefault();
+          if (!form.reportValidity()) return;
+          save.disabled = true; elements.settingsStatus.textContent = "Saving AI permissions and limits...";
+          const nextPolicy = { schemaVersion: settings.schemaVersion, capabilities: {}, bounds: {} };
+          for (const name of Object.keys(settings.capabilities)) nextPolicy.capabilities[name] = form.elements[name].value;
+          for (const [name] of AI_BOUND_FIELDS) nextPolicy.bounds[name] = form.elements[name].value === "" ? null : Number(form.elements[name].value);
+          try {
+            const updated = await request("/api/ai/settings", { method: "PUT", body: JSON.stringify({ expectedRevision: settings.revision, policy: nextPolicy }) });
+            state.settings = updated; onPolicyChange(updated); invalidatePendingProposals(); renderSettings();
+            elements.settingsStatus.textContent = `Permissions saved at revision ${updated.revision}. Existing pending proposals were revoked; provider connections and chat history were preserved.`;
+          } catch (error) {
+            if (error.code === "policy_changed") {
+              await loadPolicy();
+              elements.settingsStatus.textContent = "This policy changed in another tab. Current settings were refreshed; review them before saving again.";
+            } else elements.settingsStatus.textContent = error.message;
+          } finally { save.disabled = false; }
+        });
+      }
+      const providerSection = document.createElement("section"); providerSection.className = "ai-provider-section";
+      const providerHead = document.createElement("div"); providerHead.className = "ai-settings-section-head";
+      const providerCopy = document.createElement("div"); const providerTitle = document.createElement("h3"); providerTitle.textContent = "Provider credentials";
+      const providerIntro = document.createElement("p"); providerIntro.textContent = "Provider connections are shared by Schemii and Schemer and are stored separately from permissions.";
+      providerCopy.append(providerTitle, providerIntro); providerHead.append(providerCopy);
+      const providerBody = document.createElement("div"); providerBody.className = "ai-providers"; renderProviders(providerBody);
+      providerSection.append(providerHead, providerBody); elements.settingsBody.append(policySection, providerSection);
+    }
+
+    function renderSettings() { renderPolicyEditor(); }
+
+    async function loadPolicy(render = settingsDialog.open) {
+      try {
+        const settings = await request("/api/ai/settings", { method: "GET" });
+        state.settings = settings; onPolicyChange(settings);
+      } catch (error) {
+        state.settings = null;
+        if (render) elements.settingsStatus.textContent = `AI permissions unavailable: ${error.message}`;
+      }
+      if (render) renderSettings();
+      return state.settings;
+    }
+
+    async function loadStatus(shouldRenderSettings = false) {
       elements.status.textContent = "Checking";
+      await loadPolicy(false);
       try {
         const payload = await request("/api/ai/status", { method: "GET" });
         Object.assign(state, { loaded: true, available: payload.available === true || payload.healthy === true, version: payload.version ?? "", providers: payload.providers ?? [], default: payload.default ?? {}, authMethods: payload.authMethods ?? {}, skills: payload.skills ?? [] });
         const connected = state.providers.filter(provider => provider.connected).length;
-        elements.status.textContent = state.available ? `${connected} connected` : "Unavailable";
+        elements.status.textContent = state.available ? `${connected} AI provider${connected === 1 ? "" : "s"}` : "Unavailable";
         elements.status.classList.toggle("available", state.available);
         elements.railStatus?.classList.toggle("available", state.available);
         elements.settingsStatus.textContent = state.available ? `OpenCode ${state.version || "available"}` : "OpenCode is unavailable. The application remains usable without AI.";
@@ -302,7 +452,7 @@
         elements.status.textContent = "Offline"; elements.settingsStatus.textContent = `AI unavailable: ${error.message}`;
       }
       renderModels();
-      if (renderSettings || settingsDialog.open) renderProviders();
+      if (shouldRenderSettings || settingsDialog.open) renderSettings();
     }
 
     function removeEmptyState() { elements.messages.querySelector(".ai-empty-state")?.remove(); }
@@ -314,6 +464,46 @@
       const body = document.createElement("p"); body.textContent = String(text ?? "");
       message.append(label, body); elements.messages.append(message); scrollToEnd();
       return message;
+    }
+
+    function hasLocalSettingsAction(error) {
+      return Boolean(window.SchemiiShared.allowedLocalErrorAction?.(error));
+    }
+
+    function renderStructuredError(error) {
+      if (!["capability_unavailable", "application_limitation"].includes(error?.code)) return false;
+      removeEmptyState();
+      const details = error.payload?.error?.details ?? {};
+      const card = document.createElement("section"); card.className = "ai-error-card"; card.setAttribute("role", "alert");
+      const title = document.createElement("strong"); title.textContent = error.code === "capability_unavailable" ? "Capability unavailable" : "Application limitation";
+      const message = document.createElement("p"); message.textContent = window.SchemiiShared.formatApiError?.(error) || error.message;
+      card.append(title, message);
+      const capability = details.requiredCapability ?? details.capability;
+      if (typeof capability === "string" && capability) {
+        const exact = document.createElement("p"); exact.className = "ai-error-detail"; exact.textContent = `Required capability: ${AI_CAPABILITY_LABELS[capability] || capability}`; card.append(exact);
+      }
+      if (typeof details.guidance === "string" && details.guidance) {
+        const guidance = document.createElement("p"); guidance.className = "ai-error-detail"; guidance.textContent = details.guidance; card.append(guidance);
+      }
+      if (typeof details.safeAlternative === "string" && details.safeAlternative && details.safeAlternative !== details.guidance) {
+        const alternative = document.createElement("p"); alternative.className = "ai-error-detail"; alternative.textContent = `Alternative: ${details.safeAlternative}`; card.append(alternative);
+      }
+      if (hasLocalSettingsAction(error)) {
+        const open = document.createElement("button"); open.type = "button"; open.className = "button button-ghost"; open.textContent = "Open AI settings";
+        open.addEventListener("click", () => openSettings(open)); card.append(open);
+      }
+      elements.messages.append(card); scrollToEnd(); return true;
+    }
+
+    function operationError(operation, fallback = "The operation did not succeed") {
+      const payload = operation?.error;
+      const error = new Error(payload?.message || fallback);
+      if (payload && typeof payload === "object") {
+        error.code = payload.code;
+        error.payload = { error: payload };
+        if (window.SchemiiShared.formatApiError) error.message = window.SchemiiShared.formatApiError(error, fallback);
+      }
+      return error;
     }
 
     function appendQueryResult(result) {
@@ -453,6 +643,12 @@
     }
 
     async function executeProposal(proposal, capture) {
+      const currentAccess = elements.access.value;
+      const currentCapture = getContext(currentAccess);
+      const capturedAccess = capture?.accessLevel ?? currentAccess;
+      if (!currentCapture || contextKey(capture, capturedAccess) !== contextKey(currentCapture, currentAccess)) {
+        throw new Error("The application context changed. Start a new conversation before confirming this action.");
+      }
       const context = buildProposalClaimPayload ? buildProposalClaimPayload(capture, elements.access.value) : {};
       const policy = proposal.policyBinding ?? {};
       const mode = policy.effectiveMode === "once_per_chat" ? "once_per_chat" : "every_action";
@@ -503,16 +699,18 @@
       if (normalized.review) { const review = document.createElement("pre"); review.textContent = normalized.review; card.append(review); }
       const button = document.createElement("button"); button.type = "button"; button.className = "button button-primary"; button.textContent = normalized.buttonLabel || (normalized.destructive ? "Review deletion" : "Review & confirm");
       button.addEventListener("click", async () => {
-        if (!confirm(`${normalized.summary}\n\nContinue?`)) return;
+        const consequence = normalized.destructive ? "\n\nThis action is destructive and cannot be undone." : "";
+        if (!confirm(`${normalized.summary}${consequence}\n\nConfirm this reviewed action?`)) return;
         card.querySelectorAll(".ai-action-error").forEach(error => error.remove()); button.disabled = true;
         try {
           const response = await executeProposal(proposal, capture);
           const operation = response.operation;
-          if (operation?.state !== "succeeded") throw new Error(operation?.error?.message || "The operation did not succeed");
+          if (operation?.state !== "succeeded") throw operationError(operation);
           const appliedLabel = await handleOperationResult?.(operation.result, capture);
           button.textContent = appliedLabel || normalized.appliedLabel || "Applied"; card.classList.add("applied");
         } catch (error) {
-          button.disabled = false; const detail = document.createElement("p"); detail.className = "ai-action-error"; detail.textContent = error.message; card.append(detail);
+          button.disabled = false;
+          if (!renderStructuredError(error)) { const detail = document.createElement("p"); detail.className = "ai-action-error"; detail.textContent = error.message; card.append(detail); }
         }
       });
       card.append(button); elements.messages.append(card);
@@ -530,7 +728,7 @@
         const proposal = { ...item, sessionId };
         if (proposal.operation) {
           if (proposal.operation.state === "succeeded") handleOperationResult?.(proposal.operation.result, capture);
-          else if (proposal.operation.error?.message) appendMessage("assistant", `Automatic action failed: ${proposal.operation.error.message}`);
+          else if (proposal.operation.error?.message && !renderStructuredError(operationError(proposal.operation))) appendMessage("assistant", `Automatic action failed: ${proposal.operation.error.message}`);
           continue;
         }
         if (renderAction) renderAction(proposal, capture, api);
@@ -574,7 +772,7 @@
         renderResponse(response, capture, sessionId); activity.finish("completed");
       } catch (error) {
         if (requestGeneration === state.requestGeneration) {
-          activity.finish("error"); appendMessage("assistant", `AI unavailable: ${error.message}`);
+          activity.finish("error"); if (!renderStructuredError(error)) appendMessage("assistant", `AI unavailable: ${error.message}`);
           if (["provider_timeout", "provider_empty_response", "opencode_error"].includes(error.code)) await loadStatus();
         }
       } finally { stream?.abort(); if (requestGeneration === state.requestGeneration) setBusy(false); }
@@ -583,6 +781,14 @@
     function resetConversation(copy = labels.newChatCopy || "Proposals will use the current application context.") {
       if (state.busy) return;
       state.requestGeneration += 1; state.sessionId = null; state.contextKey = null; elements.messages.replaceChildren(); onNewChat();
+      const empty = document.createElement("div"); empty.className = "ai-empty-state";
+      const title = document.createElement("strong"); title.textContent = "New conversation";
+      const paragraph = document.createElement("p"); paragraph.dataset.aiEmptyCopy = ""; paragraph.textContent = copy;
+      empty.append(title, paragraph); elements.messages.append(empty);
+    }
+
+    function invalidateContext(copy = "Application context changed. The next message starts a new isolated conversation.") {
+      state.requestGeneration += 1; state.sessionId = null; state.contextKey = null; setBusy(false); elements.messages.replaceChildren(); onNewChat();
       const empty = document.createElement("div"); empty.className = "ai-empty-state";
       const title = document.createElement("strong"); title.textContent = "New conversation";
       const paragraph = document.createElement("p"); paragraph.dataset.aiEmptyCopy = ""; paragraph.textContent = copy;
@@ -647,17 +853,49 @@
     }
 
     const api = Object.freeze({
-      appendMessage, appendQueryResult, renderResponse, sendMessage, scrollToEnd,
-      executeProposal,
-      get accessLevel() { return elements.access.value; }, get state() { return state; },
+      appendMessage, appendQueryResult, renderResponse, sendMessage, scrollToEnd, invalidateContext,
+      executeProposal, openSettings, operationError, renderError: renderStructuredError,
+      get accessLevel() { return elements.access.value; }, get state() { return state; }, get settings() { return state.settings; },
     });
+
+    async function openSettings(opener = document.activeElement) {
+      if (!settingsDialog.open) {
+        settingsReturnFocus = opener instanceof HTMLElement ? opener : elements.settings;
+        setNestedDialogOpen(true);
+        settingsDialog.showModal();
+      }
+      await loadStatus(true);
+      requestAnimationFrame(() => settingsDialog.querySelector("select, input, button")?.focus());
+    }
+
+    function closeSettings(restoreFocus = true) {
+      if (settingsDialog.open) settingsDialog.close();
+      const target = settingsReturnFocus; settingsReturnFocus = null;
+      setNestedDialogOpen(false);
+      if (restoreFocus && target?.isConnected) requestAnimationFrame(() => target.focus());
+    }
+    function closeHistory(restoreFocus = true) {
+      if (historyDialog.open) historyDialog.close();
+      const target = historyReturnFocus; historyReturnFocus = null;
+      setNestedDialogOpen(false);
+      if (restoreFocus && target?.isConnected) requestAnimationFrame(() => target.focus());
+    }
     trigger.addEventListener("click", () => setOpen(!root.classList.contains("open")));
     elements.close.addEventListener("click", () => setOpen(false));
     elements.newChat.addEventListener("click", () => resetConversation());
-    elements.history.addEventListener("click", async () => { if (state.busy) return; historyDialog.showModal(); await renderHistory(); });
-    elements.settings.addEventListener("click", async () => { settingsDialog.showModal(); await loadStatus(true); });
-    settingsClose.addEventListener("click", () => settingsDialog.close());
-    historyClose.addEventListener("click", () => historyDialog.close());
+    elements.history.addEventListener("click", async () => {
+      if (state.busy) return;
+      historyReturnFocus = elements.history;
+      setNestedDialogOpen(true);
+      historyDialog.showModal();
+      await renderHistory();
+      requestAnimationFrame(() => historyDialog.querySelector("button")?.focus());
+    });
+    elements.settings.addEventListener("click", () => openSettings(elements.settings));
+    settingsClose.addEventListener("click", closeSettings);
+    settingsDialog.addEventListener("cancel", event => { event.preventDefault(); closeSettings(); });
+    historyClose.addEventListener("click", closeHistory);
+    historyDialog.addEventListener("cancel", event => { event.preventDefault(); closeHistory(); });
     elements.model.addEventListener("change", () => { rememberModel(); setBusy(state.busy); });
     elements.access.addEventListener("change", () => {
       resetConversation("Access changed. The next message starts a new conversation bound to this disclosure level and target.");
@@ -665,9 +903,10 @@
     });
     elements.form.addEventListener("submit", event => { event.preventDefault(); const text = elements.prompt.value.trim(); if (!text) return; elements.prompt.value = ""; sendMessage(text); });
     elements.prompt.addEventListener("keydown", event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); elements.form.requestSubmit(); } });
-    document.addEventListener("keydown", event => { if (event.key === "Escape" && root.classList.contains("open") && !settingsDialog.open && !historyDialog.open) setOpen(false); });
+    root.addEventListener("keydown", trapPanelFocus);
+    document.addEventListener("keydown", event => { if (event.key === "Escape" && root.classList.contains("open") && !settingsDialog.open && !historyDialog.open && !state.busy) setOpen(false); });
     root.inert = true;
-    return Object.freeze({ ...api, open: () => setOpen(true), close: () => setOpen(false), refresh: loadStatus, reset: resetConversation, normalizeStoredModel });
+    return Object.freeze({ ...api, open: () => setOpen(true), close: () => setOpen(false), refresh: loadStatus, refreshPolicy: loadPolicy, reset: resetConversation, normalizeStoredModel });
   }
 
   window.SchemiiShared = Object.freeze({ ...(window.SchemiiShared || {}), createAiAssistant, normalizeStoredAiModel: normalizeStoredModel, aiContextCacheKey, boundedAiQueryResult });

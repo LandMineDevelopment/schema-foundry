@@ -18,18 +18,19 @@ from schemii.widget_query import (
     limit_widget_rows,
 )
 from schemii.postgres_service import quote_identifier
+from tests.capability_test_support import column
 
 
 COLUMNS = [
-    {"name": "publisher", "type": "text", "nullable": False, "ordinal": 1},
-    {"name": "format", "type": "text", "nullable": True, "ordinal": 2},
-    {"name": "revenue", "type": "numeric(10,2)", "nullable": True, "ordinal": 3},
-    {"name": "customer_id", "type": "bigint", "nullable": False, "ordinal": 4},
-    {"name": "metadata", "type": "jsonb", "nullable": True, "ordinal": 5},
-    {"name": "raw", "type": "json", "nullable": True, "ordinal": 6},
-    {"name": "elapsed", "type": "interval", "nullable": True, "ordinal": 7},
-    {"name": "price", "type": "money", "nullable": True, "ordinal": 8},
-    {"name": "location", "type": "point", "nullable": True, "ordinal": 9},
+    column("publisher", "text", False, 1, oid=25),
+    column("format", "text", True, 2, oid=25),
+    column("revenue", "numeric(10,2)", True, 3, oid=1700, category="N", name="numeric", numeric=True, pattern=False, aggregates=("count", "sum", "average", "minimum", "maximum")),
+    column("customer_id", "bigint", False, 4, oid=20, category="N", name="int8", numeric=True, pattern=False, aggregates=("count", "sum", "average", "minimum", "maximum")),
+    column("metadata", "jsonb", True, 5, oid=3802, category="U", name="jsonb", ordering=False, pattern=False, aggregates=("count",)),
+    column("raw", "json", True, 6, oid=114, category="U", name="json", equality=False, ordering=False, pattern=False, aggregates=()),
+    column("elapsed", "interval", True, 7, oid=1186, category="T", name="interval", pattern=False, aggregates=("count", "sum", "average", "minimum", "maximum")),
+    column("price", "money", True, 8, oid=790, category="N", name="money", numeric=True, pattern=False, aggregates=("count", "sum", "minimum", "maximum")),
+    column("location", "point", True, 9, oid=600, category="G", name="point", equality=False, ordering=False, pattern=False, aggregates=()),
 ]
 
 
@@ -62,18 +63,18 @@ class WidgetQueryTests(unittest.TestCase):
         self.assertEqual(result["limitEvents"][-1]["code"], "result_row_count_truncated")
 
     def test_temporal_series_compiles_utc_manifest_and_half_open_aligned_window(self):
-        columns = [*COLUMNS, {"name": "ordered_at", "type": "timestamp without time zone", "nullable": False, "ordinal": 10}]
+        columns = [*COLUMNS, column("ordered_at", "timestamp without time zone", False, 10, oid=1114, category="D", name="timestamp", temporal="timestamp", pattern=False)]
         value = query()
         value["dimensions"] = [{"id": "dimension_ordered", "label": "Ordered", "column": "ordered_at"}]
         value["measures"] = [value["measures"][1]]
         value["sort"] = [{"targetKind": "measure", "targetId": "measure_revenue", "direction": "desc", "nulls": "last"}]
         series = normalize_temporal_series(value, columns)
-        manifest = compile_temporal_series_manifest({"namespace": "bookstore", "relation": "orders"}, series, quote_identifier)
-        self.assertIn('pg_catalog.min(("ordered_at" AT TIME ZONE \'UTC\'))', manifest["sql"])
-        self.assertIn('(\n    (\n        "format" IN (%s, %s)\n    )\n)\n    AND ("ordered_at" AT TIME ZONE \'UTC\') IS NOT NULL', manifest["sql"])
+        manifest = compile_temporal_series_manifest({"namespace": "bookstore", "relation": "orders"}, series, quote_identifier, columns)
+        self.assertIn('"pg_catalog"."min"(("ordered_at"::"pg_catalog"."timestamp"))', manifest["sql"])
+        self.assertIn('OPERATOR("pg_catalog".=) %s::"pg_catalog"."text" OR', manifest["sql"])
         window = compile_temporal_series_window(
             {"namespace": "bookstore", "relation": "orders"}, series, quote_identifier,
-            86400, "2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z", 32,
+            86400, "2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z", 32, columns,
         )
         self.assertIn("extract(epoch FROM", window["sql"])
         self.assertIn("GROUP BY\n    1", window["sql"])
@@ -90,14 +91,14 @@ class WidgetQueryTests(unittest.TestCase):
     def test_normalizes_and_compiles_deterministically(self):
         normalized = normalize_query(query(), COLUMNS)
         compiled = compile_query(
-            {"namespace": "bookstore", "relation": "book sales"}, normalized, quote_identifier
+            {"namespace": "bookstore", "relation": "book sales"}, normalized, quote_identifier, COLUMNS
         )
         self.assertIn('"publisher" AS "__schemer_d0"', compiled["sql"])
         self.assertIn('pg_catalog.count(*) AS "__schemer_m0"', compiled["sql"])
-        self.assertIn('COALESCE(pg_catalog.sum("revenue"), 0)', compiled["sql"])
-        self.assertIn('pg_catalog.count(DISTINCT "customer_id")', compiled["sql"])
+        self.assertIn('COALESCE("pg_catalog"."sum"(("revenue"::"pg_catalog"."numeric")), 0)', compiled["sql"])
+        self.assertIn('"pg_catalog"."count"(DISTINCT ("customer_id"::"pg_catalog"."int8"))', compiled["sql"])
         self.assertIn('FROM "bookstore"."book sales"', compiled["sql"])
-        self.assertIn('WHERE\n    (\n        "format" IN (%s, %s)\n    )', compiled["sql"])
+        self.assertIn('OPERATOR("pg_catalog".=) %s::"pg_catalog"."text" OR', compiled["sql"])
         self.assertIn('GROUP BY\n    "publisher",\n    "format"', compiled["sql"])
         self.assertIn('ORDER BY\n    "__schemer_m1" DESC NULLS LAST,\n    "__schemer_d0" ASC NULLS LAST,\n    "__schemer_d1" ASC NULLS LAST', compiled["sql"])
         self.assertEqual(compiled["parameters"], ["paperback", "hardcover", 101])
@@ -112,9 +113,9 @@ class WidgetQueryTests(unittest.TestCase):
             {"id": f"m_{aggregation}", "label": aggregation, "column": None if aggregation == "count_rows" else "revenue", "aggregation": aggregation, "distinct": False, "nullBehavior": "preserve", "numberFormat": {"style": "auto"}}
             for aggregation in ("count_rows", "count", "sum", "average", "minimum", "maximum")
         ]
-        sql = compile_query({"namespace": "public", "relation": "orders"}, normalize_query(value, COLUMNS), quote_identifier)["sql"]
+        sql = compile_query({"namespace": "public", "relation": "orders"}, normalize_query(value, COLUMNS), quote_identifier, COLUMNS)["sql"]
         for function in ("count", "sum", "avg", "min", "max"):
-            self.assertIn(f"pg_catalog.{function}(", sql)
+            self.assertIn(f'"pg_catalog"."{function}"(', sql)
         self.assertNotIn("GROUP BY", sql)
 
     def test_preserves_explicit_multi_column_sort_order(self):
@@ -126,7 +127,7 @@ class WidgetQueryTests(unittest.TestCase):
         ]
         normalized = normalize_query(value, COLUMNS)
         self.assertEqual([item["targetId"] for item in normalized["sort"]], ["dimension_format", "measure_revenue", "dimension_publisher"])
-        sql = compile_query({"namespace": "public", "relation": "orders"}, normalized, quote_identifier)["sql"]
+        sql = compile_query({"namespace": "public", "relation": "orders"}, normalized, quote_identifier, COLUMNS)["sql"]
         self.assertIn(
             'ORDER BY\n    "__schemer_d1" ASC NULLS FIRST,\n    "__schemer_m1" DESC NULLS LAST,\n    "__schemer_d0" DESC NULLS FIRST',
             sql,
@@ -141,9 +142,9 @@ class WidgetQueryTests(unittest.TestCase):
             {"id": "m_interval", "label": "Average elapsed", "column": "elapsed", "aggregation": "average", "distinct": False, "nullBehavior": "preserve", "numberFormat": {"style": "auto"}},
             {"id": "m_money", "label": "Total price", "column": "price", "aggregation": "sum", "distinct": False, "nullBehavior": "preserve", "numberFormat": {"style": "auto"}},
         ]
-        sql = compile_query({"namespace": "public", "relation": "orders"}, normalize_query(value, COLUMNS), quote_identifier)["sql"]
-        self.assertIn('pg_catalog.avg("elapsed")', sql)
-        self.assertIn('pg_catalog.sum("price")', sql)
+        sql = compile_query({"namespace": "public", "relation": "orders"}, normalize_query(value, COLUMNS), quote_identifier, COLUMNS)["sql"]
+        self.assertIn('"pg_catalog"."avg"(("elapsed"::"pg_catalog"."interval"))', sql)
+        self.assertIn('"pg_catalog"."sum"(("price"::"pg_catalog"."money"))', sql)
 
     def test_compiles_or_groups_and_type_aware_text_filters(self):
         value = query()
@@ -157,11 +158,11 @@ class WidgetQueryTests(unittest.TestCase):
                 {"id": "f_two_b", "column": "revenue", "operator": "between", "values": [10, 20]},
             ]},
         ]
-        compiled = compile_query({"namespace": "public", "relation": "books"}, normalize_query(value, COLUMNS), quote_identifier)
+        compiled = compile_query({"namespace": "public", "relation": "books"}, normalize_query(value, COLUMNS), quote_identifier, COLUMNS)
         self.assertIn("\n        AND ", compiled["sql"])
         self.assertIn("\n    OR (", compiled["sql"])
-        self.assertIn('"revenue" BETWEEN %s AND %s', compiled["sql"])
-        self.assertIn('"format" LIKE %s ESCAPE E\'\\\\\'', compiled["sql"])
+        self.assertIn('("revenue"::"pg_catalog"."numeric") OPERATOR("pg_catalog".>=) %s::"pg_catalog"."numeric"', compiled["sql"])
+        self.assertIn('("format"::"pg_catalog"."text") OPERATOR("pg_catalog".~~) (pg_catalog.like_escape(%s::text', compiled["sql"])
         self.assertEqual(compiled["parameters"][:5], ["A", "hard\\_%", "B%", 10, 20])
 
     def test_upgrades_version_one_flat_filters(self):
@@ -205,13 +206,13 @@ class WidgetQueryTests(unittest.TestCase):
         )
         for sql in (compiled["countSql"], compiled["sql"]):
             self.assertIn('FROM "bookstore"."book sales"', sql)
-            self.assertIn('"format" IN (%s, %s)', sql)
-            self.assertIn('"publisher" = %s', sql)
+            self.assertIn('OPERATOR("pg_catalog".=) %s::"pg_catalog"."text" OR', sql)
+            self.assertIn('("publisher"::"pg_catalog"."text") OPERATOR("pg_catalog".=) %s::"pg_catalog"."text"', sql)
             self.assertIn('"format" IS NULL', sql)
             self.assertIn('"revenue" IS NOT NULL', sql)
-            self.assertIn('CAST("customer_id" AS text) ILIKE %s', sql)
-            self.assertIn('CAST("publisher" AS text) ILIKE %s', sql)
-            self.assertIn('CAST("format" AS text) ILIKE %s', sql)
+            self.assertIn('CAST("customer_id" AS text) OPERATOR(pg_catalog.~~*) pg_catalog.like_escape(%s::text', sql)
+            self.assertIn('CAST("publisher" AS text) OPERATOR(pg_catalog.~~*) pg_catalog.like_escape(%s::text', sql)
+            self.assertIn('CAST("format" AS text) OPERATOR(pg_catalog.~~*) pg_catalog.like_escape(%s::text', sql)
             self.assertNotIn('ILIKE %s ESCAPE E\'\\\\\' OR', sql)
             self.assertNotIn("O'Reilly", sql)
         self.assertIn('"__schemer_c1" DESC NULLS LAST', compiled["sql"])
@@ -250,7 +251,7 @@ class WidgetQueryTests(unittest.TestCase):
                 normalize_detail_request({"dimensions": dimensions}, candidate_detail, offset, limit, sort, searches, normalized, COLUMNS)
 
     def test_temporal_bucket_detail_selection_uses_a_half_open_utc_range(self):
-        columns = [*COLUMNS, {"name": "ordered_at", "type": "timestamp without time zone", "nullable": False, "ordinal": 10}]
+        columns = [*COLUMNS, column("ordered_at", "timestamp without time zone", False, 10, oid=1114, category="D", name="timestamp", temporal="timestamp", pattern=False)]
         value = query()
         value["dimensions"] = [{"id": "dimension_ordered", "label": "Ordered", "column": "ordered_at"}]
         value["measures"] = [value["measures"][1]]
@@ -269,8 +270,8 @@ class WidgetQueryTests(unittest.TestCase):
             detail, 0, 25, None, [], normalized, columns,
         )
         compiled = compile_detail_query({"namespace": "public", "relation": "orders"}, normalized, request, columns, quote_identifier)
-        self.assertIn("(\"ordered_at\" AT TIME ZONE 'UTC') >= %s", compiled["sql"])
-        self.assertIn("(\"ordered_at\" AT TIME ZONE 'UTC') < %s", compiled["sql"])
+        self.assertIn('("ordered_at"::"pg_catalog"."timestamp") OPERATOR("pg_catalog".>=) %s::"pg_catalog"."timestamp"', compiled["sql"])
+        self.assertIn('("ordered_at"::"pg_catalog"."timestamp") OPERATOR("pg_catalog".<) %s::"pg_catalog"."timestamp"', compiled["sql"])
         self.assertEqual(compiled["countParameters"][-2:], ["2026-01-01T00:00:00.000Z", "2026-01-02T00:00:00.000Z"])
 
         with self.assertRaisesRegex(QueryValidationError, "selected dimension"):
@@ -294,7 +295,6 @@ class WidgetQueryTests(unittest.TestCase):
         bad_filter_type = query(); bad_filter_type["filters"][0]["conditions"][0]["column"] = "raw"; invalid.append(bad_filter_type)
         bad_geometric_filter = query(); bad_geometric_filter["filters"][0]["conditions"][0]["column"] = "location"; invalid.append(bad_geometric_filter)
         bad_numeric_filter = query(); bad_numeric_filter["filters"][0]["conditions"][0].update({"column": "revenue", "operator": "contains", "values": ["2"]}); invalid.append(bad_numeric_filter)
-        bad_text_between = query(); bad_text_between["filters"][0]["conditions"][0].update({"operator": "between", "values": ["a", "z"]}); invalid.append(bad_text_between)
         bad_between_count = query(); bad_between_count["filters"][0]["conditions"][0].update({"column": "revenue", "operator": "between", "values": [10]}); invalid.append(bad_between_count)
         unknown = query(); unknown["sql"] = "SELECT 1"; invalid.append(unknown)
         for value in invalid:

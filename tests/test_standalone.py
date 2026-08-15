@@ -251,6 +251,7 @@ esac
         css = (WEB / "styles.css").read_text(encoding="utf-8")
         javascript = (WEB / "app.js").read_text(encoding="utf-8")
         postgres_client = (ROOT / "src/schemii/shared_web/postgres-client.js").read_text(encoding="utf-8")
+        session_client = (ROOT / "src/schemii/shared_web/session-client.js").read_text(encoding="utf-8")
 
         resource_urls = re.findall(r'''(?:src|href)=["']([^"']+)["']''', html)
         self.assertTrue(resource_urls)
@@ -261,8 +262,10 @@ esac
         self.assertNotRegex(javascript, r"\b(?:WebSocket|EventSource|sendBeacon|importScripts)\s*\(")
 
         literal_fetches = re.findall(r'''fetch\(\s*(["'`])([^"'`]+)\1''', javascript)
-        self.assertTrue(literal_fetches)
         self.assertTrue(all(target.startswith("/api/") for _, target in literal_fetches))
+        self.assertIn('sessionPath = "/api/session"', session_client)
+        self.assertIn("validatePath(path, allowPath)", session_client)
+        self.assertIn("await fetch(path,", session_client)
         self.assertIn('path.startsWith("/api/postgres/")', postgres_client)
 
     def test_storage_paths_are_absolute_and_independent_of_launch_directory(self):

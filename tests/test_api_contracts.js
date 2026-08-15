@@ -8,8 +8,11 @@ const contracts = context.window.SchemiiShared;
 
 assert.equal(contracts.validateSessionResponse({ token: "token", serverId: "server" }).token, "token");
 assert.equal(contracts.validateProfilesResponse({ profiles: [{ id: "local" }] }).profiles.length, 1);
-assert.equal(contracts.validateCatalogResponse({ namespaces: ["public"] }, "namespaces").namespaces[0], "public");
-assert.equal(contracts.validateCatalogResponse({ relations: [{ name: "orders", kind: "table" }] }, "relations").relations[0].name, "orders");
+const page = { pageSize: 2, returned: 1, hasMore: false, nextCursor: null };
+const identity = { profileId: "local", profileFingerprint: "a".repeat(64), database: "demo", catalogFingerprint: "b".repeat(64), page };
+assert.equal(contracts.validateCatalogResponse({ ...identity, scope: "user", entries: [{ name: "public", classification: "user", system: false }], namespaces: ["public"] }, "namespaces").namespaces[0], "public");
+const relation = { profileId: "local", database: "demo", namespace: "public", relation: "orders", name: "orders", kind: "foreign_table" };
+assert.equal(contracts.validateCatalogResponse({ ...identity, namespace: "public", entries: [relation], relations: [relation] }, "relations").relations[0].name, "orders");
 assert.equal(contracts.validatePlanResponse({ id: "plan", steps: [], warnings: [], destructive: false }).id, "plan");
 assert.equal(contracts.validateOperationResponse({ operation: { id: "operation", state: "running" } }).operation.state, "running");
 assert.equal(contracts.validateResourceSummariesResponse({ resources: [{ id: "schema" }] }).resources.length, 1);

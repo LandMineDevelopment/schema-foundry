@@ -7,7 +7,8 @@ const shared = fs.readFileSync("src/schemii/shared_web/ai-assistant.js", "utf8")
 const styles = fs.readFileSync("src/schemii/shared_web/ai-assistant.css", "utf8");
 
 assert.match(html, /id="ai-button"[\s\S]*class="ai-panel"[\s\S]*data-ai="model"[\s\S]*data-ai="access"[\s\S]*data-ai="messages"[\s\S]*data-ai="prompt"/, "Schemer needs the canonical shared model, disclosure, chat, and composer UI");
-assert.match(html, /id="ai-settings-dialog"[\s\S]*Connections apply to Schemii and Schemer[\s\S]*id="ai-history-dialog"[\s\S]*Schemii conversations remain separate/, "Schemer must explain shared provider credentials and separate chat history");
+assert.match(html, /id="ai-settings-dialog"[\s\S]*separate from provider credentials[\s\S]*id="ai-history-dialog"[\s\S]*Schemii conversations remain separate/, "Schemer must separate policy/provider settings and app-specific chat history");
+assert.match(shared, /Provider connections are shared by Schemii and Schemer/, "the shared settings component must explain cross-product provider credentials");
 assert.match(html, /\/shared\/ai-assistant\.css[\s\S]*\/shared\/ai-assistant\.js/, "Schemer must load the shared AI client and visual shell");
 assert.match(shared, /path\.startsWith\("\/api\/ai\/"\)/, "AI traffic must stay on Schemer's same-origin API");
 assert.doesNotMatch(shared, /fetch\([^)]*(?:opencode|8080|provider\.)/i, "the browser must not call Schemii, OpenCode, or providers directly");
@@ -21,7 +22,8 @@ for (const route of ["/api/ai/auth/api", "/api/ai/auth/oauth/authorize", "/api/a
 assert.match(shared, /Disconnect .*This affects both Schemii and Schemer/, "shared provider disconnect must explain its cross-app effect");
 assert.match(shared, /\/api\/ai\/sessions[\s\S]*renderHistory[\s\S]*session\.id[\s\S]*method: "DELETE"/, "Schemer needs persistent app-isolated chat history");
 assert.match(source, /buildSessionPayload:[\s\S]*dashboardId: context\.dashboardId, accessLevel[\s\S]*profileId: context\.profileId, database: context\.database, namespace: context\.namespace/, "Schemer must send the complete initial chat context for server-owned binding");
-assert.doesNotMatch(source, /SCHEMER_CONTEXT|aiContextFingerprint|profileFingerprint/, "Schemer browser authority must not use titles or connection fingerprints");
+const aiAdapter = source.slice(source.indexOf("function schemerAiTarget"), source.indexOf('document.querySelector("#connections-button")'));
+assert.doesNotMatch(aiAdapter, /SCHEMER_CONTEXT|aiContextFingerprint|profileFingerprint/, "Schemer AI authority must not use titles or browser-derived connection fingerprints");
 assert.match(source, /parseSession: session =>[\s\S]*session\.target[\s\S]*session\.dashboardId[\s\S]*session\.accessLevel/, "Schemer must parse server-owned chat fields");
 assert.match(shared, /binding\.key == null \|\| binding\.key === currentKey[\s\S]*state\.sessionId = resumable \? session\.id : null/, "history may continue only in its original dashboard and disclosure context");
 assert.match(source, /function validateSchemerAiAction[\s\S]*exactFields[\s\S]*expectedRevision[\s\S]*currentTitle/, "Schemer actions must use strict fields, revisions, and exact widget identity");
@@ -34,7 +36,8 @@ assert.doesNotMatch(messageAdapter, /password|connectionString|host|\buser\b|pro
 assert.match(html, /value="data"[\s\S]*data-ai-query-warning/, "Schemer must expose an explicit data tier with a query safety warning");
 assert.doesNotMatch(html, /allow-session/, "Schemer must require confirmation for every analytic query");
 assert.match(source, /action\.type === "read_query"[\s\S]*action\.readOnly !== true[\s\S]*expectedRevision[\s\S]*buttonLabel: "Review & run query"/, "query proposals must be strict, read-only, revision-bound, and inert");
-assert.match(shared, /confirm\(`\$\{normalized\.summary\}\\n\\nContinue\?`\)/, "every Schemer operation must require confirmation before server execution");
+assert.match(shared, /confirm\(`\$\{normalized\.summary\}\$\{consequence\}\\n\\nConfirm this reviewed action\?`\)/, "every Schemer operation must require one post-review confirmation with destructive wording when needed");
+assert.match(source, /function schemerAiTargetLabel[\s\S]*toolbarTargetExplicit \? "selected" : "suggested"/, "Schemer AI must name whether its exact toolbar target was selected or merely suggested");
 assert.match(source, /result\?\.kind === "sql_result"[\s\S]*persistedAfter[\s\S]*appendQueryResult\(result\.display\)[\s\S]*resultRef: result\.resultRef/, "approved result references must retain local dashboard safety checks before follow-up delivery");
 assert.doesNotMatch(source, /queryResult: boundedSchemerAiQueryResult\(result\)/, "browser-owned rows must not be submitted as AI query provenance");
 assert.match(source, /canViewSession: \(binding, currentKey\) => binding\.accessLevel !== "data" \|\| binding\.key === currentKey/, "data history must remain hidden outside its exact target context");

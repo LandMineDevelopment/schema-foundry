@@ -46,6 +46,10 @@ class FakePostgresService:
         self.calls.append(("list_namespaces", profile_id))
         return ["bookstore", "public"]
 
+    def namespace_exists(self, profile_id, database, namespace):
+        self.calls.append(("namespace_exists", profile_id, database, namespace))
+        return namespace in {"bookstore", "public"}
+
     def introspect(self, profile_id, namespace):
         self.calls.append(("introspect", profile_id, namespace))
         tables = []
@@ -99,11 +103,11 @@ class ExampleInstallerTests(unittest.TestCase):
         v4 = seed[v4_start:v4_end]
         namespace_lock = "pg_catalog.pg_advisory_xact_lock(\n    pg_catalog.hashtext('schemii:bookstore')::bigint\n)"
         self.assertEqual(seed.count(namespace_lock), seed.count("BEGIN;"))
-        self.assertEqual(seed.count("SET LOCAL lock_timeout = '5s';"), seed.count("BEGIN;"))
-        self.assertEqual(seed.count("SET LOCAL statement_timeout = '30s';"), seed.count("BEGIN;"))
+        self.assertEqual(seed.count("pg_catalog.set_config(\n    'lock_timeout'"), seed.count("BEGIN;"))
+        self.assertNotIn("statement_timeout", seed)
         self.assertIn(namespace_lock, v4)
-        self.assertLess(v4.index("SET LOCAL lock_timeout"), v4.index("pg_catalog.pg_advisory_xact_lock"))
-        self.assertLess(v4.index("SET LOCAL statement_timeout"), v4.index("pg_catalog.pg_advisory_xact_lock"))
+        self.assertLess(v4.index("pg_catalog.set_config"), v4.index("pg_catalog.pg_advisory_xact_lock"))
+        self.assertIn("ELSE pg_catalog.current_setting('lock_timeout')", v4)
         self.assertNotIn("schemii:mercury-books-tutorial", seed)
         self.assertIn("'Schemii tutorial dataset v3'", v4)
         self.assertIn("'Schemii tutorial dataset v4'", v4)

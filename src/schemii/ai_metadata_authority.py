@@ -8,21 +8,37 @@ from pathlib import Path
 from typing import Any
 
 from .metadata import MetadataStore, MetadataStoreError
+from .ai_policy import DEFAULT_AGENT_ID, LEGACY_CAPABILITIES, capability_unavailable, effective_chat_snapshot
 
 
 CAPABILITIES = ("schema", "structured", "write", "rawread", "rawwrite")
 APPROVAL_MODES = {"every_action": "approval", "once_per_chat": "once_per_chat", "automatic": "automatic"}
 
 
+def _grant_mode(mode: str) -> str:
+    return "deny" if mode == "disabled" else "approval" if mode == "every_action" else mode
+
+
 class SchemiiMetadataAuthority:
     """Schemii authority coordinator backed exclusively by transactional metadata."""
 
-    def __init__(self, store: MetadataStore, *, worker_id: str):
+    def __init__(self, store: MetadataStore, *, worker_id: str, lease_seconds: int = 90):
         self.store = store
         self.worker_id = worker_id
+        self.lease_seconds = lease_seconds
 
     def health(self) -> dict[str, Any]:
         return self.store.health()
+
+    def get_settings(self) -> dict[str, Any]:
+        return self.store.get_agent_settings("schemii", DEFAULT_AGENT_ID)
+
+    def update_settings(self, body: Any) -> dict[str, Any]:
+        if not isinstance(body, dict) or set(body) != {"expectedRevision", "policy"}:
+            raise MetadataStoreError("invalid_metadata", "AI settings request fields are invalid", status=400)
+        return self.store.update_agent_settings(
+            "schemii", DEFAULT_AGENT_ID, body["expectedRevision"], body["policy"],
+        )
 
     def provision_chat(self, schema_id: str) -> dict[str, Any]:
         return self.store.provision_chat("schemii", "schema", schema_id)
@@ -38,18 +54,25 @@ class SchemiiMetadataAuthority:
         approvals: dict[str, str],
     ) -> dict[str, Any]:
         enabled = self._capabilities(capabilities)
-        configured = self._approvals(approvals)
+        configured = self._approvals(approvals, optional=True)
+        settings = self.get_settings()
+        policy = effective_chat_snapshot(
+            settings, enabled, target_verified=bool(target), disclosure_class="schema",
+            requested_modes=configured,
+        )
         modes = {
-            capability: APPROVAL_MODES[configured[capability]] if capability in enabled else "deny"
-            for capability in CAPABILITIES
+            capability: _grant_mode(item["effectiveMode"])
+            for capability, item in policy["capabilities"].items()
         }
-        modes["metadata"] = "approval"
-        policy = {"version": 1, "capabilities": sorted(enabled), "approvals": configured}
         self.store.activate_chat(
             chat_id,
             self._metadata_target(target) if target else None,
             policy=policy,
             capabilities=modes,
+            agent_policy_binding={
+                "policyRevisionId": settings["policyRevisionId"],
+                "schemaVersion": settings["schemaVersion"],
+            },
         )
         return self.get_chat(chat_id)
 
@@ -67,6 +90,13 @@ class SchemiiMetadataAuthority:
             for item in self.store.list_grants(chat_id, active_only=True)
         }
         target = chat["target"]
+        if policy.get("version") == 2:
+            legacy = LEGACY_CAPABILITIES["schemii"]
+            enabled = [name for name in CAPABILITIES if policy["capabilities"][legacy[name]]["effectiveMode"] != "disabled"]
+            approvals = {name: policy["capabilities"][legacy[name]]["configuredMode"] for name in CAPABILITIES}
+        else:
+            enabled = [item for item in CAPABILITIES if item in policy["capabilities"]]
+            approvals = dict(policy["approvals"])
         return {
             "id": chat["chatId"],
             "schemaId": chat["resourceId"],
@@ -78,9 +108,11 @@ class SchemiiMetadataAuthority:
                 "namespace": target["namespaceName"],
                 "profileFingerprint": target["profileFingerprint"],
             },
-            "capabilities": list(policy["capabilities"]),
-            "approvals": dict(policy["approvals"]),
+            "capabilities": enabled,
+            "approvals": approvals,
             "policyRevision": current["revision"],
+            "policySnapshot": copy.deepcopy(policy) if policy.get("version") == 2 else None,
+            "agentPolicyRevisionId": current.get("agentPolicyRevisionId"),
             "grants": grants,
         }
 
@@ -93,6 +125,8 @@ class SchemiiMetadataAuthority:
         enabled = self._capabilities(capabilities)
         configured = self._approvals(approvals)
         chat = self.get_chat(chat_id)
+        if chat.get("agentPolicyRevisionId") is not None:
+            raise MetadataStoreError("policy_immutable", "Settings-linked chat policy snapshots are immutable", status=409)
         if not chat["target"] and any(item != "schema" for item in enabled):
             raise MetadataStoreError("chat_target_required", "Start a new target-bound chat to enable data capabilities", status=409)
         modes = {
@@ -103,7 +137,7 @@ class SchemiiMetadataAuthority:
         self.store.update_policy(
             chat_id,
             expected_revision,
-            {"version": 1, "capabilities": sorted(enabled), "approvals": configured},
+            {"version": 1, "capabilities": [item for item in CAPABILITIES if item in enabled], "approvals": configured},
             modes,
         )
         return self.get_chat(chat_id)
@@ -125,8 +159,19 @@ class SchemiiMetadataAuthority:
         schema_concurrency: dict[str, Any],
     ) -> dict[str, Any]:
         capability = policy_binding.get("capability") or "metadata"
+        policy_binding = copy.deepcopy(policy_binding)
+        if policy_binding.get("snapshot", {}).get("version") == 2:
+            chat = self.store.get_chat(chat_id)
+            policy_binding.update({
+                "resource": {
+                    "kind": chat["resourceKind"], "id": chat["resourceId"],
+                    "revision": schema_concurrency.get("revision"),
+                    "layoutToken": schema_concurrency.get("layoutToken"),
+                },
+                "target": copy.deepcopy(authorization_target),
+            })
         binding = {
-            "policyBinding": copy.deepcopy(policy_binding),
+            "policyBinding": policy_binding,
             "authorizationTarget": copy.deepcopy(authorization_target),
             "schemaConcurrency": copy.deepcopy(schema_concurrency),
         }
@@ -134,6 +179,31 @@ class SchemiiMetadataAuthority:
             chat_id, capability, policy_binding["policyRevision"], binding, action,
         )
         return self.proposal(created["proposalId"], chat_id)
+
+    def policy_binding(self, chat: dict[str, Any], action: dict[str, Any], capability: str, *, origin: str = "model") -> dict[str, Any]:
+        snapshot = chat.get("policySnapshot")
+        if snapshot is None:
+            raise MetadataStoreError("policy_not_found", "Settings-linked chat policy snapshot is unavailable", status=409)
+        canonical = LEGACY_CAPABILITIES["schemii"].get(capability, capability)
+        authority = snapshot["capabilities"].get(canonical)
+        if authority is None or authority["effectiveMode"] == "disabled":
+            raise capability_unavailable(
+                "schemii", canonical, agent_id=snapshot["agentId"],
+                current_mode="disabled" if authority is None else authority["effectiveMode"],
+                policy_revision=snapshot["agentPolicyRevision"],
+            )
+        return {
+            "application": "schemii", "agentId": snapshot["agentId"],
+            "agentPolicyRevision": snapshot["agentPolicyRevision"],
+            "agentPolicyRevisionId": snapshot["agentPolicyRevisionId"],
+            "agentPolicySchemaVersion": snapshot["agentPolicySchemaVersion"],
+            "chatPolicyRevision": chat["policyRevision"], "policyRevision": chat["policyRevision"],
+            "canonicalCapability": canonical, "capability": canonical,
+            "configuredMode": authority["configuredMode"], "effectiveMode": authority["effectiveMode"],
+            "safetyFloorReason": authority["safetyFloorReason"],
+            "snapshot": copy.deepcopy(snapshot), "disclosureClass": snapshot["disclosureClass"],
+            "origin": origin,
+        }
 
     def proposal(self, proposal_id: str, chat_id: str) -> dict[str, Any]:
         record = self.store.get_proposal(proposal_id)
@@ -172,7 +242,7 @@ class SchemiiMetadataAuthority:
             expected_policy_revision=policy_revision,
             approved=approved,
             worker_id=self.worker_id,
-            lease_seconds=3600,
+            lease_seconds=self.lease_seconds,
         )
         operation = self.operation(created["operationId"], chat_id)
         operation.update({
@@ -194,6 +264,7 @@ class SchemiiMetadataAuthority:
         return {
             "id": record["operationId"], "proposalId": record["proposalId"], "state": record["state"],
             "result": outcome.get("result"), "error": outcome.get("error"),
+            "reconcileRequired": record["state"] == "uncertain",
         }
 
     def operation_for_proposal(self, proposal_id: str, chat_id: str) -> dict[str, Any] | None:
@@ -201,6 +272,9 @@ class SchemiiMetadataAuthority:
             if operation["proposalId"] == proposal_id:
                 return self.operation(operation["operationId"], chat_id)
         return None
+
+    def consume_bound(self, operation_id: str, name: str, amount: int, evidence: dict[str, Any]) -> dict[str, Any]:
+        return self.store.consume_operation_bound(operation_id, name, amount, evidence)
 
     def finish_operation(self, attempt_id: str, claim_token: str, state: str, *, result=None, error=None) -> dict[str, Any]:
         try:
@@ -261,9 +335,13 @@ class SchemiiMetadataAuthority:
         return set(value)
 
     @staticmethod
-    def _approvals(value: Any) -> dict[str, str]:
+    def _approvals(value: Any, *, optional: bool = False) -> dict[str, str]:
+        if optional and value is None:
+            return {}
         if not isinstance(value, dict) or set(value) != set(CAPABILITIES) or any(mode not in APPROVAL_MODES for mode in value.values()):
             raise MetadataStoreError("invalid_metadata", "AI approval settings are invalid", status=400)
+        if optional and "automatic" in value.values():
+            raise MetadataStoreError("invalid_metadata", "Automatic AI approval is server-owned", status=400)
         return dict(value)
 
 

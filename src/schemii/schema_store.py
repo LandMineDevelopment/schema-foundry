@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .migration_contract import has_full_schema_completeness_proof
+
 from .atomic_json import write_json
 from .file_lock import exclusive_file_lock
 
@@ -634,9 +636,19 @@ class SchemaStore:
 
     def sync_full_migration_result(
         self, schema_id: str, expected_revision: Any, layout_token: Any,
-        refreshed_schema: Any, execution_id: str,
+        refreshed_schema: Any, execution_id: str, completeness_proof: Any = None,
+        live_fingerprint: Any = None, desired_fingerprint: Any = None,
     ) -> dict[str, Any]:
         """Synchronize full semantic state while proving every established layout value is unchanged."""
+        review_proof = {
+            "complete": True, "applyCapable": True, "blockingDifferences": [],
+            "completenessProof": completeness_proof,
+        }
+        if not has_full_schema_completeness_proof(
+            {"completenessProof": completeness_proof}, review_proof,
+            live_fingerprint, desired_fingerprint,
+        ):
+            raise SchemaStoreError(409, "migration_plan_incomplete", "Full-schema synchronization requires explicit completeness proof")
         if not isinstance(execution_id, str):
             raise SchemaStoreError(400, "invalid_schema_binding", "Execution identity is invalid")
         current = self.get(schema_id)

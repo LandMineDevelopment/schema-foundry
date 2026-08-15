@@ -7,6 +7,7 @@
     <title>Schemii</title>
     <link rel="stylesheet" href="styles.css" />
     <link rel="stylesheet" href="/shared/ai-assistant.css" />
+    <link rel="stylesheet" href="/shared/postgres-console.css" />
   </head>
   <body class="app-hydrating">
     <div class="app-shell">
@@ -278,11 +279,11 @@
           <div class="inspector-content" id="inspector-content" hidden></div>
         </aside>
 
-        <aside class="ai-panel" id="ai-panel" aria-label="AI schema assistant" aria-hidden="true" inert>
+        <aside class="ai-panel" id="ai-panel" role="dialog" aria-modal="true" aria-labelledby="ai-panel-title" aria-hidden="true" inert>
           <header class="ai-panel-head">
             <div>
               <span class="eyebrow">Schemii copilot</span>
-              <h2>Schema assistant</h2>
+              <h2 id="ai-panel-title">Schema assistant</h2>
             </div>
             <span class="ai-status-pill" id="ai-status-pill" data-ai="status" role="status" aria-live="polite">Checking</span>
             <button id="ai-history-button" data-ai="history" type="button"></button>
@@ -292,17 +293,8 @@
           </header>
           <div class="ai-context-bar">
             <label>Model<select id="ai-model-select" data-ai="model" disabled><option value="">Connect a provider</option></select></label>
-            <details class="ai-permissions">
-              <summary><span>Permissions</span><strong id="ai-permissions-summary">Metadata only</strong></summary>
-              <fieldset>
-                <label><input id="ai-schema-permission" type="checkbox"> Schema changes <select id="ai-schema-approval" aria-label="Schema changes approval"><option value="every_action">Ask every time</option><option value="once_per_chat">Ask once per chat</option><option value="automatic">Automatic</option></select></label>
-                <label><input id="ai-data-read-permission" type="checkbox"> Data read <select id="ai-data-read-approval" aria-label="Data read approval"><option value="every_action">Ask every time</option><option value="once_per_chat">Ask once per chat</option><option value="automatic">Automatic</option></select></label>
-                <label><input id="ai-write-permission" type="checkbox"> Data write <select id="ai-write-approval" aria-label="Data write approval"><option value="every_action">Ask every time</option><option value="once_per_chat">Ask once per chat</option><option value="automatic">Automatic</option></select></label>
-                <label><input id="ai-raw-read-permission" type="checkbox"> Raw read <select id="ai-raw-read-approval" aria-label="Raw read approval"><option value="every_action">Ask every time</option><option value="once_per_chat">Ask once per chat</option><option value="automatic">Automatic</option></select></label>
-                <label><input id="ai-raw-write-permission" type="checkbox"> Raw write <select id="ai-raw-write-approval" aria-label="Raw write approval"><option value="every_action">Ask every time</option><option value="once_per_chat">Ask once per chat</option><option value="automatic">Automatic</option></select></label>
-              </fieldset>
-              <input id="ai-access-select" data-ai="access" type="hidden" value="metadata">
-            </details>
+            <div class="ai-policy-summary"><span>Permissions</span><strong id="ai-permissions-summary">Loading policy</strong></div>
+            <input id="ai-access-select" data-ai="access" type="hidden" value="metadata">
             <p id="ai-access-disclosure" data-ai="disclosure">Metadata is always included. No additional permissions are enabled.</p>
             <p class="ai-function-caveat" id="ai-function-caveat" hidden>Queries run read-only, but PostgreSQL functions can have side effects outside the database.</p>
           </div>
@@ -615,8 +607,10 @@ ALTER TABLE "public"."books"
         <div class="postgres-status shared-control-status" id="postgres-status" hidden></div>
         <div class="postgres-profiles" id="postgres-profiles-list"></div>
         <div class="postgres-target">
+          <p id="postgres-target-presentation" aria-live="polite">No PostgreSQL target</p>
           <label for="postgres-namespace-select">PostgreSQL namespace</label>
           <select id="postgres-namespace-select" disabled><option value="">Select a connection first</option></select>
+          <label class="checkbox-row"><input id="postgres-system-namespaces" type="checkbox"> Include system namespaces</label>
           <button class="button button-ghost" id="postgres-refresh-button" type="button" disabled>Refresh</button>
         </div>
         <div class="postgres-catalog-summary" id="postgres-catalog-summary" hidden></div>
@@ -652,7 +646,7 @@ ALTER TABLE "public"."books"
         <input id="postgres-profile-password" type="password" autocomplete="current-password" placeholder="Leave blank to keep the stored password" />
         <div class="postgres-form-row shared-field-pair">
           <label>SSL mode<select id="postgres-profile-sslmode"><option>prefer</option><option>require</option><option>verify-ca</option><option>verify-full</option><option>disable</option><option>allow</option></select></label>
-          <label>Timeout (seconds)<input id="postgres-profile-timeout" type="number" min="1" max="120" value="10" /></label>
+          <label>Connection timeout (seconds)<input id="postgres-profile-timeout" type="number" min="1" max="120" value="10" /></label>
         </div>
         <div class="postgres-status shared-control-status" id="postgres-profile-status" hidden></div>
         <div class="dialog-actions shared-form-actions">
@@ -707,7 +701,7 @@ ALTER TABLE "public"."books"
       <div class="standalone-sql-write-confirmation">
         <div class="standalone-sql-warning-mark" aria-hidden="true">!</div>
         <div><span class="eyebrow">Elevated console mode</span><h2 id="standalone-sql-write-title">Enable SQL writes?</h2><p>Enable writes only for <strong id="standalone-sql-write-query">this query</strong> on <strong id="standalone-sql-write-dialog-target">the selected target</strong>.</p></div>
-        <div class="standalone-sql-write-risk"><strong>Successful scripts commit transactionally.</strong><span>Write mode can change data and schema objects using the selected PostgreSQL role. PostgreSQL functions may still cause external or nontransactional side effects. Authorization is temporary and resets when this query is disabled or removed, the Console closes, the target changes, or the page reloads.</span></div>
+        <div class="standalone-sql-write-risk"><strong>Successful scripts commit transactionally.</strong><span>Write mode can change data and schema objects using the selected PostgreSQL role. PostgreSQL functions may still cause external or nontransactional side effects. Confirmation enables durable human write intent for this application; the query-local write toggle still resets when this query is disabled or removed, the Console closes, the target changes, or the page reloads.</span></div>
         <label class="standalone-sql-write-ack"><input id="standalone-sql-write-ack" type="checkbox"/> I understand writes for this query may change PostgreSQL data and schema objects on the exact target shown above.</label>
         <div class="dialog-actions"><button class="button button-ghost" id="cancel-standalone-sql-write" type="button">Keep read-only</button><button class="button button-danger" id="confirm-standalone-sql-write" type="button" disabled>Enable writes</button></div>
       </div>
@@ -775,27 +769,27 @@ ALTER TABLE "public"."books"
       </div>
     </dialog>
 
-    <dialog id="ai-settings-dialog" class="schema-dialog">
+    <dialog id="ai-settings-dialog" class="schema-dialog" aria-labelledby="ai-settings-title">
       <div class="schema-dialog-panel ai-settings-panel">
         <header class="schema-dialog-head">
           <div>
-            <span class="eyebrow">External AI providers</span>
-            <h2>Assistant settings</h2>
-            <p>Prompts and the access context you select are disclosed to the chosen provider. Schemii sends requests only through its local API.</p>
+            <span class="eyebrow">Local AI controls</span>
+            <h2 id="ai-settings-title">AI settings</h2>
+            <p>Permissions and limits are separate from external provider credentials. Opening or saving this dialog never sends a model prompt.</p>
           </div>
           <button class="dialog-close" id="ai-settings-close" data-ai-settings-close type="button" aria-label="Close">×</button>
         </header>
-        <div class="ai-settings-status" id="ai-settings-status" data-ai-settings-status></div>
-        <div class="ai-providers" id="ai-providers" data-ai-settings-body></div>
+        <div class="ai-settings-status" id="ai-settings-status" data-ai-settings-status role="status" aria-live="polite"></div>
+        <div class="ai-settings-body" id="ai-providers" data-ai-settings-body></div>
       </div>
     </dialog>
 
-    <dialog id="ai-history-dialog" class="schema-dialog">
+    <dialog id="ai-history-dialog" class="schema-dialog" aria-labelledby="ai-history-title">
       <div class="schema-dialog-panel ai-history-panel">
         <header class="schema-dialog-head">
           <div>
             <span class="eyebrow">Persistent conversations</span>
-            <h2>Chat history</h2>
+            <h2 id="ai-history-title">Chat history</h2>
             <p>Open a prior conversation to continue it, or permanently delete it.</p>
           </div>
           <button class="dialog-close" id="ai-history-close" data-ai-history-close type="button" aria-label="Close">×</button>
@@ -809,11 +803,13 @@ ALTER TABLE "public"."books"
     <div class="app-tooltip" id="app-tooltip" role="tooltip" hidden></div>
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
     <script src="/shared/api-contracts.js"></script>
+    <script src="/shared/error-diagnostics.js"></script>
     <script src="/shared/session-client.js"></script>
     <script src="/shared/postgres-client.js"></script>
     <script src="/shared/profile-manager.js"></script>
     <script src="/shared/ui-components.js"></script>
     <script src="/shared/ai-assistant.js"></script>
+    <script src="/shared/postgres-console.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

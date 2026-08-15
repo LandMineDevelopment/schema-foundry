@@ -14,7 +14,7 @@ from schemii.postgres_service import PostgresService, PostgresServiceError
 from schemii.server import CONTENT_SECURITY_POLICY, _is_local_request, make_handler
 from tests.http_test_support import FakePostgresService, RunningHttpServer
 from tests.test_ai_postgres_writes import TARGET, WriteConnection
-from tests.fake_metadata_authority import FakeSchemiiAuthority
+from tests.fake_metadata_authority import FakeAiMaintenance, FakeSchemiiAuthority
 
 
 class FakeAIService:
@@ -147,6 +147,7 @@ class ServerTests(unittest.TestCase):
         self.example_installer = FakeExampleInstaller()
         self.store = SchemaStore(Path(self.temporary_directory.name) / "schemas")
         self.authority = FakeSchemiiAuthority()
+        self.ai_maintenance = FakeAiMaintenance(self.authority)
         self.migrations = FakeMigrationCoordinator(self.service, self.store)
         self.service._test_migrations = self.migrations
         handler = make_handler(
@@ -156,6 +157,7 @@ class ServerTests(unittest.TestCase):
             migration_coordinator=self.migrations,
             ai_service=self.ai_service,
             example_installer=self.example_installer,
+            ai_maintenance=self.ai_maintenance,
         )
         self.http = RunningHttpServer(handler)
         self.server = self.http.server
@@ -179,6 +181,9 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn(b"Schemii", body)
         self.assertEqual(headers["Content-Security-Policy"], CONTENT_SECURITY_POLICY)
+        status, body, _ = self.request("/shared/error-diagnostics.js")
+        self.assertEqual(status, 200)
+        self.assertIn(b"formatApiError", body)
         self.assertEqual(self.request("/.git/config")[0], 404)
         self.assertEqual(self.request("/src/schemii/server.py")[0], 404)
 
@@ -188,11 +193,27 @@ class ServerTests(unittest.TestCase):
 
         status, body, _ = self.request("/api/readiness")
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body)["metadata"]["version"], 4)
+        readiness = json.loads(body)
+        self.assertEqual(readiness["metadata"]["version"], 4)
+        self.assertEqual(readiness["components"]["postgresExecution"]["global"], {"active": 0, "capacity": 12})
+        self.assertEqual(readiness["components"]["postgresExecution"]["targetCapacity"], 4)
+        self.assertEqual(readiness["components"]["postgresExecution"]["target"]["active"], 0)
 
         status, body, _ = self.request("/api/schemas/summary", authorized=True)
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body), {"summaries": []})
+
+    def test_ai_settings_route_is_schemii_scoped_and_strict(self):
+        status, body, _ = self.request("/api/ai/settings", authorized=True)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["application"], "schemii")
+
+        status, body, _ = self.request(
+            "/api/ai/settings", "PUT",
+            {"expectedRevision": 1, "policy": {}, "apiKey": "must-not-persist"}, authorized=True,
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(body)["error"]["code"], "invalid_metadata")
 
     def test_ai_chat_uuid_is_distinct_from_external_opencode_session(self):
         self.store.save(
@@ -214,6 +235,49 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         prompt = next(call for call in reversed(self.ai_service.calls) if call[0] == "prompt")
         self.assertEqual(prompt[1], "ses_1")
+
+    def test_ai_session_target_contract_distinguishes_local_and_target_bound_access(self):
+        self.store.save(
+            "schema_local", {"id": "schema_local", "schema": {"projectName": "Local", "tables": [], "relationships": [], "functions": []}},
+            expected_layout_token=None, layout_protocol=None,
+        )
+        self.service.profiles = [{
+            "id": "local", "name": "Local", "host": "127.0.0.1", "port": 5432,
+            "dbname": "demo", "user": "reader", "sslmode": "prefer",
+        }]
+
+        for access_level in ("structured", "write", "rawread", "rawwrite", "schema-structured-write-rawread-rawwrite"):
+            with self.subTest(access_level=access_level):
+                status, body, _ = self.request(
+                    "/api/ai/sessions", "POST",
+                    {"schemaId": "schema_local", "accessLevel": access_level, "model": {}}, authorized=True,
+                )
+                self.assertEqual(status, 400)
+                self.assertEqual(json.loads(body)["error"]["code"], "ai_target_required")
+                self.assertIn("local design is not connected", json.loads(body)["error"]["message"])
+
+        status, body, _ = self.request(
+            "/api/ai/sessions", "POST",
+            {"schemaId": "schema_local", "accessLevel": "schema", "model": {}}, authorized=True,
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(json.loads(body)["target"], {})
+
+        status, body, _ = self.request(
+            "/api/ai/sessions", "POST",
+            {"schemaId": "schema_local", "accessLevel": "structured", "model": {}, "profileId": "local"}, authorized=True,
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(body)["error"]["code"], "ai_target_incomplete")
+
+        status, body, _ = self.request(
+            "/api/ai/sessions", "POST", {
+                "schemaId": "schema_local", "accessLevel": "schema", "model": {},
+                "profileId": "local", "database": "demo", "namespace": "public",
+            }, authorized=True,
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(json.loads(body)["target"]["profileId"], "local")
 
     def test_example_restore_requires_session_and_returns_inert_install_summary(self):
         self.assertEqual(self.request("/api/examples/restore", "POST")[0], 403)
@@ -316,21 +380,21 @@ class ServerTests(unittest.TestCase):
 
     def test_introspection_profile_and_history_routes_forward_contracts(self):
         for path in (
-            "/api/postgres/profiles/local/namespaces",
+            "/api/postgres/profiles/local/namespaces?database=demo",
             "/api/postgres/profiles/local/fingerprint?namespace=public",
             "/api/postgres/history?profileId=local&limit=25",
         ):
             self.assertEqual(self.request(path)[0], 403)
             self.assertEqual(self.request(path, authorized=True)[0], 200)
 
-        self.assertIn(("list_namespaces", "local"), self.service.calls)
+        self.assertIn(("list_namespace_page", "local", "demo", "user", None, None), self.service.calls)
         self.assertIn(("catalog_status", "local", "public"), self.service.calls)
         self.assertIn(("list_history", "local", 25), self.service.calls)
 
         relation_path = "/api/postgres/profiles/local/relations?database=demo&namespace=public"
         self.assertEqual(self.request(relation_path)[0], 403)
         self.assertEqual(self.request(relation_path, authorized=True)[0], 200)
-        self.assertIn(("list_relations", "local", "demo", "public"), self.service.calls)
+        self.assertIn(("list_relations", "local", "demo", "public", {}), self.service.calls)
         inspect_path = "/api/postgres/profiles/local/relation?database=demo&namespace=public&relation=events"
         self.assertEqual(self.request(inspect_path)[0], 403)
         self.assertEqual(self.request(inspect_path, authorized=True)[0], 200)
@@ -338,9 +402,18 @@ class ServerTests(unittest.TestCase):
         verify_path = inspect_path + "&expectedKind=table&expectedFingerprint=" + "a" * 64
         self.assertEqual(self.request(verify_path, authorized=True)[0], 200)
         self.assertIn(("inspect_relation", "local", "demo", "public", "events", "table", "a" * 64), self.service.calls)
+        lineage_path = "/api/postgres/profiles/local/lineage?database=demo&namespace=public&relation=events&direction=dependents&expectedKind=table&expectedFingerprint=" + "a" * 64
+        self.assertEqual(self.request(lineage_path, authorized=True)[0], 200)
+        self.assertIn(("list_relation_lineage", "local", "demo", "public", "events", "dependents", {
+            "expected_kind": "table", "expected_fingerprint": "a" * 64, "page_size": None, "cursor": None,
+        }), self.service.calls)
         for route in ("preview", "verify", "query", "detail"):
             path = f"/api/postgres/profiles/local/relation/{route}"
-            self.assertEqual(self.request(path, "POST", {}, authorized=True)[0], 404)
+            status, body, _ = self.request(path, "POST", {}, authorized=True)
+            error = json.loads(body)["error"]
+            self.assertEqual((status, error["code"]), (403, "capability_unavailable"))
+            self.assertEqual(error["details"]["requiredCapability"], "relation_query")
+            self.assertIn("Schemer", error["details"]["safeAlternative"])
 
     def test_test_introspect_preview_and_apply_routes_forward_contracts(self):
         schema = {"projectName": "demo.public", "tables": [], "relationships": [], "functions": []}
@@ -739,6 +812,66 @@ class ServerTests(unittest.TestCase):
         reconciled = json.loads(self.request(path + "/reconcile", "POST", execute_body, authorized=True)[1])["operation"]
         self.assertEqual(reconciled["id"], operation["id"])
 
+    def test_ai_execution_lease_loss_is_uncertain_and_does_not_replay(self):
+        self.store.save(
+            "schema_one", {"id": "schema_one", "schema": {"projectName": "Demo", "tables": [], "relationships": [], "functions": []}},
+            expected_layout_token=None, layout_protocol=None,
+        )
+        self.ai_service.prompt_response = {
+            "text": "Review.", "parts": [],
+            "actions": [{"type": "connection_setup", "name": "Demo", "host": "127.0.0.1", "port": 5432, "database": "demo", "user": "reader", "sslmode": "prefer", "requiresPasswordEntry": True, "requiresConfirmation": True}],
+        }
+        message = {"text": "Connect", "model": {"providerID": "anthropic", "modelID": "claude"}, "schemaId": "schema_one", "accessLevel": "schema"}
+        proposal = json.loads(self.request("/api/ai/sessions/ses_1/messages", "POST", message, authorized=True)[1])["proposals"][0]
+        self.ai_maintenance.lost = True
+        path = f"/api/ai/sessions/ses_1/proposals/{proposal['proposalId']}/execute"
+        execute = {"schemaId": "schema_one", "accessLevel": "schema", "policyRevision": 1, "confirmation": {"accepted": True, "mode": "every_action"}}
+        status, body, _ = self.request(path, "POST", execute, authorized=True)
+        operation = json.loads(body)["error"]["details"]["operation"]
+        self.assertEqual((status, operation["state"]), (409, "uncertain"))
+        repeated = json.loads(self.request(path, "POST", execute, authorized=True)[1])["operation"]
+        self.assertEqual((repeated["id"], repeated["state"]), (operation["id"], "uncertain"))
+
+    def test_structured_read_proposal_is_enriched_from_exact_server_source(self):
+        self.store.save(
+            "schema_one", {"id": "schema_one", "schema": {"projectName": "Demo", "tables": [], "relationships": [], "functions": []}},
+            expected_layout_token=None, layout_protocol=None,
+        )
+        self.service.profiles = [{
+            "id": "local", "name": "Local", "host": "127.0.0.1", "port": 5432,
+            "dbname": "demo", "user": "reader", "sslmode": "prefer",
+        }]
+        self.service.descriptor = {
+            "profileId": "local", "database": "demo", "namespace": "public", "relation": "events",
+            "kind": "view", "fingerprint": "a" * 64,
+            "columns": [{"name": "id", "type": "bigint", "nullable": False, "ordinal": 1, "suggestions": ["identifier"]}],
+        }
+        self.service.preview_rows = [{"id": 1}]
+        self.ai_service.prompt_response = {"text": "Review.", "parts": [], "actions": [{
+            "type": "data_read", "profileId": "local", "namespace": "public", "relation": "events",
+            "offset": 0, "limit": 25, "purpose": "Inspect events", "readOnly": True, "requiresConfirmation": True,
+        }]}
+        message = {
+            "text": "Inspect events", "model": {}, "schemaId": "schema_one", "accessLevel": "structured",
+            "profileId": "local", "database": "demo", "namespace": "public",
+        }
+        status, body, _ = self.request("/api/ai/sessions/ses_1/messages", "POST", message, authorized=True)
+        self.assertEqual(status, 200)
+        proposal = json.loads(body)["proposals"][0]
+        action = proposal["action"]
+        self.assertEqual(action["source"], {
+            "profileId": "local", "database": "demo", "namespace": "public", "relation": "events",
+            "kind": "view", "fingerprint": "a" * 64,
+            "columns": [{"name": "id", "type": "bigint", "nullable": False, "ordinal": 1}],
+        })
+        self.assertEqual(action["profileFingerprint"], self.service.profile_context_fingerprint("local"))
+        execute = {"policyRevision": 1, "confirmation": {"accepted": True, "mode": "every_action"}}
+        operation = json.loads(self.request(
+            f"/api/ai/sessions/ses_1/proposals/{proposal['proposalId']}/execute", "POST", execute, authorized=True,
+        )[1])["operation"]
+        self.assertEqual(operation["state"], "succeeded")
+        self.assertEqual(self.service.calls[-1], ("preview_relation_rows", "local", action["source"], 0, 25))
+
     def test_sibling_schema_proposals_are_one_atomic_batch(self):
         saved = self.store.save(
             "schema_one", {"id": "schema_one", "schema": {"projectName": "Demo", "tables": [{
@@ -831,10 +964,11 @@ class ServerTests(unittest.TestCase):
         _, body, _ = self.request("/api/ai/sessions/ses_1/messages", "POST", message, authorized=True)
         proposal = json.loads(body)["proposals"][0]
         self.assertIn("profileFingerprint", proposal["action"])
+        self.assertRegex(proposal["action"]["profileFingerprint"], r"^[0-9a-f]{64}$")
         path = f"/api/ai/sessions/ses_1/proposals/{proposal['proposalId']}/execute"
         operation = json.loads(self.request(path, "POST", execute, authorized=True)[1])["operation"]
         self.assertEqual(operation["result"]["command"]["type"], "select_postgres_profile")
-        self.assertIn(("list_namespaces", "local"), self.service.calls)
+        self.assertIn(("namespace_exists", "local", "demo", "public"), self.service.calls)
 
         self.authority.chats.pop("ses_1", None)
         self.ai_service.session_title = "Demo chat"
@@ -860,8 +994,52 @@ class ServerTests(unittest.TestCase):
         apply_path = f"/api/ai/sessions/ses_1/proposals/{apply_proposal['proposalId']}/execute"
         applied = json.loads(self.request(apply_path, "POST", execute, authorized=True)[1])["operation"]
         self.assertEqual(applied["result"]["kind"], "migration_applied")
-        self.assertTrue(any(call[0] == "apply_ai_migration" and call[-1] is True for call in self.service.calls))
+        apply_call = next(call for call in self.service.calls if call[0] == "apply_ai_migration")
+        self.assertTrue(apply_call[-3])
+        self.assertEqual(apply_call[-2], "c" * 64)
+        self.assertIsNone(apply_call[-1])
         self.assertTrue(any(call[0] == "preview_ai_migration" and call[2:5] == ("local", "demo", "public") for call in self.service.calls))
+
+    def test_ai_incomplete_migration_preview_has_no_apply_proposal(self):
+        self.store.save(
+            "schema_one", {"id": "schema_one", "schema": {
+                "projectName": "Demo", "tables": [], "relationships": [], "functions": [],
+                "postgres": {"sourceProfileId": "local", "database": "demo", "namespace": "public"},
+            }}, expected_layout_token=None, layout_protocol=None,
+        )
+        self.service.profiles = [{
+            "id": "local", "name": "Local", "host": "127.0.0.1", "port": 5432,
+            "dbname": "demo", "user": "reader", "sslmode": "prefer",
+        }]
+        self.ai_service.session_title = "Demo chat"
+        self.ai_service.prompt_response = {"text": "Review.", "parts": [], "actions": [{
+            "type": "migration_preview", "profileId": "local", "namespace": "public",
+            "destructivePolicy": "reject", "purpose": "Review", "readOnly": True, "requiresConfirmation": True,
+        }]}
+
+        def incomplete_preview(*args):
+            return {
+                "id": None, "previewOnly": True, "steps": [], "warnings": [],
+                "blockingDifferences": [{"code": "destructive_omitted", "message": "Omitted drop", "nextAction": "Enable destructive changes."}],
+                "complete": False, "applyCapable": False, "destructive": False,
+            }
+
+        self.service.preview_ai_migration = incomplete_preview
+        message = {
+            "text": "Preview migration", "model": {}, "schemaId": "schema_one", "accessLevel": "schema-read-write",
+            "profileId": "local", "database": "demo", "namespace": "public",
+        }
+        execute = {
+            "schemaId": "schema_one", "accessLevel": "schema-read-write", "profileId": "local", "database": "demo",
+            "namespace": "public", "policyRevision": 1, "confirmation": {"accepted": True, "mode": "every_action"},
+        }
+        proposal = json.loads(self.request("/api/ai/sessions/ses_1/messages", "POST", message, authorized=True)[1])["proposals"][0]
+        operation = json.loads(self.request(
+            f"/api/ai/sessions/ses_1/proposals/{proposal['proposalId']}/execute", "POST", execute, authorized=True,
+        )[1])["operation"]
+
+        self.assertFalse(operation["result"]["plan"]["applyCapable"])
+        self.assertIsNone(operation["result"]["applyProposal"])
 
     def test_ai_insert_uses_confirmed_preview_then_server_issued_apply(self):
         saved = self.store.save(
@@ -895,7 +1073,8 @@ class ServerTests(unittest.TestCase):
         preview_operation = json.loads(self.request(preview_path, "POST", execute, authorized=True)[1])["operation"]
         self.assertEqual(preview_operation["result"]["kind"], "postgres_write_plan")
         preview_call = next(call for call in self.service.calls if call[0] == "preview_ai_insert_rows")
-        self.assertEqual(set(preview_call[-1]), {"schemaId", "revision", "layoutToken"})
+        self.assertEqual(set(preview_call[-2]), {"schemaId", "revision", "layoutToken"})
+        self.assertIsNone(preview_call[-1])
         apply_proposal = preview_operation["result"]["applyProposal"]
         self.assertEqual(apply_proposal["action"]["type"], "postgres_write_apply")
         self.assertNotIn("rows", apply_proposal["action"])
@@ -931,13 +1110,14 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(proposal["action"]["sql"], sql)
         operation = json.loads(self.request(f"/api/ai/sessions/ses_1/proposals/{proposal['proposalId']}/execute", "POST", execute, authorized=True)[1])["operation"]
         self.assertEqual(operation["state"], "succeeded")
-        grant_call = next(call for call in self.service.calls if call[0] == "create_console_write_grant")
         execution_call = next(call for call in self.service.calls if call[0] == "execute_console")
-        revoke_call = next(call for call in self.service.calls if call[0] == "revoke_console_write_grant")
-        self.assertTrue(grant_call[2]["confirmed"])
         self.assertEqual(execution_call[2]["sql"], sql)
-        self.assertEqual(execution_call[2]["mode"], "write")
-        self.assertEqual(revoke_call[2], execution_call[2]["writeGrantId"])
+        self.assertEqual(execution_call[2]["mode"], "managed")
+        self.assertIsNone(execution_call[2]["settingsRevision"])
+        self.assertEqual(execution_call[2]["profileFingerprint"], self.service.profile_context_fingerprint("local"))
+        self.assertTrue(execution_call[5].allow_write)
+        self.assertFalse(execution_call[5].human_write_intent)
+        self.assertFalse(any(call[0] in {"create_console_write_grant", "revoke_console_write_grant"} for call in self.service.calls))
 
     def test_ai_pre_mutation_service_failure_is_failed_not_uncertain(self):
         self.test_ai_insert_uses_confirmed_preview_then_server_issued_apply()

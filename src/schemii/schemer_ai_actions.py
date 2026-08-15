@@ -37,7 +37,7 @@ def normalize_schemer_action(action: Any, access: str) -> dict[str, Any]:
             source = action.get("source")
             if not isinstance(source, dict) or set(source) != {"profileId", "database", "namespace", "relation", "kind", "fingerprint"}:
                 raise ValueError("source is invalid")
-            if source.get("kind") not in {"table", "view", "materialized_view"} or not isinstance(source.get("fingerprint"), str) or not re.fullmatch(r"[0-9a-f]{64}", source["fingerprint"]):
+            if source.get("kind") not in {"table", "partitioned_table", "view", "materialized_view", "foreign_table"} or not isinstance(source.get("fingerprint"), str) or not re.fullmatch(r"[0-9a-f]{64}", source["fingerprint"]):
                 raise ValueError("source is invalid")
             result["source"] = {"profileId": identifier(source["profileId"]), "database": postgres_name(source["database"]), "namespace": postgres_name(source["namespace"]), "relation": postgres_name(source["relation"]), "kind": source["kind"], "fingerprint": source["fingerprint"]}
             if not isinstance(action.get("query"), dict):

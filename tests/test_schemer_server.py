@@ -2,6 +2,7 @@ import json
 import sys
 import tempfile
 import unittest
+import urllib.parse
 from pathlib import Path
 
 
@@ -13,11 +14,14 @@ from schemii.dashboard_store import DashboardStore
 from schemii.schemer_examples import MERCURY_PROFILE_ID
 from schemii.schemer_server import _ai_catalog_sources, make_handler
 from tests.http_test_support import FakePostgresService, RunningHttpServer
-from tests.fake_metadata_authority import FakeSchemiiAuthority
+from tests.fake_metadata_authority import FakeAiMaintenance, FakeSchemiiAuthority
 from tests.test_server import FakeAIService
+from tests.capability_test_support import capabilities_for_formatted_type, column
 
 
 class FakeSchemerAuthority(FakeSchemiiAuthority):
+    settings_application = "schemer"
+
     def __init__(self):
         super().__init__()
         self.chats.clear()
@@ -69,7 +73,7 @@ class SchemerServerTests(unittest.TestCase):
             relations=[{"name": "orders", "kind": "table"}],
             descriptor={
                 "profileId": "shared", "database": "schemii", "namespace": "bookstore", "relation": "orders",
-                "kind": "table", "columns": [{"name": "id", "type": "bigint", "nullable": False, "ordinal": 1, "suggestions": ["dimension", "identifier"]}],
+                "kind": "table", "snapshotVersion": 2, "columns": [{**column("id", "bigint", False, 1, oid=20, category="N", name="int8", numeric=True, pattern=False, aggregates=("count", "sum", "average", "minimum", "maximum")), "suggestions": ["dimension", "identifier"]}],
                 "fingerprint": "a" * 64,
                 "definition": {"status": "unavailable", "reason": "not_supported"},
             },
@@ -80,6 +84,7 @@ class SchemerServerTests(unittest.TestCase):
         self.dashboard_store.initialize_once()
         self.ai_service = FakeAIService()
         self.authority = FakeSchemerAuthority()
+        self.ai_maintenance = FakeAiMaintenance(self.authority)
         handler = make_handler(
             ROOT / "src" / "schemii" / "schemer_web",
             self.service,
@@ -88,6 +93,7 @@ class SchemerServerTests(unittest.TestCase):
             server_id="schemer-server",
             ai_authority=self.authority,
             ai_service=self.ai_service,
+            ai_maintenance=self.ai_maintenance,
         )
         self.assertTrue(issubclass(handler, PostgresHttpMixin))
         self.http = RunningHttpServer(handler)
@@ -98,6 +104,15 @@ class SchemerServerTests(unittest.TestCase):
 
     def request(self, path, method="GET", payload=None, authorized=False):
         return self.http.request(path, method, payload, authorized=authorized)
+
+    def test_ai_settings_route_is_schemer_scoped(self):
+        status, body, _ = self.request("/api/ai/settings", authorized=True)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["application"], "schemer")
+
+        status, body, _ = self.request("/api/ai/settings", "PUT", {"expectedRevision": 9, "policy": {}}, authorized=True)
+        self.assertEqual(status, 409)
+        self.assertEqual(json.loads(body)["error"]["code"], "policy_changed")
 
     def test_ai_widget_rename_executes_server_side_and_reconciles(self):
         record = self.dashboard_store.get("dashboard_mercury")
@@ -126,12 +141,29 @@ class SchemerServerTests(unittest.TestCase):
         self.assertTrue(operation["result"]["dashboardId"].startswith("dashboard_"))
         self.assertEqual(self.dashboard_store.get(operation["result"]["dashboardId"])["dashboard"]["title"], "Operations")
 
+    def test_ai_lease_loss_after_dashboard_write_is_uncertain_and_not_replayed(self):
+        self.authority.put_chat("ses_1", "dashboard_mercury", "ses_1", access_level="metadata")
+        self.ai_service.prompt_response = {"text": "Review.", "parts": [], "actions": [{"type": "dashboard_create", "title": "Lease Lost", "requiresConfirmation": True}]}
+        _, body, _ = self.request("/api/ai/sessions/ses_1/messages", "POST", {"text": "Create it", "model": {}}, authorized=True)
+        proposal = json.loads(body)["proposals"][0]
+        path = f"/api/ai/sessions/ses_1/proposals/{proposal['proposalId']}/execute"
+        execute = {"confirmation": {"accepted": True, "mode": "every_action"}}
+        self.ai_maintenance.lost = True
+        status, body, _ = self.request(path, "POST", execute, authorized=True)
+        operation = json.loads(body)["error"]["details"]["operation"]
+        self.assertEqual((status, operation["state"]), (409, "uncertain"))
+        dashboards = [item for item in self.dashboard_store.list() if item["dashboard"]["title"] == "Lease Lost"]
+        self.assertEqual(len(dashboards), 1)
+        repeated = json.loads(self.request(path, "POST", execute, authorized=True)[1])["operation"]
+        self.assertEqual(repeated["state"], "uncertain")
+        self.assertEqual(len([item for item in self.dashboard_store.list() if item["dashboard"]["title"] == "Lease Lost"]), 1)
+
     def test_configured_widget_builder_sanitizes_catalog_columns(self):
         from schemii.schemer_server import _configured_ai_widget
         query = {"version": 2, "dimensions": [], "measures": [{"id": "measure_orders", "label": "Orders", "column": None, "aggregation": "count_rows", "distinct": False, "nullBehavior": "preserve", "numberFormat": {"style": "integer"}}], "filters": [], "sort": [], "limit": 100}
         action = {"title": "Orders", "source": {"profileId": "shared", "database": "schemii", "namespace": "bookstore", "relation": "orders", "kind": "table", "fingerprint": "a" * 64}, "query": query, "visualizationMode": "kpi"}
         widget = _configured_ai_widget(self.service, action, "operation_widget", 1)
-        self.assertEqual(set(widget["configuration"]["source"]["columns"][0]), {"name", "type", "nullable", "ordinal"})
+        self.assertEqual(set(widget["configuration"]["source"]["columns"][0]), {"name", "type", "nullable", "ordinal", "capabilities"})
         record = self.dashboard_store.get("dashboard_mercury")
         saved = self.dashboard_store.apply_ai_mutation(record["id"], "operation_widget", record["revision"], {"type": "widget_create", "title": "Orders"}, widget)
         self.assertEqual(saved["kind"], "dashboard_saved")
@@ -149,7 +181,10 @@ class SchemerServerTests(unittest.TestCase):
         self.assertEqual(json.loads(body), {"token": "session-token", "serverId": "schemer-server"})
         status, body, _ = self.request("/api/readiness")
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body)["metadata"]["ok"], True)
+        readiness = json.loads(body)
+        self.assertEqual(readiness["metadata"]["ok"], True)
+        self.assertEqual(readiness["components"]["postgresExecution"]["classes"]["read"]["capacity"], 8)
+        self.assertEqual(readiness["components"]["postgresExecution"]["targets"], {})
         status, body, _ = self.request("/api/dashboards/summary", authorized=True)
         self.assertEqual(status, 200)
         summary = json.loads(body)["summaries"][0]
@@ -161,7 +196,7 @@ class SchemerServerTests(unittest.TestCase):
         status, body, _ = self.request("/api/postgres/profiles", authorized=True)
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["profiles"][0]["id"], "shared")
-        self.assertEqual(self.request("/api/postgres/profiles/shared/namespaces", authorized=True)[0], 200)
+        self.assertEqual(self.request("/api/postgres/profiles/shared/namespaces?database=schemii", authorized=True)[0], 200)
         relation_path = "/api/postgres/profiles/shared/relations?database=schemii&namespace=bookstore"
         status, body, _ = self.request(relation_path, authorized=True)
         self.assertEqual(status, 200)
@@ -174,8 +209,8 @@ class SchemerServerTests(unittest.TestCase):
         self.assertEqual(json.loads(body)["definition"], {"status": "unavailable", "reason": "not_supported"})
         self.assertNotIn("password", body.decode())
         self.assertEqual(self.request("/api/postgres/profiles/shared/test", "POST", {}, True)[0], 200)
-        self.assertIn(("list_namespaces", "shared"), self.service.calls)
-        self.assertIn(("list_relations", "shared", "schemii", "bookstore"), self.service.calls)
+        self.assertIn(("list_namespace_page", "shared", "schemii", "user", None, None), self.service.calls)
+        self.assertIn(("list_relations", "shared", "schemii", "bookstore", {}), self.service.calls)
         self.assertIn(("inspect_relation", "shared", "schemii", "bookstore", "orders", None, None), self.service.calls)
         preview_source = {
             "profileId": "shared", "database": "schemii", "namespace": "bookstore", "relation": "orders",
@@ -280,7 +315,7 @@ class SchemerServerTests(unittest.TestCase):
         self.assertEqual(self.request(saved_detail_path, "POST", {**saved_detail, "query": query}, True)[0], 400)
         self.assertIn(("test_profile", "shared"), self.service.calls)
 
-    def test_schema_design_routes_are_not_exposed(self):
+    def test_schema_design_routes_report_the_application_policy_limitation(self):
         routes = (
             ("/api/postgres/profiles/shared/fingerprint?namespace=bookstore", "GET"),
             ("/api/postgres/profiles/shared/data?namespace=bookstore&table=orders", "GET"),
@@ -288,7 +323,12 @@ class SchemerServerTests(unittest.TestCase):
         )
         for path, method in routes:
             with self.subTest(path=path):
-                self.assertEqual(self.request(path, method, {}, True)[0], 404)
+                status, body, _ = self.request(path, method, {}, True)
+                error = json.loads(body)["error"]
+                self.assertEqual((status, error["code"]), (403, "capability_unavailable"))
+                self.assertEqual(error["details"]["application"], "schemer")
+                self.assertEqual(error["details"]["requiredCapability"], "schema")
+                self.assertIn("Schemii", error["details"]["safeAlternative"])
 
     def test_read_sql_route_is_strict_and_uses_schemer_policy(self):
         path = "/api/postgres/profiles/shared/sql"
@@ -365,6 +405,31 @@ class SchemerServerTests(unittest.TestCase):
         }
         self.assertEqual(self.request(path, "POST", {**base, "queryResult": query_result}, True)[0], 400)
 
+    def test_ai_data_history_is_scoped_to_the_exact_target(self):
+        fingerprint = self.service.profile_context_fingerprint("shared")
+        target = {
+            "profileId": "shared", "database": "schemii", "namespace": "bookstore",
+            "profileFingerprint": fingerprint,
+        }
+        self.authority.put_chat("ses_1", "dashboard_mercury", "ses_1", target, "data")
+
+        correct = urllib.parse.urlencode({
+            "dashboardId": "dashboard_mercury", "accessLevel": "data",
+            "profileId": "shared", "database": "schemii", "namespace": "bookstore",
+        })
+        wrong = urllib.parse.urlencode({
+            "dashboardId": "dashboard_mercury", "accessLevel": "data",
+            "profileId": "shared", "database": "schemii", "namespace": "public",
+        })
+
+        status, body, _ = self.request(f"/api/ai/sessions?{correct}", authorized=True)
+        self.assertEqual(status, 200)
+        self.assertEqual([item["id"] for item in json.loads(body)["sessions"]], ["ses_1"])
+        self.assertEqual(self.request(f"/api/ai/sessions?{wrong}", authorized=True)[0], 200)
+        self.assertEqual(json.loads(self.request(f"/api/ai/sessions?{wrong}", authorized=True)[1])["sessions"], [])
+        self.assertEqual(self.request(f"/api/ai/sessions/ses_1/messages?{wrong}", authorized=True)[0], 409)
+        self.assertEqual(self.request(f"/api/ai/sessions/ses_1/messages?{correct}", authorized=True)[0], 200)
+
     def test_profile_writes_use_shared_router_and_redact_password(self):
         profile = {
             "name": "Analytics", "host": "postgres", "port": 5432, "dbname": "schemii",
@@ -413,7 +478,8 @@ class SchemerServerTests(unittest.TestCase):
         }]
         self.service.descriptor = {
             "profileId": MERCURY_PROFILE_ID, "database": "schemii", "namespace": "bookstore",
-            "relation": "order_summary", "kind": "view", "fingerprint": "c" * 64, "columns": columns,
+            "relation": "order_summary", "kind": "view", "fingerprint": "c" * 64, "snapshotVersion": 2,
+            "columns": [{**item, "capabilities": capabilities_for_formatted_type(item["type"])} for item in columns],
             "definition": {"status": "available", "sql": "SELECT ..."},
         }
         record = self.dashboard_store.get("dashboard_mercury")
@@ -426,6 +492,7 @@ class SchemerServerTests(unittest.TestCase):
         restored = json.loads(body)
         self.assertEqual(restored["dashboard"]["widgets"][0]["layout"]["desktop"]["x"], 1)
         self.assertEqual({widget["kind"] for widget in restored["dashboard"]["widgets"]}, {"aggregate_report"})
+        self.assertTrue(all(widget["configuration"]["source"]["snapshotVersion"] == 2 for widget in restored["dashboard"]["widgets"][:6]))
         self.assertIn(("inspect_relation", MERCURY_PROFILE_ID, "schemii", "bookstore", "order_summary", "view", None), self.service.calls)
         self.assertEqual(self.request(path, "POST", {"expectedRevision": record["revision"]}, True)[0], 409)
 

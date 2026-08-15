@@ -22,6 +22,8 @@ const elements = {
   sourceName: document.querySelector("#source-name"),
   sourceDetail: document.querySelector("#source-detail"),
   namespaceSelect: document.querySelector("#namespace-select"),
+  toolbarTargetPresentation: document.querySelector("#toolbar-target-presentation"),
+  systemNamespaces: document.querySelector("#system-namespaces"),
   workspace: document.querySelector(".dashboard-workspace"),
   canvas: document.querySelector("#dashboard-canvas"),
   dashboardList: document.querySelector("#dashboard-list"),
@@ -77,6 +79,8 @@ let sessionToken = null;
 let profiles = [];
 let profilesLoading = null;
 let selectedProfileId = null;
+let toolbarTargetExplicit = false;
+let toolbarTargetVerifiedAt = null;
 let selectedRelationIdentity = null;
 let editedWidgetId = null;
 let relationInspectionGeneration = 0;
@@ -129,6 +133,31 @@ const sessionClient = window.SchemiiShared.createSessionClient({
 });
 const postgres = window.SchemiiShared.createPostgresClient({ sessionClient });
 const profileRepository = window.SchemiiShared.createProfileRepository({ postgresClient: postgres });
+const sharedConsole = window.SchemiiShared.createPostgresConsole({
+  button: document.querySelector("#postgres-console-button"),
+  postgresClient: postgres,
+  getTarget: () => {
+    const profile = profiles.find(item => item.id === selectedProfileId);
+    const namespace = elements.namespaceSelect.value;
+    return profile && namespace && profile.contextFingerprint ? {
+      profileId: profile.id, profile: profile.name || profile.id, database: profile.dbname,
+      namespace, profileFingerprint: profile.contextFingerprint,
+    } : null;
+  },
+  targetControls: [elements.namespaceSelect, document.querySelector("#connection-list")],
+  onCommittedWrite: async () => {
+    relationCatalogGeneration += 1;
+    relationInspectionGeneration += 1;
+    sourceVerificationGeneration += 1;
+    queryExecutionGeneration += 1;
+    sourceVerification.clear();
+    widgetQueryResults.clear();
+    widgetTemporalSeries.clear();
+    widgetQueryExecutionTokens.clear();
+    widgetTablePages.clear();
+    detailRequestDedupe.clear();
+  },
+});
 const profileForm = window.SchemiiShared.createProfileForm({
   fields: {
     id: document.querySelector("#profile-id"),
@@ -377,6 +406,7 @@ function renderProfiles() {
     button.append(name, detail);
     button.addEventListener("click", async () => {
       selectedProfileId = profile.id;
+      toolbarTargetExplicit = true;
       fillProfileForm(profile);
       renderProfiles();
       await selectProfile(profile);
@@ -390,7 +420,10 @@ async function loadProfiles() {
   profilesLoading = (async () => {
     try {
       profiles = await profileRepository.list();
-      if (!profiles.some(profile => profile.id === selectedProfileId)) selectedProfileId = profiles[0]?.id ?? null;
+      if (!profiles.some(profile => profile.id === selectedProfileId)) {
+        selectedProfileId = profiles[0]?.id ?? null;
+        toolbarTargetExplicit = false;
+      }
       renderProfiles();
       const selected = profiles.find(profile => profile.id === selectedProfileId);
       if (selected) {
@@ -436,10 +469,32 @@ function exactSourceIdentity(descriptor) {
     relation: descriptor.relation,
     kind: descriptor.kind,
     fingerprint: descriptor.fingerprint,
+    snapshotVersion: descriptor.snapshotVersion,
     columns: descriptor.columns.map(column => ({
-      name: column.name, type: column.type, nullable: column.nullable, ordinal: column.ordinal
+      name: column.name, type: column.type, nullable: column.nullable, ordinal: column.ordinal,
+      capabilities: clone(column.capabilities)
     }))
   };
+}
+
+function schemerTargetPresentation(source, state, verification = null) {
+  const profile = profiles.find(item => item.id === source?.profileId);
+  return window.SchemiiShared.targetPresentation({
+    state, profileName: profile?.name, profileId: source?.profileId, database: source?.database,
+    namespace: source?.namespace, relation: source?.relation, verifiedAt: verification?.verifiedAt,
+    verificationSource: state === "verified" ? verification?.verificationSource || "PostgreSQL relation verification" : state === "linked" ? "Saved dashboard widget" : toolbarTargetVerifiedAt ? "PostgreSQL namespace catalog" : "Automatic workspace suggestion",
+  });
+}
+
+function renderToolbarTarget() {
+  const profile = profiles.find(item => item.id === selectedProfileId);
+  const namespace = elements.namespaceSelect.value;
+  if (!profile || !namespace) {
+    elements.toolbarTargetPresentation.textContent = "No complete PostgreSQL target";
+    return;
+  }
+  const target = schemerTargetPresentation({ profileId: profile.id, database: profile.dbname, namespace }, toolbarTargetExplicit ? "selected" : "suggested", { verifiedAt: toolbarTargetVerifiedAt });
+  elements.toolbarTargetPresentation.textContent = window.SchemiiShared.formatTargetPresentation(target);
 }
 
 function sourceChangeMessage(result) {
@@ -629,61 +684,55 @@ function temporalSeriesEligible(source, query, visualization) {
   const projected = queryForVisualization(query, presentation);
   if (projected.dimensions.length !== 1 || !projected.measures.length) return false;
   const sourceColumn = source?.columns?.find(column => column.name === projected.dimensions[0].column);
-  return /^(?:date|timestamp(?:\(\d+\))?(?: with(?:out)? time zone)?|timestamptz)$/i.test(sourceColumn?.type ?? "");
+  return sourceColumn?.capabilities?.temporal !== "none" && Boolean(sourceColumn?.capabilities?.temporal);
 }
 
-function numericPostgresType(type) {
-  return ["smallint", "integer", "bigint", "decimal", "numeric", "real", "double precision", "smallserial", "serial", "bigserial"].some(prefix => type.toLowerCase() === prefix || type.toLowerCase().startsWith(`${prefix}(`));
+function numericPostgresType(column) {
+  return column?.capabilities?.numeric === true;
 }
 
-function sumPostgresType(type) {
-  return numericPostgresType(type) || ["interval", "money"].includes(type.toLowerCase());
+function aggregateCapability(column, name) {
+  return column?.capabilities?.aggregates?.find(item => item.name === name) ?? null;
 }
 
-function averagePostgresType(type) {
-  return numericPostgresType(type) || type.toLowerCase() === "interval";
+function sumPostgresType(column) {
+  return Boolean(aggregateCapability(column, "sum"));
 }
 
-function orderablePostgresType(type) {
-  return !["boolean", "json", "jsonb", "xml", "box", "circle", "line", "lseg", "path", "point", "polygon"].includes(type.toLowerCase()) && !/^bit(?: varying)?(?:\([^)]*\))?$/.test(type.toLowerCase());
+function averagePostgresType(column) {
+  return Boolean(aggregateCapability(column, "average"));
 }
 
-function comparablePostgresType(type) {
-  return !["json", "xml", "box", "circle", "line", "lseg", "path", "point", "polygon"].includes(type.toLowerCase());
+function orderablePostgresType(column) {
+  return column?.capabilities?.sortable === true;
 }
 
-function textPostgresType(type) {
-  return /^(text|character varying(?:\([^)]*\))?|character(?:\([^)]*\))?|varchar(?:\([^)]*\))?|char(?:\([^)]*\))?|citext|name)$/i.test(type);
+function comparablePostgresType(column) {
+  return column?.capabilities?.groupable === true;
 }
 
-function temporalPostgresType(type) {
-  return /^(date|time(?:stamp)?(?: with(?:out)? time zone)?|interval)$/i.test(type);
-}
-
-function filterInputType(type) {
-  const normalized = type.toLowerCase();
-  if (normalized === "date") return "date";
-  if (normalized.startsWith("timestamp")) return "datetime-local";
-  if (normalized.startsWith("time")) return "text";
-  if (numericPostgresType(type)) return "number";
+function filterInputType(column) {
+  if (column?.capabilities?.temporal === "date") return "date";
+  if (["timestamp", "timestamp_tz"].includes(column?.capabilities?.temporal)) return "datetime-local";
+  if (numericPostgresType(column)) return "number";
   return "text";
 }
 
-function queryFilterInput(value, onChange, columnType) {
-  const inputType = filterInputType(columnType);
+function queryFilterInput(value, onChange, column) {
+  const inputType = filterInputType(column);
   if (inputType === "date") return queryCalendarInput(value, onChange);
   if (inputType === "datetime-local") return queryCalendarInput(value, onChange, true);
   return queryInput(value, onChange, inputType);
 }
 
 function filterOptionsForColumn(column) {
-  const nulls = [["is_null", "Is NULL"], ["is_not_null", "Is not NULL"]];
-  const equality = [["eq", "Equals"], ["neq", "Does not equal"]];
-  if (!comparablePostgresType(column.type)) return nulls;
-  if (textPostgresType(column.type)) return equality.concat([["contains", "Contains"], ["starts_with", "Starts with"], ["ends_with", "Ends with"], ["like", "Matches LIKE pattern"], ["in", "In list"], ["not_in", "Not in list"]], nulls);
-  if (numericPostgresType(column.type) || temporalPostgresType(column.type)) return equality.concat([["gt", "Greater than"], ["gte", "Greater than or equal"], ["lt", "Less than"], ["lte", "Less than or equal"], ["between", "Between"], ["in", "In list"], ["not_in", "Not in list"]], nulls);
-  if (column.type.toLowerCase() === "boolean") return equality.concat(nulls);
-  return equality.concat([["in", "In list"], ["not_in", "Not in list"]], nulls);
+  const labels = {
+    eq: "Equals", neq: "Does not equal", gt: "Greater than", gte: "Greater than or equal",
+    lt: "Less than", lte: "Less than or equal", between: "Between", in: "In list",
+    not_in: "Not in list", contains: "Contains", starts_with: "Starts with", ends_with: "Ends with",
+    like: "Matches LIKE pattern", is_null: "Is NULL", is_not_null: "Is not NULL"
+  };
+  return (column?.capabilities?.filterOperators ?? []).map(item => [item.name, labels[item.name]]);
 }
 
 function queryLabel(text, control) {
@@ -1005,7 +1054,7 @@ function editorDetailSection(source) {
         renderWidgetQueryDraft();
       }
     );
-    numberFormat.disabled = !numericPostgresType(sourceColumn?.type ?? "");
+    numberFormat.disabled = !numericPostgresType(sourceColumn);
     const formatControls = [queryLabel("Number format", numberFormat)];
     if (item.numberFormat.style === "currency") {
       const currency = queryInput(item.numberFormat.currency, value => { item.numberFormat.currency = value.trim().toUpperCase(); });
@@ -1037,12 +1086,12 @@ function editorDetailSection(source) {
   });
   const settings = document.createElement("div");
   settings.className = "query-editor-row detail-settings-row";
-  const sourceOptions = [["", "No default sort"], ...widgetDetailDraft.columns.map(column => [column.sourceColumn, column.sourceColumn])];
+  const sourceOptions = [["", "No default sort"], ...widgetDetailDraft.columns.filter(column => source?.columns?.find(item => item.name === column.sourceColumn)?.capabilities?.sortable).map(column => [column.sourceColumn, column.sourceColumn])];
   const sort = widgetDetailDraft.defaultSort ?? { sourceColumn: "", direction: "asc", nulls: "last" };
   settings.append(
     queryLabel("Default sort", querySelect(sourceOptions, sort.sourceColumn, value => { widgetDetailDraft.defaultSort = value ? { ...sort, sourceColumn: value } : null; renderWidgetQueryDraft(); })),
     queryLabel("Direction", querySelect([["asc", "Ascending"], ["desc", "Descending"]], sort.direction, value => { if (widgetDetailDraft.defaultSort) widgetDetailDraft.defaultSort.direction = value; })),
-    queryLabel("Row identifier", querySelect([["", "No row identifier"], ...(source?.columns ?? []).map(column => [column.name, column.name])], widgetDetailDraft.rowIdentifier, value => { widgetDetailDraft.rowIdentifier = value || null; })),
+    queryLabel("Row identifier", querySelect([["", "No row identifier"], ...(source?.columns ?? []).filter(column => column.capabilities?.sortable).map(column => [column.name, column.name])], widgetDetailDraft.rowIdentifier, value => { widgetDetailDraft.rowIdentifier = value || null; })),
     queryLabel("Rows per page", querySelect([["10", "10"], ["25", "25"], ["50", "50"], ["100", "100"]], String(widgetDetailDraft.pageSize), value => { widgetDetailDraft.pageSize = Number(value); }))
   );
   section.append(header, rows, settings);
@@ -1060,7 +1109,7 @@ function markVisualizationRole(section, label, required = false) {
 function measureSupportsVisualization(measure, columns) {
   if (["count_rows", "count"].includes(measure.aggregation)) return true;
   const column = columns.find(item => item.name === measure.column);
-  return ["sum", "average", "minimum", "maximum"].includes(measure.aggregation) && numericPostgresType(column?.type ?? "");
+  return ["sum", "average", "minimum", "maximum"].includes(measure.aggregation) && aggregateCapability(column, measure.aggregation)?.zeroable === true;
 }
 
 function renderWidgetQueryDraft() {
@@ -1076,6 +1125,12 @@ function renderWidgetQueryDraft() {
     document.querySelector("#apply-widget-query").disabled = true;
     return;
   }
+  if (widget.configuration.source.snapshotVersion !== 2 || columns.some(column => !column.capabilities)) {
+    elements.widgetQueryFields.replaceChildren();
+    elements.widgetQueryStatus.textContent = "This widget uses a legacy source snapshot. Reselect the source before editing or running its structured query.";
+    document.querySelector("#apply-widget-query").disabled = true;
+    return;
+  }
   document.querySelector("#apply-widget-query").disabled = false;
   widgetTableDraft = reconcileTablePresentation(widgetQueryDraft, widgetTableDraft);
   widgetVisualizationDraft = reconcileVisualization(widgetQueryDraft, widgetVisualizationDraft);
@@ -1084,7 +1139,7 @@ function renderWidgetQueryDraft() {
   const activeRoles = visualizationRoleIds(visualizationMode, widgetVisualizationDraft, widgetQueryDraft);
   const activeDimensionIds = new Set(activeRoles.dimensionIds);
   const columnOptions = columns.map(column => [column.name, `${column.name} · ${column.type}`]);
-  const dimensionColumns = columns.filter(column => comparablePostgresType(column.type));
+  const dimensionColumns = columns.filter(column => comparablePostgresType(column));
   const dimensionTitle = visualizationMode === "table" ? "Table dimensions" : `${visualizationMode === "donut" ? "Donut" : visualizationMode === "bar" ? "Grouped bar" : "Line"} dimension`;
   const [dimensions, dimensionRows, addDimension] = queryGroup(dimensionTitle, visualizationMode === "table" ? "Choose every grouping column shown by the aggregate table." : "Choose the single grouping column used by this visualization.", "", () => {});
   addDimension.remove();
@@ -1150,21 +1205,22 @@ function renderWidgetQueryDraft() {
     });
     remove.disabled = displayedMeasures.length === 1;
     const aggregationOptions = [["count_rows", "Count rows"], ["count", "Count column"]];
-    if (columns.some(columnItem => sumPostgresType(columnItem.type))) aggregationOptions.push(["sum", "Sum"]);
-    if (columns.some(columnItem => averagePostgresType(columnItem.type))) aggregationOptions.push(["average", "Average"]);
-    if (columns.some(columnItem => orderablePostgresType(columnItem.type))) aggregationOptions.push(["minimum", "Minimum"], ["maximum", "Maximum"]);
-    const eligibleColumns = item.aggregation === "count_rows" ? columns : item.aggregation === "sum" ? columns.filter(columnItem => sumPostgresType(columnItem.type)) : item.aggregation === "average" ? columns.filter(columnItem => averagePostgresType(columnItem.type)) : ["minimum", "maximum"].includes(item.aggregation) ? columns.filter(columnItem => orderablePostgresType(columnItem.type)) : columns;
+    if (columns.some(columnItem => sumPostgresType(columnItem))) aggregationOptions.push(["sum", "Sum"]);
+    if (columns.some(columnItem => averagePostgresType(columnItem))) aggregationOptions.push(["average", "Average"]);
+    if (columns.some(columnItem => aggregateCapability(columnItem, "minimum"))) aggregationOptions.push(["minimum", "Minimum"]);
+    if (columns.some(columnItem => aggregateCapability(columnItem, "maximum"))) aggregationOptions.push(["maximum", "Maximum"]);
+    const eligibleColumns = item.aggregation === "count_rows" ? columns : columns.filter(columnItem => aggregateCapability(columnItem, item.aggregation));
     const column = querySelect(eligibleColumns.map(columnItem => [columnItem.name, `${columnItem.name} · ${columnItem.type}`]), item.column ?? "", value => { item.column = value || null; renderWidgetQueryDraft(); });
     column.disabled = item.aggregation === "count_rows";
     const distinct = document.createElement("input");
     distinct.type = "checkbox";
     distinct.checked = item.distinct;
-    distinct.disabled = item.aggregation !== "count" || !comparablePostgresType(columns.find(columnItem => columnItem.name === item.column)?.type ?? "");
+    distinct.disabled = item.aggregation !== "count" || columns.find(columnItem => columnItem.name === item.column)?.capabilities?.distinct !== true;
     if (distinct.disabled && item.distinct) item.distinct = distinct.checked = false;
     distinct.addEventListener("change", () => { item.distinct = distinct.checked; });
     const formatOptions = [["auto", "Automatic"], ["integer", "Integer"], ["decimal", "Decimal"], ["currency", "Currency"], ["percent", "Percent"]];
     const selectedColumn = columns.find(columnItem => columnItem.name === item.column);
-    const zeroAllowed = ["sum", "average", "minimum", "maximum"].includes(item.aggregation) && numericPostgresType(selectedColumn?.type ?? "");
+    const zeroAllowed = aggregateCapability(selectedColumn, item.aggregation)?.zeroable === true;
     if (!zeroAllowed && item.nullBehavior === "zero") item.nullBehavior = "preserve";
     const currency = queryInput(item.numberFormat.currency ?? "USD", value => { item.numberFormat.currency = value.trim().toUpperCase(); });
     currency.maxLength = 3;
@@ -1176,9 +1232,7 @@ function renderWidgetQueryDraft() {
       queryLabel("Aggregation", querySelect(aggregationOptions, item.aggregation, value => {
         item.aggregation = value;
         if (value === "count_rows") item.column = null;
-        else if (value === "sum" && !columns.some(columnItem => columnItem.name === item.column && sumPostgresType(columnItem.type))) item.column = columns.find(columnItem => sumPostgresType(columnItem.type))?.name ?? null;
-        else if (value === "average" && !columns.some(columnItem => columnItem.name === item.column && averagePostgresType(columnItem.type))) item.column = columns.find(columnItem => averagePostgresType(columnItem.type))?.name ?? null;
-        else if (["minimum", "maximum"].includes(value) && !columns.some(columnItem => columnItem.name === item.column && orderablePostgresType(columnItem.type))) item.column = columns.find(columnItem => orderablePostgresType(columnItem.type))?.name ?? null;
+        else if (!columns.some(columnItem => columnItem.name === item.column && aggregateCapability(columnItem, value))) item.column = columns.find(columnItem => aggregateCapability(columnItem, value))?.name ?? null;
         else if (!item.column) item.column = columns[0]?.name ?? null;
         if (value !== "count") item.distinct = false;
         renderWidgetQueryDraft();
@@ -1250,11 +1304,11 @@ function renderWidgetQueryDraft() {
         valueControl = document.createElement("div");
         valueControl.className = "filter-between-values";
         valueControl.append(
-          queryLabel("From", queryFilterInput(item.values[0] ?? "", value => { item.values[0] = value; }, filterColumn.type)),
-          queryLabel("To", queryFilterInput(item.values[1] ?? "", value => { item.values[1] = value; }, filterColumn.type))
+          queryLabel("From", queryFilterInput(item.values[0] ?? "", value => { item.values[0] = value; }, filterColumn)),
+          queryLabel("To", queryFilterInput(item.values[1] ?? "", value => { item.values[1] = value; }, filterColumn))
         );
       } else {
-        const input = queryFilterInput(item.values[0] ?? "", value => { item.values = [value]; }, filterColumn.type);
+        const input = queryFilterInput(item.values[0] ?? "", value => { item.values = [value]; }, filterColumn);
         for (const control of input.matches("input") ? [input] : input.querySelectorAll("input, button")) control.disabled = ["is_null", "is_not_null"].includes(item.operator);
         valueControl = queryLabel("Value", input);
       }
@@ -1285,8 +1339,12 @@ function renderWidgetQueryDraft() {
     groupElement.append(groupHeader, conditions, addCondition);
     filterRows.append(groupElement);
   });
-  const unsortedDimensions = widgetQueryDraft.dimensions.filter(item => !widgetQueryDraft.sort.some(sort => sort.targetId === item.id));
-  const unsortedMeasures = widgetQueryDraft.measures.filter(item => !widgetQueryDraft.sort.some(sort => sort.targetId === item.id));
+  const targetSortable = item => {
+    if (Object.hasOwn(item, "aggregation")) return ["count", "count_rows"].includes(item.aggregation) || aggregateCapability(columns.find(column => column.name === item.column), item.aggregation)?.sortable === true;
+    return columns.find(column => column.name === item.column)?.capabilities?.sortable === true;
+  };
+  const unsortedDimensions = widgetQueryDraft.dimensions.filter(item => targetSortable(item) && !widgetQueryDraft.sort.some(sort => sort.targetId === item.id));
+  const unsortedMeasures = widgetQueryDraft.measures.filter(item => targetSortable(item) && !widgetQueryDraft.sort.some(sort => sort.targetId === item.id));
   const [sorting, sortRows, addSort] = queryGroup("Sort", "Sort rows are applied top to bottom. Unlisted grouping columns remain automatic tie-breakers.", "+ Sort column", () => {
     const first = unsortedDimensions[0] ? ["dimension", unsortedDimensions[0].id] : ["measure", unsortedMeasures[0]?.id];
     if (first[1]) widgetQueryDraft.sort.push({ targetKind: first[0], targetId: first[1], direction: "asc", nulls: "last" });
@@ -1295,7 +1353,7 @@ function renderWidgetQueryDraft() {
   addSort.disabled = !unsortedDimensions.length && !unsortedMeasures.length;
   widgetQueryDraft.sort.forEach((item, sortIndex) => {
     const [row, remove] = queryRow(item, widgetQueryDraft.sort);
-    const targets = widgetQueryDraft.dimensions.filter(target => target.id === item.targetId || !widgetQueryDraft.sort.some(sort => sort !== item && sort.targetId === target.id)).map(target => [`dimension:${target.id}`, `Grouping · ${target.label}`]).concat(widgetQueryDraft.measures.filter(target => target.id === item.targetId || !widgetQueryDraft.sort.some(sort => sort !== item && sort.targetId === target.id)).map(target => [`measure:${target.id}`, `Measure · ${target.label}`]));
+    const targets = widgetQueryDraft.dimensions.filter(target => targetSortable(target) && (target.id === item.targetId || !widgetQueryDraft.sort.some(sort => sort !== item && sort.targetId === target.id))).map(target => [`dimension:${target.id}`, `Grouping · ${target.label}`]).concat(widgetQueryDraft.measures.filter(target => targetSortable(target) && (target.id === item.targetId || !widgetQueryDraft.sort.some(sort => sort !== item && sort.targetId === target.id))).map(target => [`measure:${target.id}`, `Measure · ${target.label}`]));
     const priority = document.createElement("div");
     priority.className = "sort-priority";
     const priorityLabel = document.createElement("span");
@@ -1538,7 +1596,7 @@ function renderRelationDetail(descriptor) {
     if (!sameSource) {
       invalidateWidgetRuntime(widget.id);
     }
-    sourceVerification.set(widget.id, { state: "verified" });
+    sourceVerification.set(widget.id, { state: "verified", verifiedAt: new Date().toISOString(), verificationSource: "PostgreSQL relation inspection" });
     assignmentStatus.textContent = `Assigned to ${widget.title}.`;
     markDashboardChanged(true);
     updateClearState();
@@ -1621,7 +1679,7 @@ async function verifyDashboardSources() {
       for (const [index, item] of batch.entries()) {
         const result = payload.results?.[index];
         if (!result) throw new Error("Source verification returned an incomplete batch");
-        results.set(item.key, result.matches ? { state: "verified" } : {
+        results.set(item.key, result.matches ? { state: "verified", verifiedAt: new Date().toISOString(), verificationSource: "PostgreSQL relation verification" } : {
           state: "error", code: result.status === "missing" ? "relation_missing" : "relation_changed",
           message: sourceChangeMessage(result), details: result
         });
@@ -1653,7 +1711,11 @@ async function loadRelations(profile, namespace) {
   }
   elements.relationStatus.textContent = `Loading ${profile.dbname}.${namespace}...`;
   try {
-    const catalog = await postgres.request(`/api/postgres/profiles/${encodeURIComponent(profile.id)}/relations?database=${encodeURIComponent(profile.dbname)}&namespace=${encodeURIComponent(namespace)}`);
+    const catalog = await profileRepository.relationCatalog(profile.id, profile.dbname, namespace, {
+      onPage: (count, hasMore) => {
+        if (generation === relationCatalogGeneration && hasMore) elements.relationStatus.textContent = `Loading ${profile.dbname}.${namespace}... ${count} found so far`;
+      },
+    });
     if (generation !== relationCatalogGeneration) return;
     elements.relationStatus.textContent = `${catalog.relations.length} supported relation${catalog.relations.length === 1 ? "" : "s"} in ${catalog.database}.${catalog.namespace}.`;
     renderRelations(catalog);
@@ -1670,17 +1732,22 @@ async function selectProfile(profile) {
   elements.namespaceSelect.disabled = true;
   elements.namespaceSelect.replaceChildren(new Option("Loading namespaces...", ""));
   try {
-    const namespaces = await profileRepository.namespaces(profile.id);
-    window.SchemiiShared.initializeNamespaceSelect(elements.namespaceSelect, namespaces);
+    const catalog = await profileRepository.namespaceCatalog(profile.id, profile.dbname, { scope: elements.systemNamespaces.checked ? "all" : "user" });
+    const namespaces = catalog.namespaces;
+    window.SchemiiShared.initializeNamespaceSelect(elements.namespaceSelect, catalog.entries);
     elements.sourceSummary.classList.add("connected");
     elements.sourceName.textContent = profile.name;
     elements.sourceDetail.textContent = namespaces.length ? `${profile.dbname}.${namespaces[0]}` : `${profile.dbname} has no user namespaces`;
+    toolbarTargetVerifiedAt = new Date().toISOString();
+    renderToolbarTarget();
     setConnectionStatus(namespaces.length ? `Connected to ${profile.dbname}.` : "Connected; no user namespaces were found.");
   } catch (error) {
     elements.namespaceSelect.replaceChildren(new Option("Connection unavailable", ""));
     elements.sourceSummary.classList.remove("connected");
     elements.sourceName.textContent = profile.name;
     elements.sourceDetail.textContent = error.message;
+    toolbarTargetVerifiedAt = null;
+    renderToolbarTarget();
     setConnectionStatus(error.message, true);
   }
 }
@@ -1692,9 +1759,9 @@ async function loadWidgetSourceNamespaces(profile, preferredNamespace = null) {
   elements.relationList.replaceChildren();
   elements.relationDetail.hidden = true;
   try {
-    const namespaces = await profileRepository.namespaces(profile.id);
+    const catalog = await profileRepository.namespaceCatalog(profile.id, profile.dbname, { scope: elements.systemNamespaces.checked ? "all" : "user" });
     if (editedWidgetId !== widgetId || elements.widgetSourceProfile.value !== profile.id) return;
-    const namespace = window.SchemiiShared.initializeNamespaceSelect(elements.widgetSourceNamespace, namespaces, {
+    const namespace = window.SchemiiShared.initializeNamespaceSelect(elements.widgetSourceNamespace, catalog.entries, {
       preferred: preferredNamespace,
     });
     return await loadRelations(profile, namespace);
@@ -2679,8 +2746,10 @@ function dashboardWidgetElement(widget) {
     const sourceLabel = document.createElement("small");
     sourceLabel.className = "widget-source-label";
     const verification = sourceVerification.get(widget.id);
+    const targetState = verification?.state === "verified" ? "verified" : "linked";
+    const target = schemerTargetPresentation(source, targetState, verification);
     const suffix = verification?.state === "checking" ? " · checking" : verification?.state === "error" ? verification.code === "relation_changed" ? " · source changed" : verification.code === "relation_missing" ? " · source missing" : " · source unavailable" : "";
-    sourceLabel.textContent = `${source.database}.${source.namespace}.${source.relation}${suffix}`;
+    sourceLabel.textContent = `${window.SchemiiShared.formatTargetPresentation(target)}${suffix}`;
     card.dataset.sourceState = verification?.state || "unverified";
     if (verification?.state === "error") {
       card.classList.add("source-invalid");
@@ -3849,6 +3918,11 @@ function schemerAiTarget() {
   } : null;
 }
 
+function schemerAiTargetLabel() {
+  const target = schemerAiTarget();
+  return target ? window.SchemiiShared.formatTargetPresentation(schemerTargetPresentation(target, toolbarTargetExplicit ? "selected" : "suggested", { verifiedAt: toolbarTargetVerifiedAt })) : "No complete PostgreSQL target";
+}
+
 function schemerAiContext(accessLevel = "metadata") {
   const target = accessLevel === "data" ? schemerAiTarget() : null;
   if (!activeDashboard || accessLevel === "data" && !target) return null;
@@ -3894,7 +3968,7 @@ function validateSchemerAiAction(action, capture) {
     if (typeof action.purpose !== "string" || action.purpose !== action.purpose.trim() || !action.purpose || new TextEncoder().encode(action.purpose).length > 500) return null;
     return {
       action: clone(action), title: "Read-only analytic query",
-      summary: `${action.purpose} Target: ${action.database}.${action.namespace}. Results are bounded before disclosure to the model.`,
+      summary: `${action.purpose} Target: ${schemerAiTargetLabel()}. Results are bounded before disclosure to the model.`,
       review: action.sql, buttonLabel: "Review & run query", appliedLabel: "Ran query", destructive: false,
     };
   }
@@ -3908,7 +3982,7 @@ function validateSchemerAiAction(action, capture) {
     const sourceFields = ["profileId", "database", "namespace", "relation", "kind", "fingerprint"];
     const source = action.source;
     const validPgName = value => typeof value === "string" && value.trim() === value && value.length > 0 && new TextEncoder().encode(value).length <= 63 && !/[\x00-\x1f\x7f]/.test(value);
-    if (!exactFields(action, completeFields) || !exactFields(source, sourceFields) || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(source.profileId) || ![source.database, source.namespace, source.relation].every(validPgName) || !["table", "view", "materialized_view"].includes(source.kind) || !/^[0-9a-f]{64}$/.test(source.fingerprint)) return null;
+    if (!exactFields(action, completeFields) || !exactFields(source, sourceFields) || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(source.profileId) || ![source.database, source.namespace, source.relation].every(validPgName) || !["table", "partitioned_table", "view", "materialized_view", "foreign_table"].includes(source.kind) || !/^[0-9a-f]{64}$/.test(source.fingerprint)) return null;
     if (!action.query || typeof action.query !== "object" || Array.isArray(action.query) || action.query.version !== 2 || !["table", "kpi", "bar", "line", "donut"].includes(action.visualizationMode)) return null;
     if (["bar", "line", "donut"].includes(action.visualizationMode) && (!Array.isArray(action.query.dimensions) || !action.query.dimensions.length)) return null;
     return {
@@ -4009,7 +4083,7 @@ const aiAssistant = window.SchemiiShared.createAiAssistant({
       ? "Active and available dashboard identities are sent to the selected external AI provider."
       : accessLevel === "dashboard"
         ? "Active and available dashboard identities, the active dashboard configuration, and a bounded verified source catalog are sent to the selected external AI provider; connection metadata, filter values, and rows are excluded."
-        : "The active dashboard configuration and exact redacted PostgreSQL target are sent now. Rows are sent only after you confirm a proposed read-only query.";
+        : `The active dashboard configuration and exact redacted PostgreSQL target are sent now: ${schemerAiTargetLabel()}. Rows are sent only after you confirm a proposed read-only query.`;
   },
 });
 
@@ -4026,6 +4100,7 @@ elements.connectionForm.addEventListener("submit", async event => {
   try {
     const profile = await profileRepository.save(profileId, profilePayload());
     selectedProfileId = profile.id;
+    toolbarTargetExplicit = true;
     profileForm.clearPassword();
     await loadProfiles();
   } catch (error) {
@@ -4044,9 +4119,19 @@ document.querySelector("#test-connection").addEventListener("click", async () =>
   }
 });
 elements.namespaceSelect.addEventListener("change", () => {
+  toolbarTargetExplicit = true;
   const profile = profiles.find(item => item.id === selectedProfileId);
   if (profile && elements.namespaceSelect.value) {
     elements.sourceDetail.textContent = `${profile.dbname}.${elements.namespaceSelect.value}`;
+  }
+  renderToolbarTarget();
+});
+elements.systemNamespaces.addEventListener("change", async () => {
+  const profile = profiles.find(item => item.id === selectedProfileId);
+  if (profile) await selectProfile(profile);
+  if (editedWidgetId) {
+    const sourceProfile = profiles.find(item => item.id === elements.widgetSourceProfile.value);
+    if (sourceProfile) await loadWidgetSourceNamespaces(sourceProfile, elements.widgetSourceNamespace.value);
   }
 });
 document.querySelector("#refresh-button").addEventListener("click", async event => {
@@ -4057,7 +4142,7 @@ document.querySelector("#refresh-button").addEventListener("click", async event 
    try {
     const profile = profiles.find(item => item.id === selectedProfileId);
     if (!profile) throw new Error("Select a saved PostgreSQL connection");
-    await postgres.request(`/api/postgres/profiles/${encodeURIComponent(selectedProfileId)}/relations?database=${encodeURIComponent(profile.dbname)}&namespace=${encodeURIComponent(elements.namespaceSelect.value)}`);
+     await profileRepository.relationCatalog(selectedProfileId, profile.dbname, elements.namespaceSelect.value);
     await verifyDashboardSources();
     elements.sourceDetail.textContent = `${profile.dbname}.${elements.namespaceSelect.value} refreshed now`;
   } catch (error) {

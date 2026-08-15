@@ -29,7 +29,7 @@ Do not introduce another connection implementation, SQL parser, profile store, H
 
 Schemii mounts the shared profile, catalog, schema, read-SQL, and Console capabilities, including its write-enabled Console policy. Schemer separately mounts relation analytics and its own revision-bound policies. The two view mutation routes are implemented directly by the Schemii server and are not mounted by Schemer. There is currently no `view_actions` capability or materialized-refresh route.
 
-The existing `POST /api/postgres/profiles/{profileId}/sql` route remains a backward-compatible, single-statement, read-only adapter over the shared executor. Existing Schemii table tools, AI actions, and Schemer analytic SQL do not have to migrate in the same release as the standalone Console. The adapter retains each application's current policy and guards; it never accepts write grants.
+The existing `POST /api/postgres/profiles/{profileId}/sql` route remains a backward-compatible, single-statement, read-only adapter over the shared executor. Existing Schemii table tools, AI actions, and Schemer analytic SQL retain their application-specific policies and guards; the adapter cannot enter a Console write mode.
 
 ## Exact Target Contract
 
@@ -61,115 +61,51 @@ Unknown fields are rejected. The server re-inspects relation kind, semantic colu
 
 Credentials remain server-side. Browser responses, saved query history, logs, layout records, and schema records never contain passwords.
 
-## SQL Console
+## Shared SQL Console
 
-### Execution Resource
+The Console implementation is shared by Schemii and Schemer. Both intentionally expose the human write-capable modes under independent durable application write intent and the selected PostgreSQL role's permissions. Schemii's separately proposal-bound AI write authority does not grant Schemer AI or either human Console additional authority. Every request binds a canonical execution or transaction UUID to application, HTTP session, server ID, `consoleId`, profile ID and fingerprint, database, namespace, and durable settings revision where applicable. Unknown fields and mismatched targets are rejected.
 
-Use a shared execution registry so cancellation and concurrency have one implementation. Schemii and Schemer supply different policies to it.
+### Modes
+
+- `managed_read`: one repeatable-read, read-only transaction executes the script. Result cursors retain that original snapshot until exhausted, closed, cancelled, expired, or shutdown; SQL is never rerun for continuation. The transaction then rolls back.
+- `managed`: one read-write transaction executes every statement and commits only after all statements succeed. Returned rows are copied to a bounded server spool before commit. Known failures and cancellation roll back the database transaction.
+- `explicit`: a process-local exact-owner transaction resource spans multiple execution requests and reports PostgreSQL transaction state. Savepoint commands may run inside it; top-level transaction control remains resource-owned. Commit or rollback first closes all retained result resources deterministically. The application bounds active transaction count, idle time, and absolute lifetime, periodically rolls back expired resources, retains deterministic process-local tombstones, and rolls back during shutdown. These are connection lifecycle policies, not PostgreSQL statement policy; a stricter PostgreSQL `idle_in_transaction_session_timeout` remains authoritative. Browser loss, target switching, or abandoned tabs therefore cannot retain locks indefinitely.
+- `autocommit`: maintenance mode enables PostgreSQL commands forbidden in transaction blocks. Each statement commits independently. Failure/cancellation reports `completedStatementIndexes`, `priorStatementsCommitted`, and `partial_committed` when appropriate; connection-class failures after dispatch may be uncertain. It never presents the script as atomic.
+
+PostgreSQL functions, sequences, and external systems may have effects that read-only declarations or transaction rollback cannot reverse. Use a narrowly privileged saved role.
+
+### Resources And Receipts
 
 ```text
 POST   /api/postgres/profiles/{profileId}/console/executions
+GET    /api/postgres/profiles/{profileId}/console/executions/{executionId}
 DELETE /api/postgres/profiles/{profileId}/console/executions/{executionId}
+POST   /api/postgres/profiles/{profileId}/console/transactions
+GET    /api/postgres/profiles/{profileId}/console/transactions/{transactionId}
+POST   /api/postgres/profiles/{profileId}/console/transactions/{transactionId}/executions
+POST   /api/postgres/profiles/{profileId}/console/transactions/{transactionId}/commit
+POST   /api/postgres/profiles/{profileId}/console/transactions/{transactionId}/rollback
+GET    /api/postgres/profiles/{profileId}/console/executions/{executionId}/results/{resultId}
+DELETE /api/postgres/profiles/{profileId}/console/executions/{executionId}/results/{resultId}
 ```
 
-The browser creates a UUID `executionId` before POST so a parallel DELETE can cancel the active PostgreSQL connection. Each browser-local query view owns one stable `consoleId`; renaming that view does not change its identity. The POST remains open until completion and returns the final result. Registry entries are process-local, session-bound, short-lived, and removed after completion.
+The browser generates execution IDs before dispatch so cancellation can race the active connection. Metadata PostgreSQL atomically reserves each ID globally before target connection or SQL dispatch, then transitions that same row through nonterminal and terminal states. A collision from any application, session, server, profile, or Console owner fails generically without revealing the existing owner; restart and context changes cannot make an ID reusable. Failures proven to precede target dispatch become terminal `not_started` evidence. Terminal, reserved, and running IDs are never replayed. Managed and explicit commit failures after commit starts return `execution_outcome_unknown`; no path automatically resubmits SQL.
 
-Request:
+Result resources carry exact execution, statement/result index, console/transaction, session/server, profile fingerprint, database, and namespace ownership. Opaque cursors advance once; stale cursors fail. Managed-read and explicit results continue the original cursor/snapshot. Managed-write and autocommit results continue only from a process-local spool capped at 10,000 rows and 8 MiB. Resources expire after five minutes and are also bounded to 32 active results and four retained snapshots. Browser JSON export drains that retained pageable cursor or bounded spool within its remaining resource TTL and operator caps; it is not an unbounded streaming export. Spool, width, response, or capacity truncation is explicit and terminal, and omitted spool data cannot be recovered by export.
 
-```json
-{
-  "executionId": "uuid",
-  "consoleId": "uuid",
-  "database": "bookstore",
-  "namespace": "bookstore",
-  "sql": "SELECT 1;",
-  "mode": "read",
-  "writeGrantId": null
-}
-```
+### Durable Human Settings
 
-`writeGrantId` must be absent or null in read mode and must be current in write mode. Unknown fields are rejected.
+`GET/PUT /api/postgres/console/settings` stores one application-scoped optimistic revision with `writeIntent`, `defaultMode`, `statementLimit`, and `rowPageSize`. Defaults are disabled write intent, `managed_read`, 20 statements, and 100 rows per page. Settings do not expire and do not inherit between Schemii and Schemer. A write execution binds the exact current settings revision and profile fingerprint. These settings express human Console intent only; they cannot authorize AI, elevate the selected PostgreSQL role, or bypass product policy. The retired write-grant endpoints return `410 console_write_grants_retired`.
 
-### Script And Transaction Semantics
+### Limits And Diagnostics
 
-- Normal Run submits the selected text when present, otherwise the top-level statement containing the caret. Run all submits the complete editor. Either action may submit 1-20 top-level PostgreSQL statements, with at most 100,000 total characters.
-- Extend the existing quote/comment-aware statement scanner; do not add a second parser or infer safety from browser parsing.
-- The server owns one transaction for the complete script.
-- Read mode executes the complete transaction with `SET TRANSACTION READ ONLY`.
-- Write mode executes the complete transaction read-write using only the saved role's permissions.
-- All statements succeed and commit together, or any failure rolls back all statements.
-- Explicit transaction control (`BEGIN`, `COMMIT`, `ROLLBACK`, savepoint control, and transaction mode changes) is rejected because transaction ownership is server-side.
-- Commands PostgreSQL cannot execute in the server-owned transaction are unsupported and return a clear error; the server never silently changes to partial auto-commit.
-- PostgreSQL functions remain capable of external or non-transactional side effects. The UI must disclose this limitation before write mode and where read queries can invoke functions.
-
-Each statement returns one ordered result entry:
-
-```json
-{
-  "executionId": "uuid",
-  "target": {"profileId": "local", "database": "bookstore", "namespace": "bookstore"},
-  "mode": "read",
-  "committed": false,
-  "statements": [
-    {"index": 0, "command": "SELECT", "columns": [{"name": "value"}], "rows": [[1]], "rowCount": 1, "truncated": false, "notices": []}
-  ],
-  "limits": {"maxStatements": 20, "maxRowsPerResult": 500, "maxColumnsPerResult": 100, "maxResponseBytes": 1048576, "statementTimeoutMs": 30000}
-}
-```
-
-For write mode, `committed` is true only after successful commit. Command results include PostgreSQL command name and affected row count. No response may imply a commit before it occurs.
-
-The browser presents ordered statement entries as result tabs owned by the current query view. New execution results replace only unpinned tabs; pinned tabs remain browser-local reference data. Tab labels are unique within the query view and may be renamed without changing execution or authorization identity. Pinned or renamed results never authorize execution and never alter server transaction semantics. Cancellation remains attached to the active Results pane and applies only to the current registered `executionId`.
-
-Browser-local query views are created, selected, renamed, and removed through the Console header menu. A new query view receives a new `consoleId`, begins read-only, and has no grant. Renaming preserves its `consoleId`; removing it revokes its grant and removes its browser-local SQL and results. Removing the final view creates a fresh blank read-only view.
-
-### Write Grants
-
-Write authorization is an ephemeral Schemii-only server resource:
-
-```text
-POST   /api/postgres/profiles/{profileId}/console/write-grants
-DELETE /api/postgres/profiles/{profileId}/console/write-grants/{writeGrantId}
-```
-
-Grant creation requires the exact active query view's `consoleId`, `database`, `namespace`, and a deliberate browser confirmation flag. The returned opaque grant binds to the current HTTP session, server ID, console ID, profile ID, database, namespace, and current stored-profile fingerprint. Write mode and its grant are owned by that query view, not by a result tab or the Console workspace globally.
-
-A grant is invalid after:
-
-- explicit revocation when the owning query view is removed, the Console closes, or that query view's write mode is disabled;
-- target or saved-profile change;
-- browser refresh because the browser loses the opaque grant ID;
-- HTTP session or server replacement;
-- server restart because grants are process-local;
-- five minutes without a write execution or fifteen minutes absolute lifetime.
-
-The server never infers write authorization from SQL text, a browser toggle, or possession of the local session token alone.
-
-Switching query views reflects the selected view's own authorization state. A query view without a current grant remains read-only even when another query view has write mode enabled. Normal Run and Run all use the same grant requirement; selected SQL, caret selection, pinned results, result names, query names, and saved-history entries cannot broaden a grant. The UI revokes every query-view grant on target change or Console close and attempts revocation when the page is leaving, while server expiry remains authoritative if browser delivery is interrupted.
-
-### Limits, Cancellation, And Concurrency
-
-- 30-second PostgreSQL statement timeout by default.
-- 500 rows and 100 columns per tabular result.
-- 1 MiB serialized response across all statement results.
-- At most 50 notices and 8 KiB total notice text.
-- One active execution per `consoleId` and four active Console executions per server process.
-- Duplicate active `executionId` returns `execution_conflict`.
-- Exceeding concurrency returns `execution_busy` without opening another connection.
-- DELETE uses the registered connection cancellation facility, returns whether cancellation was requested, and never reports rollback complete until the POST finishes.
-- Closing the browser may abort response delivery but server timeout/cancellation remains authoritative.
-
-### Errors And Audit Metadata
-
-Use the existing error envelope. Add focused codes:
-
-- `write_grant_required`, `write_grant_expired`, `write_grant_target_changed`;
-- `execution_conflict`, `execution_busy`, `execution_not_found`, `execution_cancelled`;
-- `unsupported_transaction_control`, `script_too_large`, `too_many_statements`.
-
-Preserve safe SQLSTATE and bounded primary PostgreSQL messages where available. Never return credentials, connection strings, server stack traces, or raw diagnostic fields.
-
-Server logs may record execution ID, timestamp, mode, exact non-secret target identity, statement count, elapsed time, outcome, SQLSTATE, command names, and row counts. Do not log SQL text, parameters, row values, passwords, or browser-saved history.
+- Scripts contain 1-20 top-level statements, subject to a lower durable user setting, and at most 100,000 characters.
+- Pages are user-selectable within the operator maximum; results allow at most 100 columns, 64 KiB per cell, 256 KiB per row, 1 MiB response metadata, 50 notices, and 8 KiB notice text.
+- One execution runs per `consoleId`; process admission separately enforces global, Console-class, and exact-target capacities.
+- Explicit transactions default to at most four active resources, five idle minutes, and a 30-minute absolute lifetime. Operators may narrow or raise these within validated hard maxima using `SCHEMII_CONSOLE_TRANSACTION_MAXIMUM`, `SCHEMII_CONSOLE_TRANSACTION_IDLE_SECONDS`, and `SCHEMII_CONSOLE_TRANSACTION_LIFETIME_SECONDS`; idle must not exceed lifetime.
+- PostgreSQL role/database/session `statement_timeout` is authoritative by default. A proposal-bound AI `operationTimeoutMs` can only narrow it and is reported as `policy_narrowing`.
+- Cancellation requests the registered PostgreSQL connection and closes retained result resources. Completion/rollback is not claimed until execution reports it.
+- PostgreSQL errors preserve bounded SQLSTATE, primary message, detail, hint, phase, rollback status, and safe retry/reconciliation guidance. Credentials, SQL text, values, stack traces, and unrestricted diagnostics are not returned or logged.
 
 ## Views Catalog And Inspection
 
@@ -185,11 +121,15 @@ Without that complete binding, the Views workspace does not query PostgreSQL. Br
 ### GET APIs
 
 ```text
-GET /api/postgres/profiles/{profileId}/relations?database={database}&namespace={namespace}
+GET /api/postgres/profiles/{profileId}/namespaces?database={database}&scope=user|all&pageSize={n}&cursor={opaque}
+GET /api/postgres/profiles/{profileId}/relations?database={database}&namespace={namespace}&kind={kind}&search={text}&pageSize={n}&cursor={opaque}
 GET /api/postgres/profiles/{profileId}/relation?database={database}&namespace={namespace}&relation={relation}&expectedKind={kind}[&expectedFingerprint={fingerprint}]
+GET /api/postgres/profiles/{profileId}/lineage?database={database}&namespace={namespace}&relation={relation}&direction=dependencies|dependents&expectedKind={kind}&expectedFingerprint={fingerprint}&pageSize={n}&cursor={opaque}
 ```
 
-Both routes require the authenticated local PostgreSQL session. Each uses a repeatable-read, read-only transaction and verifies `current_database()` against `database`. The catalog response is:
+All routes require the authenticated local PostgreSQL session. Each page uses a repeatable-read, read-only transaction and verifies `current_database()` against `database`. Opaque keyset cursors are HMAC-bound to the exact profile fingerprint, database, namespace/scope, relation, kind, relation fingerprint, direction, filters, sort, page size, and complete catalog fingerprint. A changed catalog returns `catalog_cursor_stale`; a cursor from another context returns `catalog_cursor_mismatch`. `scope=user` excludes system namespaces; `scope=all` is explicit opt-in and labels `pg_catalog`, `information_schema`, temporary, toast, other system, and user namespaces.
+
+The relation catalog response is:
 
 ```json
 {
@@ -200,18 +140,18 @@ Both routes require the authenticated local PostgreSQL session. Each uses a repe
 }
 ```
 
-The shared catalog may contain tables, ordinary views, and materialized views; the Schemii Views browser retains only `view` and `materialized_view`. The descriptor returns exact target identity and kind plus:
+The shared catalog contains tables, partitioned tables, ordinary views, materialized views, and foreign tables; the Schemii Views browser retains ordinary and materialized views for mutation. The descriptor accepts every catalog relation kind for read/lineage workflows and returns exact target identity and kind plus:
 
 - ordered semantic columns (`name`, PostgreSQL display `type`, `nullable`, `ordinal`, and advisory suggestions);
 - a stable 64-character semantic fingerprint covering identity, ordered columns, catalog kind, and view definition;
 - `definition`: `{status:"available", format:"query", sql}` or `{status:"unavailable", reason:"not_permitted"|"too_large"|"not_supported"}` with a 64 KiB cap;
 - `owner`: an available role name or explicit `not_permitted` envelope;
 - advisory current-role permissions: `canSelect`, `canAlter`, and materialized-only `canRefresh`;
-- direct dependencies and dependents, each as an available envelope of exact database/namespace/relation/kind identities, capped at 500 with `truncated`;
+- an initial page of direct dependencies and dependents plus the dedicated exact-source continuation route, including verified cross-namespace read-only identities;
 - `materialized`: population and qualifying unique-index-based concurrent-refresh eligibility for materialized views, or `not_applicable` for other kinds;
 - `columnProvenance`: always `{status:"unavailable", reason:"not_supported"}`.
 
-`expectedKind` and optional `expectedFingerprint` cause `relation_changed` if live metadata differs. Foreign tables may occur in lineage as `foreign_table`, but the descriptor endpoint accepts only tables, views, and materialized views; the Views UI therefore displays foreign-table lineage as inspection unavailable. PostgreSQL dependency metadata is relation-level only. No output-column mappings are inferred.
+`expectedKind` and optional `expectedFingerprint` cause `relation_changed` if live metadata differs. Foreign tables are inspectable read sources, but the dedicated view mutation route still accepts only ordinary and materialized views. PostgreSQL dependency metadata is relation-level only. No output-column mappings are inferred.
 
 The live frontend:
 
@@ -219,9 +159,17 @@ The live frontend:
 - applies case-insensitive typed search to already loaded cards without rerendering the workspace;
 - combines search with All, Views, and Materialized kind filters;
 - shows the selected view, exact output fields, direct lineage, and a compact impact summary;
-- expands supported same-namespace source descriptors in place and respects reduced motion;
-- opens an idempotent read-only relation inspector and disables inspection for unsupported or cross-namespace lineage;
+- expands supported same- or cross-namespace source descriptors in place and respects reduced motion;
+- opens an idempotent read-only relation inspector for supported relation kinds without turning lineage into write authority;
 - makes a definition read-only when it is unavailable or advisory `canAlter` is false.
+
+## Full-Schema Migration Completeness
+
+Full-schema preview is apply-capable only when every requested live-to-desired difference is represented by executable reviewed steps. Destructive or replacement differences omitted by the user's preview choice, dedicated view-lifecycle work, touched partition relationships, dependent views, incomplete preservation inventory, and unsupported reconstruction are returned in `blockingDifferences` with a next action. Such a response has `complete:false`, `applyCapable:false`, no durable plan ID, and cannot apply a generated "safe subset" as if full synchronization succeeded. The saved desired design remains unresolved intent.
+
+An apply-capable plan persists an explicit completeness proof over the reviewed live migration fingerprint and desired-schema fingerprint in both private and review payloads. Metadata creation, apply, and post-commit saved-schema synchronization each reject a missing/mismatched proof. Apply also binds profile fingerprint, database, namespace, schema revision/layout token, review digest, destructive choice, and, for AI work, the exact proposal-bound operation timeout. Null timeout inherits PostgreSQL `statement_timeout`; a finite AI value only narrows it. Apply is transactional, uses no generated `CASCADE`, rechecks stale state under the namespace lock, and reconciles uncertain commits from durable XID evidence without replay.
+
+Preservation analysis is conservative and scoped to affected tables and actual dependencies. Physical table reorder is blocked unless touched-table inventory proves that ACLs, comments, RLS/policies, rules, publications, security labels, extension ownership, tablespace/access method/options/storage, owned sequences, identity/generated columns, statistics, indexes, constraints, triggers, partition relationships, unknown dependencies, owner, persistence, replica identity, and dependent views are neutral. Materialized-view recreation has its own supported preservation manifest. There is not yet one shared reconstruction manifest, and Schemii does not claim to reconstruct unsupported state; it blocks the preview instead.
 
 ## View Editing And Migration
 
@@ -272,7 +220,7 @@ POST /api/postgres/profiles/{profileId}/view-plans/{planId}/apply
 
 The request body is exactly `{"reviewDigest":"<sha256>","confirmDestructive":false}`. Before opening PostgreSQL, the server atomically creates the plan's sole durable execution, persists the confirmed digest and destructive choice, and revalidates the schema revision/layout/target binding. It rejects expired/wrong-profile plans, changed profiles, digest mismatch, and missing destructive confirmation.
 
-Apply uses one transaction and the saved PostgreSQL role. With default service settings it applies a 5-second `lock_timeout`, a 30-second `statement_timeout`, and a transaction-scoped advisory lock keyed to the namespace. Existing ordinary and materialized views use `SELECT * FROM qualified_view LIMIT 0` before catalog reinspection; this is non-mutating, takes access-share locks on the view and referenced relations, and blocks conflicting target DDL. While those locks are held, Schemii rechecks the semantic fingerprint, supported metadata fingerprint, and direct dependents, then persists the verified target identity and transaction ID before the first mutation. Recreation executes under the original owner and restores reviewed metadata before commit. Stored rows are discarded and repopulated when the original materialized view was populated; unpopulated views remain unpopulated. User triggers, extra rules, security labels, invalid indexes, non-permanent storage, non-owner grant histories, unavailable/truncated lineage, and any direct dependent block recreation. Delete verifies absence after the reviewed non-`CASCADE` drop. Any proven pre-commit failure rolls back all steps and returns `relation_changed`, the relevant conflict, or `apply_failed`. Lost commit acknowledgement and interrupted `applying` records become reconcile-only and can only use the persisted XID. A committed XID without a persisted intended result remains uncertain with manual recovery required.
+Apply uses one transaction and the saved PostgreSQL role. Schemii caps its namespace-lock wait at 5 seconds only when the current `lock_timeout` is zero or looser; it retains any stricter nonzero PostgreSQL setting. Statement duration inherits the selected role/database/session `statement_timeout`. Apply also takes a transaction-scoped advisory lock keyed to the namespace. Existing ordinary and materialized views use `SELECT * FROM qualified_view LIMIT 0` before catalog reinspection; this is non-mutating, takes access-share locks on the view and referenced relations, and blocks conflicting target DDL. While those locks are held, Schemii rechecks the semantic fingerprint, supported metadata fingerprint, and direct dependents, then persists the verified target identity and transaction ID before the first mutation. Recreation executes under the original owner and restores reviewed metadata before commit. Stored rows are discarded and repopulated when the original materialized view was populated; unpopulated views remain unpopulated. User triggers, extra rules, security labels, invalid indexes, non-permanent storage, non-owner grant histories, unavailable/truncated lineage, and any direct dependent block recreation. Delete verifies absence after the reviewed non-`CASCADE` drop. Any proven pre-commit failure rolls back all steps and returns `relation_changed`, the relevant conflict, or `apply_failed`. Lost commit acknowledgement and interrupted `applying` records become reconcile-only and can only use the persisted XID. A committed XID without a persisted intended result remains uncertain with manual recovery required.
 
 ### Post-Commit Saved-Schema Sync
 
@@ -312,8 +260,8 @@ All stored layout is user-owned. The schema `revision`, protocol-2 layout token,
 - The legacy read-only `/sql` route remains available with Schemer's current database, profile-fingerprint, dashboard-revision, role, and result-limit policy.
 - Breaking view changes alter the existing relation fingerprint. Schemer then returns `relation_changed` and requires explicit source reselection.
 - Schemer retains `dashboardId`, expected revision, widget projection, temporal manifest, and non-privileged-role guards.
-- Schemii write grants are not mounted by Schemer.
-- Shared execution/cancellation mechanics may be reused by Schemer only through its read-only policy.
+- Schemer intentionally mounts the write-capable human Console under Schemer's independent durable write intent and PostgreSQL role permissions. Schemii human intent and AI write capability cannot broaden it.
+- Schemer's dashboard analytics and AI query paths retain their separate read-only, revision-bound policies; human Console write intent does not broaden those paths.
 
 ## Tutorial v4 Coverage
 
@@ -324,11 +272,11 @@ For an exact legacy-v3 upgrade, canonical `order_summary` with its legacy reserv
 ## Acceptance Decisions
 
 - Shared foundations are extended once and scoped through capabilities and policies.
-- One submitted Console script is one all-or-nothing transaction.
-- Write mode requires an exact ephemeral grant and selected-role permission.
+- Console mode explicitly determines managed-read rollback, all-or-nothing managed write, multi-request explicit transaction, or per-statement autocommit semantics.
+- Human write mode requires durable application-scoped write intent plus exact settings/target binding; AI write mode requires its own immutable proposal/policy binding. PostgreSQL remains final permission authority.
 - Real cancellation uses an execution registry and PostgreSQL cancellation.
 - Live catalog fingerprints guard Views inspection, replacement preview, and apply; expected absence guards creation.
 - View DDL uses only the dedicated Schemii view preview/apply plan resource.
 - Views layout is a separate layer inside the existing versioned Schemii layout and conflict guard.
 - Schemer keeps its stronger dashboard and source boundaries.
-- Existing materialized changes, kind conversion, deletion, `CASCADE`, and materialized refresh are not implemented.
+- Materialized creation/recreation/deletion are implemented. Kind conversion, generated `CASCADE`, and materialized refresh are not implemented.

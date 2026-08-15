@@ -30,7 +30,8 @@ from .postgres_common import (
     PostgresServiceError,
     ValidationError,
     canonical_fingerprint,
-    postgres_error_diagnostic,
+    narrow_statement_timeout,
+    postgres_error_details,
     quote_identifier,
 )
 from .postgres_catalog import PostgresCatalogMixin
@@ -40,6 +41,7 @@ from .postgres_console import ConsolePolicy, PostgresConsole, single_sql_stateme
 from .postgres_concurrency import PostgresExecutionController, postgres_execution
 from .postgres_migrations import PostgresMigrationFacade
 from .relation_source import RelationSourceValidationError, normalize_relation_source
+from .query_type_capabilities import snapshot_column
 from .result_limits import ResultLimitError, ResultLimiter, ResultLimits
 from .widget_query import (
     QueryValidationError,
@@ -58,11 +60,7 @@ def _profile_context_fingerprint(profile_id: str, profile: dict[str, Any]) -> st
         ensure_ascii=False,
         separators=(",", ":"),
     )
-    value = 1469598103934665603
-    for character in encoded:
-        value ^= ord(character)
-        value = value * 1099511628211 & ((1 << 64) - 1)
-    return f"{value:016x}"
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 PROFILE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -71,15 +69,6 @@ SQL_IDENTIFIER_RE = r'(?:"(?:[^"]|"")*"|[A-Za-z_][A-Za-z0-9_$]*)'
 SQL_QUALIFIED_RE = rf'{SQL_IDENTIFIER_RE}(?:\s*\.\s*{SQL_IDENTIFIER_RE})?'
 SSL_MODES = {"disable", "allow", "prefer", "require", "verify-ca", "verify-full"}
 COLORS = ("#f4b942", "#65a9ff", "#9b82f4", "#59c894", "#ef7c8e", "#e58d4c")
-def _safe_sql_query_failure(exc: Exception) -> str:
-    sqlstate = getattr(exc, "sqlstate", None)
-    primary = getattr(getattr(exc, "diag", None), "message_primary", None)
-    if not isinstance(sqlstate, str) or not re.fullmatch(r"[0-9A-Z]{5}", sqlstate) or not isinstance(primary, str):
-        return "Read-only SQL query failed"
-    primary = " ".join(primary.split())[:500]
-    return f"Read-only SQL query failed: {primary}" if primary else "Read-only SQL query failed"
-
-
 def _quote_literal(value: str) -> str:
     if not isinstance(value, str) or not value or "\x00" in value:
         raise ValidationError("SQL literal must be a non-empty string")
@@ -276,20 +265,31 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         *,
         connect_factory: Callable[..., Any] | None = None,
         plan_ttl_seconds: int = 900,
+        temporal_manifest_ttl_seconds: int = 300,
         lock_timeout_ms: int = 5000,
-        statement_timeout_ms: int = 30000,
         application_name: str = "schemii",
         execution_controller: PostgresExecutionController | None = None,
         clock: Callable[[], float] = time.time,
+        console_transaction_maximum: int = 4,
+        console_transaction_idle_seconds: int = 300,
+        console_transaction_lifetime_seconds: int = 1800,
     ):
         if not isinstance(plan_ttl_seconds, int) or plan_ttl_seconds < 1:
             raise ValueError("plan_ttl_seconds must be a positive integer")
+        if not isinstance(temporal_manifest_ttl_seconds, int) or temporal_manifest_ttl_seconds < 1:
+            raise ValueError("temporal_manifest_ttl_seconds must be a positive integer")
         if not isinstance(lock_timeout_ms, int) or lock_timeout_ms < 1:
             raise ValueError("lock_timeout_ms must be a positive integer")
-        if not isinstance(statement_timeout_ms, int) or statement_timeout_ms < 1:
-            raise ValueError("statement_timeout_ms must be a positive integer")
         if not isinstance(application_name, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,63}", application_name):
             raise ValueError("application_name is invalid")
+        if isinstance(console_transaction_maximum, bool) or not isinstance(console_transaction_maximum, int) or not 1 <= console_transaction_maximum <= 64:
+            raise ValueError("console_transaction_maximum must be an integer from 1 to 64")
+        if isinstance(console_transaction_idle_seconds, bool) or not isinstance(console_transaction_idle_seconds, int) or not 1 <= console_transaction_idle_seconds <= 86400:
+            raise ValueError("console_transaction_idle_seconds must be an integer from 1 to 86400")
+        if isinstance(console_transaction_lifetime_seconds, bool) or not isinstance(console_transaction_lifetime_seconds, int) or not 1 <= console_transaction_lifetime_seconds <= 604800:
+            raise ValueError("console_transaction_lifetime_seconds must be an integer from 1 to 604800")
+        if console_transaction_idle_seconds > console_transaction_lifetime_seconds:
+            raise ValueError("console transaction idle timeout must not exceed its absolute lifetime")
         self.config_dir = Path(config_dir)
         self.profile_path = self.config_dir / "postgres_profiles.json"
         self.profile_lock_path = self.config_dir / ".postgres_profiles.lock"
@@ -298,33 +298,94 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         self.ai_plan_archive_dir = self.config_dir / "retired_ai_migration_plans"
         self._connect_factory = connect_factory
         self._plan_ttl = plan_ttl_seconds
+        self._temporal_manifest_ttl = temporal_manifest_ttl_seconds
         self._lock_timeout_ms = lock_timeout_ms
-        self._statement_timeout_ms = statement_timeout_ms
         self._application_name = application_name
         self._execution_controller = execution_controller or PostgresExecutionController()
         self._result_limiter = ResultLimiter(ResultLimits())
         self._target_health: dict[str, dict[str, Any]] = {}
         self._clock = clock
         self._temporal_series_secret = secrets.token_bytes(32)
+        self._catalog_cursor_secret = secrets.token_bytes(32)
         self._lock = threading.RLock()
         self._migration_coordinator = None
+        self._metadata_store = None
         self._migrations = PostgresMigrationFacade()
-        self._console = PostgresConsole(self)
+        self._console = PostgresConsole(
+            self, transaction_maximum=console_transaction_maximum,
+            transaction_idle_seconds=console_transaction_idle_seconds,
+            transaction_lifetime_seconds=console_transaction_lifetime_seconds,
+        )
         self._ensure_config_dir()
 
     def set_migration_coordinator(self, coordinator: Any) -> None:
         self._migration_coordinator = coordinator
         self._migrations.set_coordinator(coordinator)
 
+    def set_metadata_store(self, store: Any) -> None:
+        self._metadata_store = store
+
+    def console_settings(self) -> dict[str, Any]:
+        if self._metadata_store is None:
+            raise PostgresServiceError(503, "console_settings_unavailable", "Durable Console settings are unavailable")
+        return self._metadata_store.get_console_settings(self._application_name)
+
+    def update_console_settings(self, expected_revision: Any, settings: Any) -> dict[str, Any]:
+        if self._metadata_store is None:
+            raise PostgresServiceError(503, "console_settings_unavailable", "Durable Console settings are unavailable")
+        return self._metadata_store.update_console_settings(self._application_name, expected_revision, settings)
+
     def profile_context_fingerprint(self, profile_id: str) -> str:
         return _profile_context_fingerprint(profile_id, self._profile(profile_id))
 
-    def execute_console(self, profile_id: str, payload: Any, binding: str, server_id: str, policy: ConsolePolicy | None = None) -> dict[str, Any]:
-        with self.execution("console"):
-            return self._console.execute(profile_id, payload, binding, server_id, policy or ConsolePolicy(statement_timeout_ms=self._statement_timeout_ms))
+    def admission_target(self, profile_id: str) -> str:
+        return _profile_context_fingerprint(profile_id, self._profile(profile_id))
 
-    def cancel_console(self, profile_id: str, execution_id: Any, binding: str, server_id: str) -> dict[str, bool]:
+    def execute_console(self, profile_id: str, payload: Any, binding: str, server_id: str, policy: ConsolePolicy | None = None) -> dict[str, Any]:
+        with self.execution("console", self.admission_target(profile_id)):
+            return self._console.execute(profile_id, payload, binding, server_id, policy or ConsolePolicy())
+
+    def cancel_console(self, profile_id: str, execution_id: Any, binding: str, server_id: str) -> dict[str, Any]:
         return self._console.cancel(profile_id, execution_id, binding, server_id)
+
+    def console_execution_status(self, profile_id: str, execution_id: Any, console_id: Any,
+                                 database: Any, namespace: Any, binding: str, server_id: str) -> dict[str, Any]:
+        return self._console.status(profile_id, execution_id, console_id, database, namespace, binding, server_id)
+
+    def console_result_page(self, profile_id: str, execution_id: Any, result_id: Any, console_id: Any,
+                            database: Any, namespace: Any, statement_index: Any, result_index: Any,
+                            cursor: Any, binding: str, server_id: str) -> dict[str, Any]:
+        with self.execution("console", self.admission_target(profile_id)):
+            return self._console.result_page(
+                profile_id, execution_id, result_id, console_id, database, namespace,
+                statement_index, result_index, cursor, binding, server_id,
+            )
+
+    def close_console_result(self, profile_id: str, execution_id: Any, result_id: Any, console_id: Any,
+                             database: Any, namespace: Any, statement_index: Any, result_index: Any,
+                             binding: str, server_id: str) -> dict[str, Any]:
+        return self._console.close_result(
+            profile_id, execution_id, result_id, console_id, database, namespace,
+            statement_index, result_index, binding, server_id,
+        )
+
+    def create_console_transaction(self, profile_id: str, payload: Any, binding: str, server_id: str,
+                                   policy: ConsolePolicy | None = None) -> dict[str, Any]:
+        with self.execution("console", self.admission_target(profile_id)):
+            return self._console.create_transaction(profile_id, payload, binding, server_id, policy or ConsolePolicy())
+
+    def console_transaction_status(self, profile_id: str, transaction_id: Any, binding: str, server_id: str) -> dict[str, Any]:
+        return self._console.transaction_status(profile_id, transaction_id, binding, server_id)
+
+    def execute_console_transaction(self, profile_id: str, transaction_id: Any, payload: Any,
+                                    binding: str, server_id: str) -> dict[str, Any]:
+        with self.execution("console", self.admission_target(profile_id)):
+            return self._console.execute_transaction(profile_id, transaction_id, payload, binding, server_id)
+
+    def finish_console_transaction(self, profile_id: str, transaction_id: Any, payload: Any,
+                                   binding: str, server_id: str, action: str) -> dict[str, Any]:
+        with self.execution("console", self.admission_target(profile_id)):
+            return self._console.finish_transaction(profile_id, transaction_id, payload, binding, server_id, action)
 
     def create_console_write_grant(self, profile_id: str, payload: Any, binding: str, server_id: str) -> dict[str, Any]:
         return self._console.create_write_grant(profile_id, payload, binding, server_id)
@@ -336,8 +397,8 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         self._console.close()
         self._execution_controller.close()
 
-    def execution(self, execution_class: str):
-        return self._execution_controller.execution(execution_class)
+    def execution(self, execution_class: str, target: str | None = None):
+        return self._execution_controller.execution(execution_class, target)
 
     def execution_metrics(self) -> dict[str, Any]:
         return self._execution_controller.snapshot()
@@ -585,7 +646,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                 "kind": descriptor["kind"],
                 "fingerprint": descriptor["fingerprint"],
                 "columns": [
-                    {key: column[key] for key in ("name", "type", "nullable", "ordinal")}
+                    snapshot_column(column) if "capabilities" in column else {key: column[key] for key in ("name", "type", "nullable", "ordinal")}
                     for column in descriptor["columns"]
                 ],
                 "definition": dict(descriptor["definition"]),
@@ -617,6 +678,8 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                 saved = saved_columns[name]
                 current = current_columns[name]
                 changes = [field for field in ("type", "nullable", "ordinal") if saved[field] != current[field]]
+                if "capabilities" in saved and saved["capabilities"]["capabilityFingerprint"] != current.get("capabilities", {}).get("capabilityFingerprint"):
+                    changes.append("capabilities")
                 if changes:
                     changed_columns.append({"name": name, "changes": changes})
             matches = descriptor["kind"] == kind and descriptor["fingerprint"] == fingerprint
@@ -630,7 +693,9 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         except PostgresServiceError:
             raise
         except Exception as exc:
-            raise PostgresServiceError(502, "introspection_failed", "PostgreSQL relation source could not be verified") from exc
+            raise PostgresServiceError(502, "introspection_failed", "PostgreSQL relation source could not be verified", postgres_error_details(
+                exc, phase="catalog", operation="verify_relation", rollback={"attempted": True},
+            )) from exc
         finally:
             self._close(connection)
 
@@ -659,7 +724,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                 saved_columns = {column["name"]: column for column in expected_columns or []}
                 changed = [{
                     "name": name,
-                    "changes": [field for field in ("type", "nullable", "ordinal") if saved_columns[name][field] != current_columns[name][field]],
+                    "changes": [field for field in ("type", "nullable", "ordinal") if saved_columns[name][field] != current_columns[name][field]] + (["capabilities"] if "capabilities" in saved_columns[name] and saved_columns[name]["capabilities"]["capabilityFingerprint"] != current_columns[name].get("capabilities", {}).get("capabilityFingerprint") else []),
                 } for name in sorted(set(saved_columns) & set(current_columns))]
                 changed = [item for item in changed if item["changes"]]
                 matches = descriptor["kind"] == kind and descriptor["fingerprint"] == fingerprint
@@ -676,7 +741,9 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         except PostgresServiceError:
             raise
         except Exception as exc:
-            raise PostgresServiceError(502, "introspection_failed", "PostgreSQL relation sources could not be verified") from exc
+            raise PostgresServiceError(502, "introspection_failed", "PostgreSQL relation sources could not be verified", postgres_error_details(
+                exc, phase="catalog", operation="verify_relations", rollback={"attempted": True},
+            )) from exc
         finally:
             try:
                 connection.rollback()
@@ -688,7 +755,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
     def preview_relation_rows(
         self, profile_id: str, source: Any, offset: int = 0, limit: int = 20
     ) -> dict[str, Any]:
-        database, namespace, relation, kind, fingerprint, _ = self._validate_relation_source(profile_id, source)
+        database, namespace, relation, kind, fingerprint, expected_columns = self._validate_relation_source(profile_id, source)
         if isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset <= 10_000_000:
             raise ValidationError("offset must be an integer from 0 to 10000000")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 50:
@@ -696,10 +763,18 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         connection = self._connect(profile_id)
         try:
             self._execute_statement(connection, "SET TRANSACTION READ ONLY")
-            self._execute_statement(connection, f"SET LOCAL statement_timeout = '{self._statement_timeout_ms}ms'")
             descriptor = self._inspect_relation_connection(
                 connection, profile_id, database, namespace, relation, kind, fingerprint
             )
+            current_columns = [
+                snapshot_column(column) if expected_columns and "capabilities" in expected_columns[0] else {key: column[key] for key in ("name", "type", "nullable", "ordinal")}
+                for column in descriptor["columns"]
+            ]
+            if expected_columns is not None and current_columns != expected_columns:
+                raise PostgresServiceError(
+                    409, "relation_changed",
+                    "The PostgreSQL relation columns changed; refresh and reselect the source",
+                )
             column_names = [column["name"] for column in descriptor["columns"]]
             relation_sql = f"{quote_identifier(namespace)}.{quote_identifier(relation)}"
             column_sql = ", ".join(quote_identifier(name) for name in column_names)
@@ -722,7 +797,9 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         except PostgresServiceError:
             raise
         except Exception as exc:
-            raise PostgresServiceError(502, "data_preview_failed", "PostgreSQL relation rows could not be read") from exc
+            raise PostgresServiceError(502, "data_preview_failed", "PostgreSQL relation rows could not be read", postgres_error_details(
+                exc, phase="execute", operation="relation_preview", rollback={"attempted": True},
+            )) from exc
         finally:
             self._close(connection)
 
@@ -742,7 +819,6 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         started = time.perf_counter()
         try:
             self._execute_statement(connection, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-            self._execute_statement(connection, f"SET LOCAL statement_timeout = '{self._statement_timeout_ms}ms'")
             relation_sql = f"{quote_identifier(namespace)}.{quote_identifier(relation)}"
             self._execute_statement(connection, f"LOCK TABLE {relation_sql} IN ACCESS SHARE MODE")
             current_database = self._execute_rows(connection, "SELECT current_database() AS database")[0]["database"]
@@ -755,7 +831,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                 normalized_query = normalize_query(normalized_query, descriptor["columns"])
             except QueryValidationError as exc:
                 raise ValidationError(str(exc)) from exc
-            compiled = compile_query(source, normalized_query, quote_identifier)
+            compiled = compile_query(source, normalized_query, quote_identifier, descriptor["columns"])
             rows = self._execute_rows(connection, compiled["sql"], tuple(compiled["parameters"]))
             limit = normalized_query["limit"]
             truncated = len(rows) > limit
@@ -797,7 +873,9 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                 connection.rollback()
             except Exception:
                 pass
-            raise PostgresServiceError(422, "aggregate_query_failed", "Aggregate query failed") from exc
+            raise PostgresServiceError(422, "aggregate_query_failed", "Aggregate query failed", postgres_error_details(
+                exc, phase="execute", operation="structured_aggregate", rollback={"attempted": True},
+            )) from exc
         finally:
             self._close(connection)
 
@@ -825,7 +903,6 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         try:
             self._execute_statement(connection, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             self._execute_statement(connection, "SET LOCAL TIME ZONE 'UTC'")
-            self._execute_statement(connection, f"SET LOCAL statement_timeout = '{self._statement_timeout_ms}ms'")
             relation_sql = f"{quote_identifier(namespace)}.{quote_identifier(relation)}"
             self._execute_statement(connection, f"LOCK TABLE {relation_sql} IN ACCESS SHARE MODE")
             current_database = self._execute_rows(connection, "SELECT current_database() AS database")[0]["database"]
@@ -842,7 +919,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             if action == "manifest":
                 if series is not None or window_start is not None:
                     raise ValidationError("temporal series manifest fields are invalid")
-                compiled = compile_temporal_series_manifest(source, normalized_query, quote_identifier)
+                compiled = compile_temporal_series_manifest(source, normalized_query, quote_identifier, descriptor["columns"])
                 rows = self._execute_rows(connection, compiled["sql"], tuple(compiled["parameters"]))
                 bounds = rows[0] if rows else {"__schemer_min": None, "__schemer_max": None}
                 minimum_raw = bounds.get("__schemer_min")
@@ -857,7 +934,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                         "windowBucketCount": min(SERIES_WINDOW_BUCKETS, normalized_query["limit"]),
                         "pointLimit": normalized_query["limit"],
                         "refreshGeneration": refresh_generation,
-                        "expiresAtEpoch": math.ceil(self._clock() + self._plan_ttl),
+                        "expiresAtEpoch": math.ceil(self._clock() + self._temporal_manifest_ttl),
                         "alignedStart": None,
                         "alignedEndExclusive": None,
                     }
@@ -866,7 +943,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                     result_columns = compile_temporal_series_window(
                         source, normalized_query, quote_identifier, SERIES_BUCKET_SECONDS[0],
                         datetime.now(timezone.utc), datetime.now(timezone.utc) + timedelta(seconds=SERIES_BUCKET_SECONDS[0]),
-                        SERIES_WINDOW_BUCKETS,
+                        SERIES_WINDOW_BUCKETS, descriptor["columns"],
                     )["columns"]
                     empty = True
                     domain = {"min": None, "max": None}
@@ -879,7 +956,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                     def aligned_bucket_count(bucket: int) -> int:
                         return math.floor(maximum_epoch / bucket) - math.floor(minimum_epoch / bucket) + 1
 
-                    minimum_bucket = 86400 if normalized_query["temporalSourceType"].lower() == "date" else 60
+                    minimum_bucket = 86400 if normalized_query["temporalKind"] == "date" else 60
                     bucket_limit = SERIES_MAX_TIMELINE_BUCKETS if point_count <= normalized_query["limit"] else normalized_query["limit"]
                     bucket_seconds = next((item for item in SERIES_BUCKET_SECONDS if item >= minimum_bucket and aligned_bucket_count(item) <= bucket_limit), None)
                     if bucket_seconds is None:
@@ -898,7 +975,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                         "windowBucketCount": min(SERIES_WINDOW_BUCKETS, normalized_query["limit"]),
                         "pointLimit": normalized_query["limit"],
                         "refreshGeneration": refresh_generation,
-                        "expiresAtEpoch": math.ceil(self._clock() + self._plan_ttl),
+                        "expiresAtEpoch": math.ceil(self._clock() + self._temporal_manifest_ttl),
                         "alignedStart": _series_iso(aligned_start),
                         "alignedEndExclusive": _series_iso(aligned_end),
                     }
@@ -907,7 +984,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                     result_columns = compile_temporal_series_window(
                         source, normalized_query, quote_identifier, bucket_seconds, aligned_start,
                         min(aligned_end, aligned_start + timedelta(seconds=bucket_seconds * temporal["windowBucketCount"])),
-                        temporal["windowBucketCount"],
+                        temporal["windowBucketCount"], descriptor["columns"],
                     )["columns"]
                     empty = False
                     domain = {"min": _series_iso(minimum), "max": _series_iso(maximum)}
@@ -973,7 +1050,8 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             requested_end = min(aligned_end, requested_start + timedelta(seconds=window_seconds))
             maximum_rows = math.ceil((requested_end - requested_start).total_seconds() / bucket_seconds)
             compiled = compile_temporal_series_window(
-                source, normalized_query, quote_identifier, bucket_seconds, requested_start, requested_end, maximum_rows
+                source, normalized_query, quote_identifier, bucket_seconds, requested_start, requested_end, maximum_rows,
+                descriptor["columns"],
             )
             rows = self._execute_rows(connection, compiled["sql"], tuple(compiled["parameters"]))
             if len(rows) > maximum_rows:
@@ -1017,7 +1095,9 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                 connection.rollback()
             except Exception:
                 pass
-            raise PostgresServiceError(422, "temporal_series_failed", "Temporal series query failed") from exc
+            raise PostgresServiceError(422, "temporal_series_failed", "Temporal series query failed", postgres_error_details(
+                exc, phase="execute", operation="structured_temporal", rollback={"attempted": True},
+            )) from exc
         finally:
             self._close(connection)
 
@@ -1051,7 +1131,6 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         started = time.perf_counter()
         try:
             self._execute_statement(connection, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-            self._execute_statement(connection, f"SET LOCAL statement_timeout = '{self._statement_timeout_ms}ms'")
             relation_sql = f"{quote_identifier(namespace)}.{quote_identifier(relation)}"
             self._execute_statement(connection, f"LOCK TABLE {relation_sql} IN ACCESS SHARE MODE")
             current_database = self._execute_rows(connection, "SELECT current_database() AS database")[0]["database"]
@@ -1108,7 +1187,9 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                 connection.rollback()
             except Exception:
                 pass
-            raise PostgresServiceError(422, "detail_query_failed", _safe_sql_query_failure(exc)) from exc
+            raise PostgresServiceError(422, "detail_query_failed", "Detail query failed", postgres_error_details(
+                exc, phase="execute", operation="structured_detail", rollback={"attempted": True},
+            )) from exc
         finally:
             self._close(connection)
 
@@ -1191,7 +1272,9 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         except PostgresServiceError:
             raise
         except Exception as exc:
-            raise PostgresServiceError(502, "data_preview_failed", "PostgreSQL table data could not be read") from exc
+            raise PostgresServiceError(502, "data_preview_failed", "PostgreSQL table data could not be read", postgres_error_details(
+                exc, phase="execute", operation="table_preview", rollback={"attempted": True},
+            )) from exc
         finally:
             self._close(connection)
 
@@ -1208,6 +1291,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         max_rows: int = 500,
         max_columns: int = 100,
         max_result_bytes: int = 1024 * 1024,
+        operation_timeout_ms: int | None = None,
     ) -> dict[str, Any]:
         namespace = self._validate_namespace(namespace)
         profile = self._profile(profile_id)
@@ -1220,22 +1304,22 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             raise ValueError("allow_explain must be boolean")
         if any(isinstance(value, bool) or not isinstance(value, int) or value < 1 for value in (max_rows, max_columns, max_result_bytes)):
             raise ValueError("SQL result limits must be positive integers")
+        if operation_timeout_ms is not None and (isinstance(operation_timeout_ms, bool) or not isinstance(operation_timeout_ms, int) or operation_timeout_ms < 1):
+            raise ValueError("operation_timeout_ms must be a positive integer or None")
         if not isinstance(statement, str) or not statement.strip():
             raise ValidationError("sql must be a non-empty string")
         if "\x00" in statement or len(statement) > 100_000:
             raise ValidationError("sql must be at most 100000 characters and contain no null bytes")
         statement = _single_sql_statement(statement, "SQL query")
-        allowed_prefixes = "SELECT|WITH|VALUES|TABLE" + ("|EXPLAIN" if allow_explain else "")
-        if not re.match(rf"^\s*(?:{allowed_prefixes})\b", statement, re.I):
-            suffix = ", or EXPLAIN" if allow_explain else ""
-            raise ValidationError(f"Only read-only SELECT, WITH, VALUES, or TABLE{suffix} queries are allowed")
+        if not allow_explain and re.match(r"^\s*EXPLAIN\b", statement, re.I):
+            raise ValidationError("EXPLAIN is not allowed for this read-only query")
 
         connection = self._connect_profile(profile)
         cursor = None
         try:
             cursor = connection.cursor()
             cursor.execute("SET TRANSACTION READ ONLY")
-            cursor.execute(f"SET LOCAL statement_timeout = '{self._statement_timeout_ms}ms'")
+            narrow_statement_timeout(cursor, operation_timeout_ms)
             cursor.execute("SELECT current_database() AS database")
             current_rows = cursor.fetchall()
             current_database = current_rows[0]["database"] if current_rows and isinstance(current_rows[0], dict) else current_rows[0][0]
@@ -1251,7 +1335,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                 (f"pg_catalog, {quote_identifier(namespace)}",),
             )
             cursor.execute(statement)
-            if cursor.description is None:
+            if not cursor.description:
                 raise ValidationError("The SQL query did not return a result set")
             names = [item.name if hasattr(item, "name") else item[0] for item in cursor.description]
             if len(names) > max_columns:
@@ -1296,7 +1380,11 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         except PostgresServiceError:
             raise
         except Exception as exc:
-            raise PostgresServiceError(422, "sql_query_failed", _safe_sql_query_failure(exc)) from exc
+            details = postgres_error_details(exc, phase="execute", operation="read_sql", rollback={"attempted": True})
+            message = "Read-only SQL query failed"
+            if details["postgres"].get("sqlstate") == "57014":
+                message = "PostgreSQL canceled the read-only query under its configured timeout policy"
+            raise PostgresServiceError(422, "sql_query_failed", message, details) from exc
         finally:
             if cursor is not None:
                 close = getattr(cursor, "close", None)
@@ -1361,7 +1449,9 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         except PostgresServiceError:
             raise
         except Exception as exc:
-            raise PostgresServiceError(502, "introspection_failed", "PostgreSQL schema introspection failed") from exc
+            raise PostgresServiceError(502, "introspection_failed", "PostgreSQL schema introspection failed", postgres_error_details(
+                exc, phase="catalog", operation="schema_introspection", rollback={"attempted": True},
+            )) from exc
         finally:
             try:
                 connection.rollback()
@@ -1391,7 +1481,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                    current_setting('TimeZone') AS timezone
         """)[0]
         self._require_namespace(connection, namespace)
-        table_rows = self._execute_rows(connection, """
+        table_rows = self._execute_all_rows(connection, """
             SELECT c.oid AS table_oid, c.relname AS table_name, c.relkind AS relation_kind,
                    c.relispartition AS is_partition,
                    CASE WHEN c.relkind = 'p' THEN pg_catalog.pg_get_partkeydef(c.oid) END AS partition_key,
@@ -1403,7 +1493,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             WHERE n.nspname = %s AND c.relkind IN ('r','p')
             ORDER BY c.relname
         """, (namespace,))
-        columns = self._execute_rows(connection, """
+        columns = self._execute_all_rows(connection, """
             SELECT c.relname AS table_name, a.attname AS column_name, a.attnum AS ordinal,
                    pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
                    NOT a.attnotnull AS nullable,
@@ -1416,7 +1506,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             WHERE n.nspname = %s AND c.relkind IN ('r','p')
             ORDER BY c.relname, a.attnum
         """, (namespace,))
-        constraints = self._execute_rows(connection, """
+        constraints = self._execute_all_rows(connection, """
             SELECT con.conname AS constraint_name, src.relname AS table_name, con.contype AS constraint_type,
                    ARRAY(SELECT att.attname FROM unnest(con.conkey) WITH ORDINALITY key(attnum, ord)
                          JOIN pg_catalog.pg_attribute att ON att.attrelid=con.conrelid AND att.attnum=key.attnum
@@ -1437,7 +1527,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             WHERE n.nspname=%s AND con.contype IN ('p','u','f','c')
             ORDER BY src.relname, con.contype, con.conname
         """, (namespace,))
-        indexes = self._execute_rows(connection, """
+        indexes = self._execute_all_rows(connection, """
             SELECT tab.relname AS table_name, idx.relname AS index_name,
                    pg_catalog.pg_get_indexdef(i.indexrelid) AS definition,
                    i.indisunique AS is_unique, am.amname AS method
@@ -1450,7 +1540,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             WHERE n.nspname=%s AND con.oid IS NULL
             ORDER BY tab.relname, idx.relname
         """, (namespace,))
-        routines = self._execute_rows(connection, """
+        routines = self._execute_all_rows(connection, """
             SELECT p.proname AS name, p.prokind AS kind,
                    pg_catalog.pg_get_function_identity_arguments(p.oid) AS identity_arguments,
                    pg_catalog.pg_get_function_arguments(p.oid) AS arguments,
@@ -1462,13 +1552,13 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             WHERE n.nspname=%s AND p.prokind IN ('f','p')
             ORDER BY p.proname, pg_catalog.pg_get_function_identity_arguments(p.oid)
         """, (namespace,))
-        views = self._execute_rows(connection, """
+        views = self._execute_all_rows(connection, """
             SELECT c.relname AS name, c.relkind AS kind,
                    pg_catalog.pg_get_viewdef(c.oid, true) AS query_definition
             FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
             WHERE n.nspname=%s AND c.relkind IN ('v','m') ORDER BY c.relname
         """, (namespace,))
-        triggers = self._execute_rows(connection, """
+        triggers = self._execute_all_rows(connection, """
             SELECT c.relname AS table_name, t.tgname AS trigger_name,
                     pg_catalog.pg_get_triggerdef(t.oid, true) AS definition,
                     t.tgenabled AS enabled
@@ -1477,16 +1567,6 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
             WHERE n.nspname=%s AND NOT t.tgisinternal ORDER BY c.relname, t.tgname
         """, (namespace,))
-        collections = {
-            "tables": table_rows, "columns": columns, "constraints": constraints, "indexes": indexes,
-            "routines": routines, "views": views, "triggers": triggers,
-        }
-        for label, rows in collections.items():
-            if len(rows) > self._result_limiter.limits.max_collection_items:
-                raise PostgresServiceError(
-                    422, "catalog_collection_too_large", "PostgreSQL catalog collection exceeds the item limit",
-                    {"policy": "reject", "path": f"$.{label}", "limit": self._result_limiter.limits.max_collection_items, "actual": len(rows)},
-                )
         for label, rows, fields in (
             ("columns", columns, ("default_sql",)),
             ("constraints", constraints, ("definition",)),
@@ -1500,8 +1580,8 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                     value = row.get(field)
                     if isinstance(value, str) and len(value.encode("utf-8")) > self._result_limiter.limits.max_cell_bytes:
                         raise PostgresServiceError(
-                            422, "catalog_definition_too_large", "PostgreSQL catalog definition exceeds the byte limit",
-                            {"policy": "reject", "path": f"$.{label}[{index}].{field}", "limit": self._result_limiter.limits.max_cell_bytes, "actual": len(value.encode("utf-8"))},
+                            422, "catalog_definition_too_large", "Schemii cannot import a PostgreSQL catalog definition above its per-definition byte limit",
+                            {"policy": "reject", "limitation": "application", "path": f"$.{label}[{index}].{field}", "limit": self._result_limiter.limits.max_cell_bytes, "actual": len(value.encode("utf-8"))},
                         )
         return self._build_schema(
             profile_id, namespace, meta, columns, constraints, indexes, routines, views, triggers,
@@ -1749,22 +1829,28 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         live = self.introspect(profile_id, namespace)
         if self._profile_fingerprint(self._profile(profile_id)) != profile_fingerprint:
             raise ConflictError("profile_changed", "Connection profile changed during preview")
-        if any((table.get("postgres") or {}).get("partitioned") or (table.get("postgres") or {}).get("isPartition") for table in live.get("tables", []) + desired.get("tables", [])):
-            raise ValidationError("Partitioned tables can be imported but require manual migrations")
         reordered_tables = self._column_reorder_tables(live, desired)
         tables_with_rows = self._tables_with_rows(profile_id, namespace, reordered_tables) if reordered_tables else set()
         for table in live.get("tables", []):
             if table.get("name") in reordered_tables:
                 table.setdefault("postgres", {})["hasRows"] = table["name"] in tables_with_rows
-        steps, warnings = self._diff(namespace, live, desired, allow_destructive)
+        assessment = self._migration_safety_assessment(profile_id, namespace, live, desired)
+        steps, warnings, blocking_differences = self._diff(
+            namespace, live, desired, allow_destructive, assessment,
+        )
+        complete = not blocking_differences
+        migration_fingerprint = self._migration_fingerprint(live, assessment)
         plan_id = "plan_" + secrets.token_hex(16)
         now = self._clock()
         stored = {
             "id": plan_id, "profileId": profile_id, "database": live.get("postgres", {}).get("database"), "namespace": namespace,
-            "liveFingerprint": live["postgres"]["fingerprint"], "allowDestructive": allow_destructive,
+            "liveFingerprint": migration_fingerprint, "catalogFingerprint": live["postgres"]["fingerprint"],
+            "allowDestructive": allow_destructive,
             "profileFingerprint": profile_fingerprint,
             "destructive": any(step["destructive"] for step in steps), "steps": copy.deepcopy(steps),
-            "warnings": list(warnings), "createdAt": now, "expiresAt": now + self._plan_ttl,
+            "warnings": list(warnings), "blockingDifferences": copy.deepcopy(blocking_differences),
+            "complete": complete, "applyCapable": complete,
+            "createdAt": now, "expiresAt": now + self._plan_ttl,
             "desiredSchema": copy.deepcopy(desired),
         }
         if persist:
@@ -1774,139 +1860,488 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             public.update({"id": None, "previewOnly": True})
         return public
 
-    @postgres_execution("write")
-    def preview_ai_migration(self, operation_id: str, profile_id: str, database: str, namespace: str, desired_schema: dict[str, Any], allow_destructive: bool, schema_binding: dict[str, Any]) -> dict[str, Any]:
-        return self._migrations.preview_ai_migration(operation_id, profile_id, database, namespace, desired_schema, allow_destructive, schema_binding)
+    @staticmethod
+    def _migration_fingerprint(live: dict[str, Any], assessment: dict[str, Any]) -> str:
+        # timeZone is intentionally transient in the generic schema fingerprint,
+        # but it is an input to timestamp conversion SQL and must stale a plan.
+        return canonical_fingerprint({
+            "catalogFingerprint": (live.get("postgres") or {}).get("fingerprint"),
+            "sourceTimezoneInput": (live.get("postgres") or {}).get("timeZone"),
+            "preservationAndDependencies": assessment,
+        })
+
+    def _migration_safety_assessment(
+        self, profile_id: str, namespace: str, live: dict[str, Any], desired: dict[str, Any],
+        *, connection: Any = None,
+    ) -> dict[str, Any]:
+        affected = self._migration_affected_tables(live, desired)
+        existing = sorted(affected & {table.get("name") for table in live.get("tables", [])})
+        if not existing:
+            return {"status": "available", "relations": {}}
+        owned_connection = connection is None
+        connection = connection or self._connect(profile_id)
+        try:
+            if owned_connection:
+                self._execute_statement(connection, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            return self._migration_safety_assessment_connection(
+                connection, namespace, existing, self._column_reorder_tables(live, desired),
+            )
+        except Exception:
+            return {
+                "status": "unavailable", "reason": "catalog_inventory_failed",
+                "relations": {name: {"status": "unavailable"} for name in existing},
+            }
+        finally:
+            if owned_connection:
+                try:
+                    connection.rollback()
+                except Exception:
+                    pass
+                self._close(connection)
+
+    def _migration_safety_assessment_connection(
+        self, connection: Any, namespace: str, table_names: list[str], reordered_tables: set[str],
+    ) -> dict[str, Any]:
+        relations = {}
+        for table_name in table_names:
+            identity = self._execute_rows(connection, """
+                /* migration_relation_identity */
+                SELECT c.oid, c.relkind
+                FROM pg_catalog.pg_class c
+                JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = %s AND c.relname = %s AND c.relkind IN ('r', 'p')
+            """, (namespace, table_name))
+            if len(identity) != 1:
+                relations[table_name] = {"status": "unavailable", "reason": "relation_changed"}
+                continue
+            oid = identity[0]["oid"]
+            dependency_rows = self._execute_rows(connection, """
+                /* migration_view_dependencies */
+                SELECT DISTINCT a.attname AS column_name, vn.nspname AS dependent_namespace,
+                       vc.relname AS dependent_relation,
+                       CASE WHEN vc.relkind = 'm' THEN 'materialized_view' ELSE 'view' END AS dependent_kind
+                FROM pg_catalog.pg_depend d
+                JOIN pg_catalog.pg_rewrite rw
+                  ON d.classid = 'pg_catalog.pg_rewrite'::pg_catalog.regclass AND d.objid = rw.oid
+                JOIN pg_catalog.pg_class vc ON vc.oid = rw.ev_class
+                JOIN pg_catalog.pg_namespace vn ON vn.oid = vc.relnamespace
+                LEFT JOIN pg_catalog.pg_attribute a
+                  ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid
+                WHERE d.refclassid = 'pg_catalog.pg_class'::pg_catalog.regclass
+                  AND d.refobjid = %s AND d.deptype = 'n' AND rw.ev_class <> d.refobjid
+                  AND vc.relkind IN ('v', 'm')
+                ORDER BY dependent_namespace, dependent_relation, column_name
+                LIMIT %s
+            """, (oid, MAX_RECONSTRUCTION_METADATA_ITEMS + 1))
+            dependencies = {
+                "status": "available",
+                "items": dependency_rows[:MAX_RECONSTRUCTION_METADATA_ITEMS],
+                "truncated": len(dependency_rows) > MAX_RECONSTRUCTION_METADATA_ITEMS,
+            }
+            relation_assessment = {
+                "status": "available", "catalogKind": identity[0].get("relkind"),
+                "viewDependencies": dependencies,
+            }
+            if table_name in reordered_tables:
+                inventory_rows = self._execute_rows(connection, """
+                    /* migration_reconstruction_inventory */
+                    SELECT c.oid::text AS relation_oid, c.xmin::text AS relation_xmin,
+                           pg_catalog.pg_get_userbyid(c.relowner) AS owner, current_user AS current_role,
+                           c.relacl IS NOT NULL AS explicit_acl,
+                           EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
+                                   WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+                                     AND a.attacl IS NOT NULL) AS column_acls,
+                           EXISTS (SELECT 1 FROM pg_catalog.pg_default_acl d
+                                   WHERE d.defaclrole = c.relowner AND d.defaclnamespace = c.relnamespace
+                                     AND d.defaclobjtype = 'r') AS default_acls,
+                           pg_catalog.obj_description(c.oid, 'pg_class') AS relation_comment,
+                           EXISTS (SELECT 1 FROM pg_catalog.pg_description d
+                                   WHERE d.classoid = 'pg_catalog.pg_class'::pg_catalog.regclass
+                                     AND d.objoid = c.oid AND d.objsubid > 0) AS column_comments,
+                           c.relrowsecurity AS row_security, c.relforcerowsecurity AS force_row_security,
+                           EXISTS (SELECT 1 FROM pg_catalog.pg_policy p WHERE p.polrelid = c.oid) AS policies,
+                           EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite r
+                                   WHERE r.ev_class = c.oid AND r.rulename <> '_RETURN') AS rules,
+                           EXISTS (SELECT 1 FROM pg_catalog.pg_publication_rel p WHERE p.prrelid = c.oid)
+                             OR EXISTS (SELECT 1 FROM pg_catalog.pg_publication p WHERE p.puballtables) AS publications,
+                           c.relreplident AS replica_identity,
+                           EXISTS (SELECT 1 FROM pg_catalog.pg_seclabel s
+                                   WHERE s.classoid = 'pg_catalog.pg_class'::pg_catalog.regclass
+                                     AND s.objoid = c.oid) AS security_labels,
+                           EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
+                                   WHERE d.classid = 'pg_catalog.pg_class'::pg_catalog.regclass
+                                     AND d.objid = c.oid
+                                     AND d.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass) AS extension_dependencies,
+                           c.reltablespace <> 0 AS nondefault_tablespace,
+                           am.amname IS DISTINCT FROM current_setting('default_table_access_method') AS nondefault_access_method,
+                           COALESCE(cardinality(c.reloptions), 0) > 0 AS relation_options,
+                           EXISTS (SELECT 1 FROM pg_catalog.pg_class toast
+                                   WHERE toast.oid = c.reltoastrelid
+                                     AND (toast.reltablespace <> 0 OR COALESCE(cardinality(toast.reloptions), 0) > 0)) AS toast_storage,
+                           EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
+                                   JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
+                                   WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+                                     AND (a.attstorage <> t.typstorage OR a.attstattarget <> -1
+                                          OR a.attcompression <> '' OR a.attcollation <> t.typcollation)) AS column_storage,
+                           c.relpersistence AS persistence,
+                           EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
+                                   JOIN pg_catalog.pg_class seq ON seq.oid = d.objid AND seq.relkind = 'S'
+                                   WHERE d.refclassid = 'pg_catalog.pg_class'::pg_catalog.regclass
+                                     AND d.refobjid = c.oid AND d.deptype IN ('a', 'i')) AS owned_sequences,
+                           EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
+                                   WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+                                     AND (a.attidentity <> '' OR a.attgenerated <> '')) AS identity_or_generated,
+                           EXISTS (SELECT 1 FROM pg_catalog.pg_statistic_ext s WHERE s.stxrelid = c.oid) AS extended_statistics,
+                           (SELECT count(*) FROM pg_catalog.pg_index i WHERE i.indrelid = c.oid) AS indexes,
+                           (SELECT count(*) FROM pg_catalog.pg_constraint con
+                            WHERE con.conrelid = c.oid OR con.confrelid = c.oid) AS constraints,
+                           (SELECT count(*) FROM pg_catalog.pg_trigger t
+                            WHERE t.tgrelid = c.oid AND NOT t.tgisinternal) AS triggers,
+                           (SELECT count(*) FROM pg_catalog.pg_depend d
+                            WHERE d.refclassid = 'pg_catalog.pg_class'::pg_catalog.regclass
+                              AND d.refobjid = c.oid AND d.deptype = 'n'
+                              AND d.classid NOT IN (
+                                  'pg_catalog.pg_class'::pg_catalog.regclass,
+                                  'pg_catalog.pg_constraint'::pg_catalog.regclass,
+                                  'pg_catalog.pg_rewrite'::pg_catalog.regclass,
+                                  'pg_catalog.pg_attrdef'::pg_catalog.regclass,
+                                  'pg_catalog.pg_trigger'::pg_catalog.regclass,
+                                  'pg_catalog.pg_policy'::pg_catalog.regclass
+                              )) AS unknown_dependents,
+                           c.relkind = 'p' OR c.relispartition
+                             OR EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i
+                                       WHERE i.inhrelid = c.oid OR i.inhparent = c.oid) AS partition_relationships,
+                           jsonb_build_object(
+                               'acl', c.relacl, 'comment', pg_catalog.obj_description(c.oid, 'pg_class'),
+                               'reloptions', c.reloptions, 'replicaIdentity', c.relreplident
+                           ) AS opaque_metadata
+                    FROM pg_catalog.pg_class c
+                    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                    LEFT JOIN pg_catalog.pg_am am ON am.oid = c.relam
+                    WHERE n.nspname = %s AND c.relname = %s AND c.relkind IN ('r', 'p')
+                """, (namespace, table_name))
+                if len(inventory_rows) != 1:
+                    relation_assessment["reconstruction"] = {
+                        "status": "unavailable", "reason": "inventory_incomplete",
+                    }
+                else:
+                    inventory = inventory_rows[0]
+                    blockers = []
+                    blocker_fields = (
+                        ("explicit_acl", "ACLs"), ("column_acls", "column ACLs"),
+                        ("default_acls", "default ACL effects"), ("relation_comment", "relation comment"),
+                        ("column_comments", "column comments"), ("row_security", "row level security"),
+                        ("force_row_security", "forced row level security"), ("policies", "policies"),
+                        ("rules", "rules"), ("publications", "publications"),
+                        ("security_labels", "security labels"),
+                        ("extension_dependencies", "extension dependencies"),
+                        ("nondefault_tablespace", "tablespace"),
+                        ("nondefault_access_method", "access method"),
+                        ("relation_options", "relation options"), ("toast_storage", "TOAST storage"),
+                        ("column_storage", "column storage settings"),
+                        ("owned_sequences", "owned sequences"),
+                        ("identity_or_generated", "identity or generated columns"),
+                        ("extended_statistics", "extended statistics"),
+                        ("indexes", "indexes"), ("constraints", "constraints"),
+                        ("triggers", "triggers"), ("partition_relationships", "partition relationships"),
+                        ("unknown_dependents", "unknown dependencies"),
+                    )
+                    blockers.extend(label for field, label in blocker_fields if inventory.get(field))
+                    if inventory.get("owner") != inventory.get("current_role"):
+                        blockers.append("owner")
+                    if inventory.get("replica_identity") not in {None, "d"}:
+                        blockers.append("replica identity")
+                    if inventory.get("persistence") not in {None, "p"}:
+                        blockers.append("storage persistence")
+                    if dependencies["truncated"] or dependencies["items"]:
+                        blockers.append("dependent views")
+                    opaque = inventory.get("opaque_metadata")
+                    try:
+                        opaque_size = len(json.dumps(opaque, ensure_ascii=True, default=str).encode("utf-8"))
+                    except Exception:
+                        opaque_size = 64 * 1024 + 1
+                    if opaque_size > 64 * 1024:
+                        blockers.append("truncated opaque metadata")
+                    manifest = {
+                        "status": "available", "inventory": inventory,
+                        "viewDependencies": dependencies, "blockers": sorted(set(blockers)),
+                    }
+                    manifest["fingerprint"] = canonical_fingerprint(manifest)
+                    relation_assessment["reconstruction"] = manifest
+            relations[table_name] = relation_assessment
+        return {"status": "available", "relations": relations}
+
+    def _migration_affected_tables(self, live: dict[str, Any], desired: dict[str, Any]) -> set[str]:
+        live_tables = {table.get("name"): table for table in live.get("tables", [])}
+        desired_tables = {table.get("name"): table for table in desired.get("tables", [])}
+        affected = {
+            name for name in set(live_tables) | set(desired_tables)
+            if name not in live_tables or name not in desired_tables
+            or canonical_fingerprint(live_tables[name]) != canonical_fingerprint(desired_tables[name])
+        }
+        table_names_by_id = {
+            table.get("id"): table.get("name")
+            for table in live.get("tables", []) + desired.get("tables", []) if table.get("id")
+        }
+        live_relationships = {item.get("id") or (item.get("constraintName"), item.get("fromTableId")): item for item in live.get("relationships", [])}
+        desired_relationships = {item.get("id") or (item.get("constraintName"), item.get("fromTableId")): item for item in desired.get("relationships", [])}
+        for key in set(live_relationships) | set(desired_relationships):
+            old, new = live_relationships.get(key), desired_relationships.get(key)
+            if old is not None and new is not None and canonical_fingerprint(old) == canonical_fingerprint(new):
+                continue
+            for relationship in (old, new):
+                if relationship:
+                    for field in ("fromTableId", "toTableId"):
+                        if table_names_by_id.get(relationship.get(field)):
+                            affected.add(table_names_by_id[relationship[field]])
+        return affected
 
     @postgres_execution("write")
-    def preview_ai_insert_rows(self, operation_id: str, profile_id: str, database: str, namespace: str, relation: str, rows: list[dict[str, Any]], schema_binding: dict[str, Any]) -> dict[str, Any]:
-        return self._migrations.preview_ai_insert_rows(profile_id, database, namespace, relation, rows, schema_binding)
+    def preview_ai_migration(self, operation_id: str, profile_id: str, database: str, namespace: str, desired_schema: dict[str, Any], allow_destructive: bool, schema_binding: dict[str, Any], operation_timeout_ms: int | None = None) -> dict[str, Any]:
+        return self._migrations.preview_ai_migration(operation_id, profile_id, database, namespace, desired_schema, allow_destructive, schema_binding, operation_timeout_ms)
 
     @postgres_execution("write")
-    def preview_ai_create_view(self, operation_id: str, profile_id: str, database: str, namespace: str, relation: str, definition: str, schema_binding: dict[str, Any]) -> dict[str, Any]:
-        return self._migrations.preview_ai_create_view(profile_id, database, namespace, relation, definition, schema_binding)
+    def preview_ai_insert_rows(self, operation_id: str, profile_id: str, database: str, namespace: str, relation: str, rows: list[dict[str, Any]], schema_binding: dict[str, Any], operation_timeout_ms: int | None = None) -> dict[str, Any]:
+        return self._migrations.preview_ai_insert_rows(profile_id, database, namespace, relation, rows, schema_binding, operation_timeout_ms)
+
+    @postgres_execution("write")
+    def preview_ai_create_view(self, operation_id: str, profile_id: str, database: str, namespace: str, relation: str, definition: str, schema_binding: dict[str, Any], operation_timeout_ms: int | None = None) -> dict[str, Any]:
+        return self._migrations.preview_ai_create_view(profile_id, database, namespace, relation, definition, schema_binding, operation_timeout_ms)
 
     def _inspect_ai_insert_target(self, connection: Any, database: str, namespace: str, relation: str, requested_columns: list[str]) -> dict[str, Any]:
-        rows = self._execute_rows(connection, """
+        try:
+            rows = self._execute_rows(connection, """/* ai_insert_relation */
             SELECT current_database() AS database, c.oid AS live_oid, c.relkind AS catalog_kind,
-                   pg_catalog.has_table_privilege(c.oid, 'INSERT') AS can_insert
+                   c.xmin::text AS xmin, pg_catalog.has_table_privilege(c.oid, 'INSERT') AS can_insert
             FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
             WHERE n.nspname = %s AND c.relname = %s AND c.relkind IN ('r', 'p')
-        """, (namespace, relation))
+            """, (namespace, relation))
+        except PostgresServiceError:
+            raise
+        except Exception as exc:
+            raise PostgresServiceError(422, "application_limitation", "The insert target catalog could not be inspected exactly", {
+                "catalog": "relation", "application": self._application_name,
+                "requiredSurface": "exact insert catalog snapshot",
+                "reason": "The application cannot prove the reviewed insert target is unchanged",
+                "safeAlternative": "Review and run the insert in Console against the exact target.",
+                **postgres_error_details(exc, phase="catalog", operation="structured_insert_preview"),
+            }) from exc
         if len(rows) != 1:
             raise NotFoundError(f"Table {namespace}.{relation} was not found")
         relation_row = rows[0]
         if relation_row.get("database") != database:
             raise ConflictError("database_changed", "Connected PostgreSQL database does not match the requested database")
-        if relation_row.get("can_insert") is not True:
-            raise PostgresServiceError(403, "insert_not_permitted", "The selected role cannot insert into this table")
-        if relation_row.get("catalog_kind") == "p":
-            raise ValidationError("AI row insertion into partitioned tables is unsupported because routed partition effects cannot be bounded safely")
-        column_rows = self._execute_rows(connection, """
-            SELECT a.attname AS name, pg_catalog.format_type(a.atttypid, a.atttypmod) AS type,
-                   NOT a.attnotnull AS nullable, a.attnum AS ordinal,
-                        pg_catalog.pg_get_expr(d.adbin, d.adrelid) AS default,
-                       a.attidentity AS identity, a.attgenerated AS generated
-            FROM pg_catalog.pg_attribute a
-            LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
-            WHERE a.attrelid = %s AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum
-        """, (relation_row["live_oid"],))
-        by_name = {row["name"]: row for row in column_rows}
+        oid = relation_row["live_oid"]
+        try:
+            tree_rows = self._execute_rows(connection, """/* ai_insert_tree */
+                WITH RECURSIVE tree AS (
+                    SELECT c.oid AS relation_oid, NULL::oid AS parent_oid, 0 AS level
+                    FROM pg_catalog.pg_class c WHERE c.oid = %s
+                    UNION ALL
+                    SELECT child.oid, i.inhparent, tree.level + 1
+                    FROM tree JOIN pg_catalog.pg_inherits i ON i.inhparent = tree.relation_oid
+                    JOIN pg_catalog.pg_class child ON child.oid = i.inhrelid
+                )
+                SELECT tree.relation_oid::text AS relation_oid, tree.parent_oid::text AS parent_oid,
+                       tree.level, n.nspname AS namespace, c.relname AS name, c.relkind AS catalog_kind,
+                       c.xmin::text AS xmin, c.relrowsecurity AS row_security,
+                       c.relforcerowsecurity AS force_row_security, c.relreplident AS replica_identity,
+                       CASE WHEN c.relpartbound IS NULL THEN NULL
+                            ELSE pg_catalog.pg_get_expr(c.relpartbound, c.oid, true) END AS partition_bound,
+                       NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i WHERE i.inhparent = c.oid) AS is_leaf
+                FROM tree JOIN pg_catalog.pg_class c ON c.oid = tree.relation_oid
+                JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                ORDER BY tree.relation_oid
+            """, (oid,))
+            relation_oids = [row["relation_oid"] for row in tree_rows]
+            column_rows = self._execute_rows(connection, """/* ai_insert_columns */
+                SELECT a.attrelid::text AS relation_oid, a.attname AS name, a.attnum AS ordinal,
+                       a.atttypid::text AS type_oid, a.atttypmod AS type_modifier,
+                       pg_catalog.format_type(a.atttypid, a.atttypmod) AS type,
+                       a.attcollation::text AS collation_oid, NOT a.attnotnull AS nullable,
+                       a.attidentity AS identity, a.attgenerated AS generated,
+                       a.atthasmissing AS has_missing, d.oid::text AS default_oid,
+                       d.xmin::text AS default_xmin, pg_catalog.pg_get_expr(d.adbin, d.adrelid, true) AS default
+                FROM pg_catalog.pg_attribute a
+                LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+                WHERE a.attrelid = ANY(%s::oid[]) AND a.attnum > 0 AND NOT a.attisdropped
+                ORDER BY a.attrelid, a.attnum
+            """, (relation_oids,))
+            constraint_rows = self._execute_rows(connection, """/* ai_insert_constraints */
+                SELECT con.oid::text AS oid, con.xmin::text AS xmin, con.conrelid::text AS relation_oid,
+                       con.conname AS name, con.contype AS type, con.condeferrable AS deferrable,
+                       con.condeferred AS initially_deferred, con.convalidated AS validated,
+                       con.connoinherit AS no_inherit, con.conparentid::text AS parent_oid,
+                       con.confrelid::text AS referenced_relation_oid, con.conindid::text AS index_oid,
+                       pg_catalog.pg_get_constraintdef(con.oid, true) AS definition
+                FROM pg_catalog.pg_constraint con WHERE con.conrelid = ANY(%s::oid[])
+                ORDER BY con.conrelid, con.oid
+            """, (relation_oids,))
+            trigger_rows = self._execute_rows(connection, """/* ai_insert_triggers */
+                SELECT t.oid::text AS oid, t.xmin::text AS xmin, t.tgrelid::text AS relation_oid,
+                       t.tgname AS name, t.tgenabled AS enabled, t.tgisinternal AS internal,
+                       t.tgfoid::text AS function_oid, pg_catalog.pg_get_triggerdef(t.oid, true) AS definition
+                FROM pg_catalog.pg_trigger t WHERE t.tgrelid = ANY(%s::oid[])
+                ORDER BY t.tgrelid, t.oid
+            """, (relation_oids,))
+            policy_rows = self._execute_rows(connection, """/* ai_insert_policies */
+                SELECT p.oid::text AS oid, p.xmin::text AS xmin, p.polrelid::text AS relation_oid,
+                       p.polname AS name, p.polcmd AS command, p.polpermissive AS permissive,
+                       p.polroles::text AS roles, pg_catalog.pg_get_expr(p.polqual, p.polrelid, true) AS using_expression,
+                       pg_catalog.pg_get_expr(p.polwithcheck, p.polrelid, true) AS check_expression
+                FROM pg_catalog.pg_policy p WHERE p.polrelid = ANY(%s::oid[])
+                ORDER BY p.polrelid, p.oid
+            """, (relation_oids,))
+            rule_rows = self._execute_rows(connection, """/* ai_insert_rules */
+                SELECT r.oid::text AS oid, r.xmin::text AS xmin, r.ev_class::text AS relation_oid,
+                       r.rulename AS name, r.ev_type AS event, r.is_instead AS instead,
+                       r.ev_enabled AS enabled, pg_catalog.pg_get_ruledef(r.oid, true) AS definition
+                FROM pg_catalog.pg_rewrite r
+                WHERE r.ev_class = ANY(%s::oid[]) AND r.rulename <> '_RETURN'
+                ORDER BY r.ev_class, r.oid
+            """, (relation_oids,))
+            type_rows = self._execute_rows(connection, """/* ai_insert_types */
+                WITH RECURSIVE used_types(oid) AS (
+                    SELECT DISTINCT a.atttypid FROM pg_catalog.pg_attribute a
+                    WHERE a.attrelid = ANY(%s::oid[]) AND a.attnum > 0 AND NOT a.attisdropped
+                    UNION
+                    SELECT linked.oid FROM used_types u JOIN pg_catalog.pg_type t ON t.oid = u.oid
+                    CROSS JOIN LATERAL (
+                        SELECT t.typbasetype AS oid WHERE t.typbasetype <> 0
+                        UNION
+                        SELECT t.typelem WHERE t.typelem <> 0
+                        UNION
+                        SELECT a.atttypid FROM pg_catalog.pg_attribute a
+                        WHERE t.typtype = 'c' AND a.attrelid = t.typrelid
+                              AND a.attnum > 0 AND NOT a.attisdropped
+                    ) linked
+                )
+                SELECT t.oid::text AS oid, t.xmin::text AS xmin, n.nspname AS namespace, t.typname AS name,
+                       t.typtype AS kind, t.typcategory AS category, t.typbasetype::text AS base_type_oid,
+                       t.typelem::text AS element_type_oid, t.typrelid::text AS composite_relation_oid,
+                       t.typnotnull AS not_null, t.typdefault AS default, t.typcollation::text AS collation_oid,
+                       t.typinput::text AS input_function_oid, t.typoutput::text AS output_function_oid,
+                       t.typreceive::text AS receive_function_oid, t.typsend::text AS send_function_oid,
+                       t.typmodin::text AS modifier_input_function_oid, t.typmodout::text AS modifier_output_function_oid,
+                       t.typanalyze::text AS analyze_function_oid, t.typsubscript::text AS subscript_function_oid,
+                       t.typlen AS internal_length, t.typbyval AS passed_by_value, t.typalign AS alignment,
+                       t.typstorage AS storage, t.typdelim AS delimiter,
+                       COALESCE((SELECT jsonb_agg(jsonb_build_array(e.enumlabel, e.enumsortorder) ORDER BY e.enumsortorder)
+                                 FROM pg_catalog.pg_enum e WHERE e.enumtypid = t.oid), '[]'::jsonb) AS enum_values,
+                       COALESCE((SELECT jsonb_agg(jsonb_build_array(c.oid::text, c.xmin::text, c.conname,
+                                      pg_catalog.pg_get_constraintdef(c.oid, true)) ORDER BY c.oid)
+                                 FROM pg_catalog.pg_constraint c WHERE c.contypid = t.oid), '[]'::jsonb) AS domain_constraints,
+                       COALESCE((SELECT jsonb_agg(jsonb_build_array(a.attnum, a.xmin::text, a.attname,
+                                      a.atttypid::text, a.atttypmod, a.attcollation::text, a.attnotnull, a.attisdropped)
+                                      ORDER BY a.attnum)
+                                 FROM pg_catalog.pg_attribute a
+                                 WHERE a.attrelid = t.typrelid AND a.attnum > 0), '[]'::jsonb) AS composite_attributes
+                FROM used_types u JOIN pg_catalog.pg_type t ON t.oid = u.oid
+                JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace ORDER BY t.oid
+            """, (relation_oids,))
+            type_oids = [row["oid"] for row in type_rows]
+            cast_rows = self._execute_rows(connection, """/* ai_insert_casts */
+                SELECT c.oid::text AS oid, c.xmin::text AS xmin, c.castsource::text AS source_type_oid,
+                       c.casttarget::text AS target_type_oid, c.castfunc::text AS function_oid,
+                       c.castcontext AS context, c.castmethod AS method
+                FROM pg_catalog.pg_cast c
+                WHERE c.castsource = ANY(%s::oid[]) OR c.casttarget = ANY(%s::oid[])
+                ORDER BY c.oid
+            """, (type_oids, type_oids))
+            dependency_rows = self._execute_rows(connection, """/* ai_insert_dependencies */
+                WITH objects AS (
+                    SELECT 'pg_attrdef'::pg_catalog.regclass AS classid, d.oid AS objid
+                    FROM pg_catalog.pg_attrdef d WHERE d.adrelid = ANY(%s::oid[])
+                    UNION ALL SELECT 'pg_constraint'::pg_catalog.regclass, c.oid FROM pg_catalog.pg_constraint c WHERE c.conrelid = ANY(%s::oid[]) OR c.contypid = ANY(%s::oid[])
+                    UNION ALL SELECT 'pg_policy'::pg_catalog.regclass, p.oid FROM pg_catalog.pg_policy p WHERE p.polrelid = ANY(%s::oid[])
+                    UNION ALL SELECT 'pg_rewrite'::pg_catalog.regclass, r.oid FROM pg_catalog.pg_rewrite r WHERE r.ev_class = ANY(%s::oid[])
+                    UNION ALL SELECT 'pg_trigger'::pg_catalog.regclass, t.oid FROM pg_catalog.pg_trigger t WHERE t.tgrelid = ANY(%s::oid[])
+                    UNION ALL SELECT 'pg_cast'::pg_catalog.regclass, c.oid FROM pg_catalog.pg_cast c WHERE c.castsource = ANY(%s::oid[]) OR c.casttarget = ANY(%s::oid[])
+                    UNION ALL SELECT 'pg_type'::pg_catalog.regclass, t.oid FROM pg_catalog.pg_type t WHERE t.oid = ANY(%s::oid[])
+                )
+                SELECT DISTINCT d.classid::text AS source_class_oid, d.objid::text AS source_oid,
+                       d.refclassid::text AS referenced_class_oid, d.refobjid::text AS referenced_oid,
+                       d.refobjsubid AS referenced_sub_id, d.deptype AS dependency_type,
+                       CASE WHEN d.refclassid = 'pg_proc'::pg_catalog.regclass THEN 'function'
+                            WHEN d.refclassid = 'pg_operator'::pg_catalog.regclass THEN 'operator'
+                            WHEN d.refclassid = 'pg_type'::pg_catalog.regclass THEN 'type'
+                            WHEN d.refclassid = 'pg_class'::pg_catalog.regclass THEN 'relation'
+                            WHEN d.refclassid = 'pg_collation'::pg_catalog.regclass THEN 'collation'
+                            ELSE 'catalog_object' END AS kind,
+                       COALESCE(pn.nspname, opn.nspname, tn.nspname, rn.nspname, cn.nspname) AS namespace,
+                       COALESCE(p.proname, op.oprname, t.typname, rc.relname, col.collname) AS name,
+                       p.xmin::text AS function_xmin, p.prolang::text AS language_oid,
+                       p.provolatile AS volatility, p.proparallel AS parallel_safety, p.prosrc AS function_source,
+                       op.xmin::text AS operator_xmin, op.oprcode::text AS operator_function_oid,
+                       t.xmin::text AS type_xmin, rc.xmin::text AS relation_xmin, rc.relkind AS relation_kind
+                FROM objects o JOIN pg_catalog.pg_depend d ON d.classid = o.classid AND d.objid = o.objid
+                LEFT JOIN pg_catalog.pg_proc p ON d.refclassid = 'pg_proc'::pg_catalog.regclass AND p.oid = d.refobjid
+                LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid = p.pronamespace
+                LEFT JOIN pg_catalog.pg_operator op ON d.refclassid = 'pg_operator'::pg_catalog.regclass AND op.oid = d.refobjid
+                LEFT JOIN pg_catalog.pg_namespace opn ON opn.oid = op.oprnamespace
+                LEFT JOIN pg_catalog.pg_type t ON d.refclassid = 'pg_type'::pg_catalog.regclass AND t.oid = d.refobjid
+                LEFT JOIN pg_catalog.pg_namespace tn ON tn.oid = t.typnamespace
+                LEFT JOIN pg_catalog.pg_class rc ON d.refclassid = 'pg_class'::pg_catalog.regclass AND rc.oid = d.refobjid
+                LEFT JOIN pg_catalog.pg_namespace rn ON rn.oid = rc.relnamespace
+                LEFT JOIN pg_catalog.pg_collation col ON d.refclassid = 'pg_collation'::pg_catalog.regclass AND col.oid = d.refobjid
+                LEFT JOIN pg_catalog.pg_namespace cn ON cn.oid = col.collnamespace
+                ORDER BY source_class_oid, source_oid, referenced_class_oid, referenced_oid, referenced_sub_id
+            """, (relation_oids, relation_oids, type_oids, relation_oids, relation_oids, relation_oids, type_oids, type_oids, type_oids))
+        except PostgresServiceError:
+            raise
+        except Exception as exc:
+            raise PostgresServiceError(422, "application_limitation", "An exact stale-state snapshot cannot be made for this insert target", {
+                "catalog": "insert_semantics", "application": self._application_name,
+                "requiredSurface": "exact insert dependency snapshot",
+                "reason": "The application cannot bind this structured insert to complete PostgreSQL semantics",
+                "safeAlternative": "Review and run the insert in Console against the exact target.",
+                **postgres_error_details(exc, phase="catalog", operation="structured_insert_preview"),
+            }) from exc
+
+        if not tree_rows or str(tree_rows[0].get("relation_oid")) != str(oid) or any(not row.get("relation_oid") or not row.get("namespace") or not row.get("name") or not row.get("xmin") for row in tree_rows):
+            raise PostgresServiceError(422, "application_limitation", "The partition tree catalog snapshot is incomplete", {"catalog": "partition_tree"})
+        tree_oids = {str(row["relation_oid"]) for row in tree_rows}
+        if len(tree_oids) != len(tree_rows):
+            raise PostgresServiceError(422, "application_limitation", "The partition tree catalog snapshot contains ambiguous identities", {"catalog": "partition_tree"})
+        root_columns = [row for row in column_rows if str(row.get("relation_oid")) == str(oid)]
+        by_name = {row["name"]: row for row in root_columns}
         if any(name not in by_name for name in requested_columns):
             raise ConflictError("relation_changed", "One or more requested insert columns do not exist")
-        if any(by_name[name].get("generated") or by_name[name].get("identity") == "a" for name in requested_columns):
-            raise ValidationError("Generated and GENERATED ALWAYS identity columns cannot be inserted explicitly")
-        type_rows = self._execute_rows(connection, """
-            SELECT DISTINCT n.nspname AS namespace, t.typname AS name
-            FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
-            JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
-            WHERE a.attrelid = %s AND a.attnum > 0 AND NOT a.attisdropped
-        """, (relation_row["live_oid"],))
-        if any(row.get("namespace") != "pg_catalog" for row in type_rows):
-            raise ValidationError("AI row insertion is unsupported for tables with replaceable user-defined column types")
-        mutation_rows = self._execute_rows(connection, """
-            SELECT c.relrowsecurity AS row_security, c.relforcerowsecurity AS force_row_security,
-                   COALESCE((SELECT jsonb_agg(pg_catalog.pg_get_constraintdef(con.oid, true) ORDER BY con.conname)
-                             FROM pg_catalog.pg_constraint con WHERE con.conrelid = c.oid), '[]'::jsonb) AS constraints,
-                   COALESCE((SELECT jsonb_agg(jsonb_build_array(t.tgname, t.tgenabled, pg_catalog.pg_get_triggerdef(t.oid, true),
-                                                                p.oid::text, p.xmin::text) ORDER BY t.tgname)
-                             FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_proc p ON p.oid = t.tgfoid
-                             WHERE t.tgrelid = c.oid AND NOT t.tgisinternal), '[]'::jsonb) AS triggers,
-                   COALESCE((SELECT jsonb_agg(jsonb_build_array(pol.polname, pol.polcmd, pol.polpermissive, pol.polroles,
-                                                                pg_catalog.pg_get_expr(pol.polqual, pol.polrelid),
-                                                                pg_catalog.pg_get_expr(pol.polwithcheck, pol.polrelid)) ORDER BY pol.polname)
-                             FROM pg_catalog.pg_policy pol WHERE pol.polrelid = c.oid), '[]'::jsonb) AS policies,
-                   COALESCE((SELECT jsonb_agg(pg_catalog.pg_get_ruledef(r.oid, true) ORDER BY r.rulename)
-                             FROM pg_catalog.pg_rewrite r WHERE r.ev_class = c.oid AND r.rulename <> '_RETURN'), '[]'::jsonb) AS rules
-            FROM pg_catalog.pg_class c WHERE c.oid = %s
-        """, (relation_row["live_oid"],))
-        mutation = mutation_rows[0] if mutation_rows else {}
-        dependency_rows = self._execute_rows(connection, """
-            WITH relation_objects AS (
-                SELECT 'pg_attrdef'::pg_catalog.regclass AS classid, d.oid AS objid
-                FROM pg_catalog.pg_attrdef d WHERE d.adrelid = %s
-                UNION ALL SELECT 'pg_constraint'::pg_catalog.regclass, con.oid FROM pg_catalog.pg_constraint con WHERE con.conrelid = %s
-                UNION ALL SELECT 'pg_policy'::pg_catalog.regclass, pol.oid FROM pg_catalog.pg_policy pol WHERE pol.polrelid = %s
-                UNION ALL SELECT 'pg_rewrite'::pg_catalog.regclass, r.oid FROM pg_catalog.pg_rewrite r WHERE r.ev_class = %s
-                UNION ALL SELECT 'pg_trigger'::pg_catalog.regclass, t.oid FROM pg_catalog.pg_trigger t WHERE t.tgrelid = %s
-            )
-            SELECT DISTINCT p.oid::text AS oid, p.xmin::text AS xmin, n.nspname AS namespace, p.proname AS name,
-                   pg_catalog.pg_get_function_identity_arguments(p.oid) AS identity_arguments,
-                   p.prolang::text AS language_oid, p.prosrc AS source, p.proconfig AS configuration
-            FROM relation_objects o JOIN pg_catalog.pg_depend d ON d.classid = o.classid AND d.objid = o.objid
-            JOIN pg_catalog.pg_proc p ON d.refclassid = 'pg_proc'::pg_catalog.regclass AND d.refobjid = p.oid
-            JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
-            ORDER BY namespace, name, identity_arguments
-        """, (relation_row["live_oid"],) * 5)
-        user_dependencies = [row for row in dependency_rows if row.get("namespace") != "pg_catalog"]
-        if user_dependencies:
-            raise ValidationError("AI row insertion is unsupported when defaults, checks, policies, rules, or triggers depend on replaceable user-defined functions")
-        mutable_object_rows = self._execute_rows(connection, """
-            WITH relation_objects AS (
-                SELECT 'pg_attrdef'::pg_catalog.regclass AS classid, d.oid AS objid FROM pg_catalog.pg_attrdef d WHERE d.adrelid = %s
-                UNION ALL SELECT 'pg_constraint'::pg_catalog.regclass, con.oid FROM pg_catalog.pg_constraint con WHERE con.conrelid = %s
-                UNION ALL SELECT 'pg_policy'::pg_catalog.regclass, pol.oid FROM pg_catalog.pg_policy pol WHERE pol.polrelid = %s
-                UNION ALL SELECT 'pg_rewrite'::pg_catalog.regclass, r.oid FROM pg_catalog.pg_rewrite r WHERE r.ev_class = %s
-            )
-            SELECT DISTINCT n.nspname AS namespace
-            FROM relation_objects o JOIN pg_catalog.pg_depend d ON d.classid = o.classid AND d.objid = o.objid
-            LEFT JOIN pg_catalog.pg_operator op ON d.refclassid = 'pg_operator'::pg_catalog.regclass AND d.refobjid = op.oid
-            LEFT JOIN pg_catalog.pg_type t ON d.refclassid = 'pg_type'::pg_catalog.regclass AND d.refobjid = t.oid
-            JOIN pg_catalog.pg_namespace n ON n.oid = COALESCE(op.oprnamespace, t.typnamespace)
-        """, (relation_row["live_oid"],) * 4)
-        if any(row.get("namespace") != "pg_catalog" for row in mutable_object_rows):
-            raise ValidationError("AI row insertion is unsupported when defaults, checks, policies, or rules depend on replaceable user-defined operators or types")
-        if mutation.get("triggers") or mutation.get("policies") or mutation.get("rules") or mutation.get("row_security") or mutation.get("force_row_security"):
-            raise ValidationError("AI row insertion is unsupported for tables with user triggers, rules, or row-level security policies")
+        captured_type_oids = {str(row.get("oid")) for row in type_rows}
+        missing_type_oids = sorted({str(row.get("type_oid")) for row in column_rows} - captured_type_oids)
+        incomplete_dependencies = [row for row in dependency_rows if row.get("kind") in {"function", "operator", "type", "relation", "collation"} and (not row.get("referenced_oid") or not row.get("name"))]
+        if missing_type_oids or incomplete_dependencies:
+            raise PostgresServiceError(422, "application_limitation", "The insert dependency catalog snapshot is incomplete", {
+                "catalog": "dependencies", "missingTypeOids": missing_type_oids,
+                "incompleteDependencyCount": len(incomplete_dependencies),
+            })
         requested_privileges = self._execute_rows(connection, """
             SELECT a.attname AS name, pg_catalog.has_column_privilege(%s, a.attnum, 'INSERT') AS can_insert
             FROM pg_catalog.pg_attribute a WHERE a.attrelid = %s AND a.attname = ANY(%s) ORDER BY a.attname
-        """, (relation_row["live_oid"], relation_row["live_oid"], requested_columns))
-        if len(requested_privileges) != len(requested_columns) or any(row.get("can_insert") is not True for row in requested_privileges):
-            raise PostgresServiceError(403, "insert_not_permitted", "The selected role cannot insert into every requested column")
+        """, (oid, oid, requested_columns))
         canonical = {
             "database": database, "namespace": namespace, "relation": relation,
-            "liveOid": relation_row["live_oid"], "catalogKind": relation_row["catalog_kind"],
-            "columns": [{
-                "name": row["name"], "type": row["type"], "nullable": bool(row["nullable"]),
-                "ordinal": int(row["ordinal"]), "default": row.get("default"),
-                "identity": row.get("identity") or "", "generated": row.get("generated") or "",
-            } for row in column_rows],
-            "rowSecurity": bool(mutation.get("row_security")), "forceRowSecurity": bool(mutation.get("force_row_security")),
-            "constraints": mutation.get("constraints") or [], "triggers": mutation.get("triggers") or [],
-            "policies": mutation.get("policies") or [], "rules": mutation.get("rules") or [],
-            "executableDependencies": dependency_rows,
+            "relationOid": str(oid), "relationXmin": relation_row.get("xmin"), "catalogKind": relation_row["catalog_kind"],
+            "requestedColumns": list(requested_columns), "tree": tree_rows, "columns": column_rows,
+            "constraints": constraint_rows, "triggers": trigger_rows, "policies": policy_rows,
+            "rules": rule_rows, "types": type_rows, "casts": cast_rows, "dependencies": dependency_rows,
             "requestedColumnPrivileges": requested_privileges,
+            "catalogCompleteness": {
+                "complete": True, "capturedAtSnapshot": True, "treeRelations": len(tree_rows),
+                "columns": len(column_rows), "types": len(type_rows), "casts": len(cast_rows),
+                "dependencies": len(dependency_rows),
+            },
         }
-        return {"kind": "table", "fingerprint": canonical_fingerprint(canonical), "catalog": canonical}
+        semantic_catalog = {key: value for key, value in canonical.items() if key != "requestedColumnPrivileges"}
+        return {"kind": "partitioned_table" if relation_row["catalog_kind"] == "p" else "table", "fingerprint": canonical_fingerprint(semantic_catalog), "catalog": canonical}
 
     @postgres_execution("write")
-    def apply_ai_migration(self, operation_id: str, plan_id: str, profile_id: str, database: str, namespace: str, expected_destructive: bool, confirm_destructive: bool) -> dict[str, Any]:
-        return self._migrations.apply_ai_migration(plan_id, profile_id, expected_destructive, confirm_destructive)
+    def apply_ai_migration(self, operation_id: str, plan_id: str, profile_id: str, database: str, namespace: str, expected_destructive: bool, confirm_destructive: bool, review_digest: str, operation_timeout_ms: int | None = None) -> dict[str, Any]:
+        return self._migrations.apply_ai_migration(plan_id, profile_id, expected_destructive, confirm_destructive, review_digest, operation_timeout_ms)
 
     @postgres_execution("write")
-    def apply_ai_postgres_write(self, operation_id: str, plan_id: str, profile_id: str, database: str, namespace: str, relation: str, expected_kind: str, expected_review_digest: str) -> dict[str, Any]:
-        return self._migrations.apply_ai_postgres_write(plan_id, profile_id, expected_kind, expected_review_digest)
+    def apply_ai_postgres_write(self, operation_id: str, plan_id: str, profile_id: str, database: str, namespace: str, relation: str, expected_kind: str, expected_review_digest: str, operation_timeout_ms: int | None = None) -> dict[str, Any]:
+        return self._migrations.apply_ai_postgres_write(plan_id, profile_id, expected_kind, expected_review_digest, operation_timeout_ms)
 
     def reconcile_ai_postgres_write(self, plan_id: str, profile_id: str) -> dict[str, Any]:
         return self._migrations.reconcile(plan_id)
@@ -1918,7 +2353,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
     def preview_view_mutation(
         self, profile_id: str, database: str, namespace: str, relation: str,
         operation: str, expectation: dict[str, Any], desired: dict[str, Any] | None, allow_destructive: bool,
-        schema_binding: dict[str, Any], *, persist: bool = False,
+        schema_binding: dict[str, Any], *, persist: bool = False, operation_timeout_ms: int | None = None,
     ) -> dict[str, Any]:
         profile_id = self._validate_profile_id(profile_id)
         database = self._validate_database(database)
@@ -1967,6 +2402,12 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         preservation = None
         try:
             self._execute_statement(connection, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            if operation_timeout_ms is not None:
+                timeout_cursor = connection.cursor()
+                try:
+                    narrow_statement_timeout(timeout_cursor, operation_timeout_ms)
+                finally:
+                    timeout_cursor.close()
             try:
                 live = self._inspect_relation_connection(connection, profile_id, database, namespace, relation, None, None)
             except NotFoundError:
@@ -1997,6 +2438,15 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                     )
                 if not allow_destructive:
                     raise ConflictError("destructive_preview_required", "View recreation requires allowDestructive")
+        except PostgresServiceError:
+            raise
+        except Exception as exc:
+            raise PostgresServiceError(
+                422, "view_preview_failed", "PostgreSQL view metadata could not be reviewed",
+                postgres_error_details(
+                    exc, phase="preview", operation="view_mutation", rollback={"attempted": True},
+                ),
+            ) from exc
         finally:
             try:
                 connection.rollback()
@@ -2252,6 +2702,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         connection = self._connect(profile_id)
         populated = set()
         try:
+            self._execute_statement(connection, "SET TRANSACTION READ ONLY")
             for table_name in sorted(table_names):
                 rows = self._execute_rows(
                     connection,
@@ -2262,8 +2713,14 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         except PostgresServiceError:
             raise
         except Exception as exc:
-            raise PostgresServiceError(502, "row_check_failed", "PostgreSQL table row check failed") from exc
+            raise PostgresServiceError(502, "row_check_failed", "PostgreSQL table row check failed", postgres_error_details(
+                exc, phase="catalog", operation="migration_row_check", rollback={"attempted": True},
+            )) from exc
         finally:
+            try:
+                connection.rollback()
+            except Exception:
+                pass
             self._close(connection)
         return populated
 
@@ -2297,7 +2754,10 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
     def _step(action: str, object_type: str, name: str, sql: str, destructive: bool = False) -> dict[str, Any]:
         return {"action": action, "objectType": object_type, "name": name, "sql": sql.rstrip(";") + ";", "destructive": destructive}
 
-    def _diff(self, namespace: str, live: dict[str, Any], desired: dict[str, Any], allow: bool):
+    def _diff(
+        self, namespace: str, live: dict[str, Any], desired: dict[str, Any], allow: bool,
+        assessment: dict[str, Any] | None = None,
+    ):
         safe: list[dict[str, Any]] = []
         destructive: list[dict[str, Any]] = []
         rename: list[dict[str, Any]] = []
@@ -2324,6 +2784,21 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
 
         live_tables = self._named(live["tables"], "table")
         desired_tables = self._named(desired["tables"], "table")
+        assessment = assessment or {"status": "unavailable", "relations": {}}
+        affected_tables = self._migration_affected_tables(live, desired)
+        for table_name in sorted(affected_tables):
+            table = desired_tables.get(table_name) or live_tables.get(table_name)
+            postgres = (table or {}).get("postgres") or {}
+            relation_assessment = assessment.get("relations", {}).get(table_name, {})
+            if (
+                postgres.get("partitioned") or postgres.get("isPartition")
+                or relation_assessment.get("catalogKind") == "p"
+            ):
+                warnings.append({
+                    "code": "unsupported_relation",
+                    "relation": table_name,
+                    "message": f"Planned changes touch partitioned table or partition {table_name}",
+                })
         desired_relationship_names = {
             relation.get("constraintName") or relation.get("name")
             for relation in desired.get("relationships", [])
@@ -2347,13 +2822,27 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         renamed_live_names = set(rename_pairs.values())
         reordered_tables = self._column_reorder_tables(live, desired)
         blocked_reorders = set()
-        if reordered_tables and (live.get("views") or desired.get("views")):
-            for table_name in sorted(reordered_tables):
+        for table_name in sorted(reordered_tables):
+            relation_assessment = assessment.get("relations", {}).get(table_name, {})
+            manifest = relation_assessment.get("reconstruction")
+            dependencies = relation_assessment.get("viewDependencies", {})
+            if (
+                relation_assessment.get("status") != "available"
+                or not isinstance(manifest, dict) or manifest.get("status") != "available"
+                or dependencies.get("status") != "available" or dependencies.get("truncated")
+            ):
                 warnings.append({
-                    "code": "unsupported",
-                    "message": f"Column reorder for {table_name} requires removing dependent views first",
+                    "code": "reconstruction_inventory_unavailable", "relation": table_name,
+                    "message": f"Column reorder for {table_name} is blocked because preservation inventory is incomplete",
                 })
-            blocked_reorders = set(reordered_tables)
+                blocked_reorders.add(table_name)
+            elif manifest.get("blockers"):
+                warnings.append({
+                    "code": "reconstruction_preservation_unsupported", "relation": table_name,
+                    "concerns": list(manifest["blockers"]),
+                    "message": f"Column reorder for {table_name} cannot prove all PostgreSQL-owned state will be preserved",
+                })
+                blocked_reorders.add(table_name)
         for table_name in sorted(reordered_tables - blocked_reorders):
             table = desired_tables[table_name]
             if any(
@@ -2413,7 +2902,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                 continue
             lt, dt = live_tables[table_name], desired_tables[table_name]
             block_key_changes = table_name in key_change_tables and lt.get("id") in incoming_table_ids and lt.get("id") not in rebuild_foreign_key_targets
-            self._diff_table(namespace, live, lt, dt, add, warnings, block_key_changes)
+            self._diff_table(namespace, live, lt, dt, add, warnings, block_key_changes, assessment)
 
         # Handle renamed tables: RENAME first, then diff as if names matched.
         for dt_name in sorted(rename_pairs):
@@ -2425,7 +2914,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             rename_step["rename"] = True
             add(rename_step)
             block_key_changes = dt_name in key_change_tables and lt.get("id") in incoming_table_ids and lt.get("id") not in rebuild_foreign_key_targets
-            self._diff_table(namespace, live, lt, dt, add, warnings, block_key_changes)
+            self._diff_table(namespace, live, lt, dt, add, warnings, block_key_changes, assessment)
 
         for table_name in sorted(set(desired_tables) - set(live_tables) - set(rename_pairs)):
             table = desired_tables[table_name]
@@ -2446,6 +2935,12 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             }
             self._diff_table_objects(namespace, empty, table, add, warnings)
         for table_name in sorted(set(live_tables) - set(desired_tables) - renamed_live_names):
+            if self._has_view_dependency(assessment, table_name):
+                warnings.append({
+                    "code": "dependent_view", "relation": table_name,
+                    "message": f"Dropping table {table_name} is blocked by an actual dependent view",
+                })
+                continue
             add(self._step("drop", "table", table_name, f"DROP TABLE {qn}.{quote_identifier(table_name)}", True))
 
         reordered_table_ids = {
@@ -2492,7 +2987,22 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         # Trigger creation can reference a routine added by the same plan.
         late_priority = {"function": 0, "procedure": 0, "trigger": 2}
         late.sort(key=lambda step: late_priority.get(step["objectType"], 1))
-        return destructive + reorder_steps + rename + constraint_renames + safe + late, warnings
+        informational_codes = {"data_movement"}
+        blocking_differences = []
+        informational_warnings = []
+        for warning in warnings:
+            if warning.get("code") in informational_codes:
+                informational_warnings.append(warning)
+                continue
+            code = warning["code"]
+            if code in {"destructive_omitted", "replacement_omitted"}:
+                next_action = "Enable destructive changes and refresh the full-schema preview."
+            elif code == "dedicated_view_lifecycle_required":
+                next_action = "Resolve this difference in the live Views workspace, then refresh the full-schema preview."
+            else:
+                next_action = "Revise the desired schema or perform and verify the required manual PostgreSQL migration, then refresh the preview."
+            blocking_differences.append({**warning, "nextAction": next_action})
+        return destructive + reorder_steps + rename + constraint_renames + safe + late, informational_warnings, blocking_differences
 
     def _column_reorder_steps(
         self, namespace: str, live: dict[str, Any], desired: dict[str, Any],
@@ -2629,7 +3139,23 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             definition += " NOT NULL"
         return definition
 
-    def _column_has_dependencies(self, schema: dict[str, Any], table: dict[str, Any], column: dict[str, Any]) -> bool:
+    @staticmethod
+    def _has_view_dependency(
+        assessment: dict[str, Any], table_name: str, column_name: str | None = None,
+    ) -> bool:
+        relation = assessment.get("relations", {}).get(table_name, {})
+        dependencies = relation.get("viewDependencies", {})
+        if relation.get("status") != "available" or dependencies.get("status") != "available" or dependencies.get("truncated"):
+            return True
+        return any(
+            column_name is None or item.get("column_name") in {None, column_name}
+            for item in dependencies.get("items", [])
+        )
+
+    def _column_has_dependencies(
+        self, schema: dict[str, Any], table: dict[str, Any], column: dict[str, Any],
+        assessment: dict[str, Any],
+    ) -> bool:
         column_id = column.get("id")
         if column.get("primary") or column.get("unique"):
             return True
@@ -2637,7 +3163,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             return True
         if any(column_id in item.get("columnIds", []) for item in table.get("checks", [])):
             return True
-        if schema.get("views"):
+        if self._has_view_dependency(assessment, table["name"], column.get("name")):
             return True
         return any(
             column_id in self._relation_ids(relation, "from") or column_id in self._relation_ids(relation, "to")
@@ -2645,10 +3171,13 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         )
 
     def _column_has_blocking_timezone_dependencies(
-        self, schema: dict[str, Any], table: dict[str, Any], column: dict[str, Any]
+        self, schema: dict[str, Any], table: dict[str, Any], column: dict[str, Any],
+        assessment: dict[str, Any],
     ) -> bool:
         column_id = column.get("id")
-        if column.get("primary") or column.get("unique") or schema.get("views"):
+        if column.get("primary") or column.get("unique") or self._has_view_dependency(
+            assessment, table["name"], column.get("name")
+        ):
             return True
         if any(column_id in item.get("columnIds", []) for item in table.get("uniqueConstraints", [])):
             return True
@@ -2691,7 +3220,10 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                     result[name] = {"name": name, "columnIds": [column["id"]]}
         return result
 
-    def _diff_table(self, namespace, live, lt, dt, add, warnings, block_key_changes=False):
+    def _diff_table(
+        self, namespace, live, lt, dt, add, warnings, block_key_changes=False,
+        assessment=None,
+    ):
         table_name = dt["name"]
         live_table_sql = f"{quote_identifier(namespace)}.{quote_identifier(lt['name'])}"
         lcols, dcols = self._named(lt.get("columns", []), "column"), self._named(dt.get("columns", []), "column")
@@ -2707,6 +3239,12 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             step["rename"] = True
             add(step)
         for name in sorted(set(lcols) - set(dcols) - renamed_live_names):
+            if self._has_view_dependency(assessment or {}, lt["name"], name):
+                warnings.append({
+                    "code": "dependent_view", "relation": table_name, "column": name,
+                    "message": f"Dropping {table_name}.{name} is blocked by an actual dependent view",
+                })
+                continue
             add(self._step("drop", "column", f"{table_name}.{name}", f"ALTER TABLE {live_table_sql} DROP COLUMN {quote_identifier(name)}", True))
         for name in sorted(set(dcols) - set(lcols) - renamed_desired_names):
             column = dcols[name]
@@ -2732,9 +3270,9 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                     and source_timestamp_kind != target_timestamp_kind
                 )
                 blocking_dependencies = (
-                    self._column_has_blocking_timezone_dependencies(live, lt, lc)
+                    self._column_has_blocking_timezone_dependencies(live, lt, lc, assessment or {})
                     if timezone_conversion
-                    else self._column_has_dependencies(live, lt, lc)
+                    else self._column_has_dependencies(live, lt, lc, assessment or {})
                 )
                 if blocking_dependencies:
                     warnings.append({"code": "unsupported", "message": f"Type change for {table_name}.{desired_name} has dependent objects and requires a manual migration"})
@@ -3078,8 +3616,18 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
     # ---- apply ----------------------------------------------------------
 
     def _acquire_namespace_mutation_lock(self, cursor: Any, namespace: str, database: str | None = None) -> None:
-        cursor.execute(f"SET LOCAL lock_timeout = '{self._lock_timeout_ms}ms'")
-        cursor.execute(f"SET LOCAL statement_timeout = '{self._statement_timeout_ms}ms'")
+        cursor.execute(f"""
+            SELECT pg_catalog.set_config(
+                'lock_timeout',
+                CASE
+                    WHEN pg_catalog.current_setting('lock_timeout') = '0'
+                      OR pg_catalog.current_setting('lock_timeout')::interval > interval '{self._lock_timeout_ms} milliseconds'
+                    THEN '{self._lock_timeout_ms}ms'
+                    ELSE pg_catalog.current_setting('lock_timeout')
+                END,
+                true
+            )
+        """)
         database = database or cursor.connection.info.dbname
         lock_keys = namespace_lock_keys(database, namespace)
         cursor.execute(
@@ -3212,11 +3760,10 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                     connection.commit()
                 except Exception as exc:
                     commit_outcome_uncertain = True
-                    postgres = postgres_error_diagnostic(exc)
                     raise PostgresServiceError(
                         500, "execution_outcome_unknown",
                         "View mutation commit outcome is uncertain; refresh PostgreSQL and the saved schema before continuing",
-                        {"postgres": postgres} if postgres else None,
+                        postgres_error_details(exc, phase="commit", operation="view_mutation", retry={"safe": False, "reconcileRequired": True}),
                     ) from exc
                 committed_at = _utc_now()
             except PostgresServiceError:
@@ -3236,7 +3783,10 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             raise
         except Exception as exc:
             message = "View mutation failed and was rolled back"
-            postgres = postgres_error_diagnostic(exc)
+            details = postgres_error_details(
+                exc, phase="execute", operation="view_mutation", rollback={"proven": True, "state": "rolled_back"},
+            )
+            postgres = details["postgres"]
             # Planned view SQL may be rewritten after preview, so a server position
             # cannot be mapped reliably back to the user's definition text.
             postgres.pop("position", None)
@@ -3245,9 +3795,8 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                 message = f"View mutation step {index + 1} failed: {step['action']} {step['objectType']} {step['name']}. All changes were rolled back"
             if postgres.get("message"):
                 message += f": {postgres['message']}"
-            details = {"postgres": postgres} if postgres else None
             if failed_step is not None:
-                details = {**(details or {}), "stepIndex": failed_step[0]}
+                details["stepIndex"] = failed_step[0]
             raise PostgresServiceError(422, "apply_failed", message, details) from exc
         finally:
             if connection is not None:
@@ -3356,7 +3905,12 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                     f"Migration step {index + 1} failed: {step['action']} "
                     f"{step['objectType']} {step['name']}. All changes were rolled back"
                 )
-            raise PostgresServiceError(422, "apply_failed", message) from exc
+            details = postgres_error_details(
+                exc, phase="execute", operation="schema_migration", rollback={"proven": True, "state": "rolled_back"},
+            )
+            if failed_step is not None:
+                details["stepIndex"] = failed_step[0]
+            raise PostgresServiceError(422, "apply_failed", message, details) from exc
         finally:
             self._close(connection)
         with self._lock:

@@ -5,7 +5,8 @@ import json
 from typing import Any
 
 from .metadata import MetadataStore, MetadataStoreError, canonical_review_digest
-from .postgres_common import ConflictError, NotFoundError, PostgresServiceError, canonical_fingerprint, postgres_error_diagnostic, quote_identifier
+from .migration_contract import full_schema_completeness_proof, has_full_schema_completeness_proof
+from .postgres_common import ConflictError, NotFoundError, PostgresServiceError, canonical_fingerprint, narrow_statement_timeout, postgres_error_details, postgres_error_diagnostic, quote_identifier
 from .schema_store import SchemaStore, SchemaStoreError
 
 
@@ -20,6 +21,7 @@ class DurableMigrationCoordinator:
     def preview_full(
         self, profile_id: str, namespace: str, schema_id: str, revision: int,
         layout_token: str, allow_destructive: bool, *, source_kind: str = "normal",
+        operation_timeout_ms: int | None = None,
     ) -> dict[str, Any]:
         profile = self.service._profile(profile_id)
         database = profile["dbname"]
@@ -27,19 +29,25 @@ class DurableMigrationCoordinator:
             schema_id, revision, layout_token, profile_id, database, namespace,
         )
         preview = self.service.preview(profile_id, namespace, record["schema"], allow_destructive, persist=False)
+        if not preview["complete"]:
+            return {**preview, "id": None, "previewOnly": True}
+        desired_fingerprint = canonical_fingerprint(record["schema"])
+        proof = full_schema_completeness_proof(preview["liveFingerprint"], desired_fingerprint)
         private = {
             "schemaBinding": {"schemaId": schema_id, "revision": revision, "layoutToken": layout_token},
-            "desiredSchema": record["schema"], "steps": preview["steps"],
+            "desiredSchema": record["schema"], "steps": preview["steps"], "completenessProof": proof,
+            **({"operationTimeoutMs": operation_timeout_ms} if source_kind == "ai" else {}),
         }
         return self._create_plan(
             "full_schema", source_kind, "schema", schema_id, revision, layout_token,
             profile_id, database, namespace, preview["liveFingerprint"],
-            canonical_fingerprint(record["schema"]), private, preview,
+            desired_fingerprint, private, preview,
         )
 
     def preview_ai_full(
         self, operation_id: str, profile_id: str, database: str, namespace: str,
         desired_schema: dict[str, Any], allow_destructive: bool, schema_binding: dict[str, Any],
+        operation_timeout_ms: int | None = None,
     ) -> dict[str, Any]:
         self._require_binding(schema_binding)
         if self.service._profile(profile_id)["dbname"] != database:
@@ -53,28 +61,34 @@ class DurableMigrationCoordinator:
         plan = self.preview_full(
             profile_id, namespace, schema_binding["schemaId"], schema_binding["revision"],
             schema_binding["layoutToken"], allow_destructive, source_kind="ai",
+            operation_timeout_ms=operation_timeout_ms,
         )
-        return {**plan, "id": None, "previewOnly": True, "applyPlanId": plan["id"]}
+        public = {**plan, "id": None, "previewOnly": True}
+        if plan.get("applyCapable"):
+            public["applyPlanId"] = plan["id"]
+        return public
 
     def preview_view(
         self, profile_id: str, database: str, namespace: str, relation: str, operation: str,
         expectation: dict[str, Any], desired: dict[str, Any] | None, allow_destructive: bool,
-        schema_binding: dict[str, Any], *, source_kind: str = "normal",
+        schema_binding: dict[str, Any], *, source_kind: str = "normal", operation_timeout_ms: int | None = None,
     ) -> dict[str, Any]:
         binding = self.schemas.require_view_mutation_binding(
             schema_binding["schemaId"], schema_binding["revision"], schema_binding["layoutToken"],
             profile_id, database, namespace, relation, operation, expectation, schema_binding.get("savedViewId"),
         )
         bound = {**schema_binding, "savedViewId": binding["savedViewId"]}
+        timeout_options = {"operation_timeout_ms": operation_timeout_ms} if source_kind == "ai" else {}
         preview = self.service.preview_view_mutation(
             profile_id, database, namespace, relation, operation, expectation, desired,
-            allow_destructive, bound, persist=False,
+            allow_destructive, bound, persist=False, **timeout_options,
         )
         private = {
             "schemaBinding": bound, "relation": relation, "operation": operation,
             "expectation": expectation, "desiredKind": desired.get("kind") if desired else None,
             "desiredDefinition": preview.get("desiredDefinition"),
             "preservation": preview.get("preservation"), "steps": preview["steps"],
+            **({"operationTimeoutMs": operation_timeout_ms} if source_kind == "ai" else {}),
         }
         live = expectation.get("fingerprint") if "fingerprint" in expectation else canonical_fingerprint({"absent": True})
         desired_fingerprint = canonical_fingerprint(desired or {"absent": True})
@@ -87,6 +101,7 @@ class DurableMigrationCoordinator:
     def preview_insert(
         self, profile_id: str, database: str, namespace: str, relation: str,
         rows: list[dict[str, Any]], schema_binding: dict[str, Any], *, source_kind: str = "ai",
+        operation_timeout_ms: int | None = None,
     ) -> dict[str, Any]:
         self._require_binding(schema_binding)
         self.schemas.require_migration_binding(
@@ -98,7 +113,22 @@ class DurableMigrationCoordinator:
         connection = self.service._connect_profile(profile)
         try:
             self.service._execute_statement(connection, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            if operation_timeout_ms is not None:
+                timeout_cursor = connection.cursor()
+                try:
+                    narrow_statement_timeout(timeout_cursor, operation_timeout_ms)
+                finally:
+                    timeout_cursor.close()
             target = self.service._inspect_ai_insert_target(connection, database, namespace, relation, columns)
+        except PostgresServiceError:
+            raise
+        except Exception as exc:
+            raise PostgresServiceError(
+                422, "insert_preview_failed", "PostgreSQL insert semantics could not be reviewed",
+                postgres_error_details(
+                    exc, phase="preview", operation="structured_insert", rollback={"attempted": True},
+                ),
+            ) from exc
         finally:
             try: connection.rollback()
             except Exception: pass
@@ -106,13 +136,17 @@ class DurableMigrationCoordinator:
         qualified = f"{quote_identifier(namespace)}.{quote_identifier(relation)}"
         sql = f"INSERT INTO {qualified} ({', '.join(map(quote_identifier, columns))}) SELECT {', '.join(map(quote_identifier, columns))} FROM pg_catalog.jsonb_populate_recordset(NULL::{qualified}, %s::jsonb) AS input"
         steps = [self.service._step("insert", "rows", relation, sql)]
+        effects, effects_digest = self._insert_effects(target["catalog"])
         private = {
             "schemaBinding": schema_binding, "relation": relation, "expectation": target,
             "columns": columns, "encodedRows": json.dumps(rows, ensure_ascii=False, allow_nan=False, separators=(",", ":")),
-            "rowCount": len(rows), "steps": steps,
+            "rowCount": len(rows), "steps": steps, "effectsDigest": effects_digest,
+            **({"operationTimeoutMs": operation_timeout_ms} if source_kind == "ai" else {}),
         }
         review = {"kind": "insert_rows", "target": {"profileId": profile_id, "database": database, "namespace": namespace, "relation": relation},
-                  "columns": columns, "rows": rows, "rowCount": len(rows), "steps": steps, "warnings": [], "destructive": False}
+                  "columns": columns, "rows": rows, "rowCount": len(rows), "submittedRowCount": len(rows),
+                  "effects": effects, "effectsDigest": effects_digest,
+                  "secondaryWritesCounted": False, "steps": steps, "warnings": [], "destructive": False}
         return self._create_plan(
             "insert_rows", source_kind, "schema", schema_binding["schemaId"], schema_binding["revision"],
             schema_binding["layoutToken"], profile_id, database, namespace, target["fingerprint"],
@@ -121,18 +155,25 @@ class DurableMigrationCoordinator:
 
     def apply(
         self, plan_id: str, review_digest: str, confirm_destructive: bool,
-        *, expected_profile_id: str | None = None,
+        *, expected_profile_id: str | None = None, operation_timeout_ms: int | None = None,
     ) -> dict[str, Any]:
+        plan = self.metadata.get_migration_plan(plan_id, include_private=True)
         if expected_profile_id is not None:
-            routed = self.metadata.get_migration_plan(plan_id)
-            if routed["target"]["profileId"] != expected_profile_id:
+            if plan["target"]["profileId"] != expected_profile_id:
                 raise NotFoundError("Migration plan was not found for this profile")
+        self._require_full_schema_completeness(plan)
+        self._require_insert_effects(plan)
         authorization = self.metadata.create_migration_execution(plan_id, review_digest, confirm_destructive)
         if not authorization["executionOwner"]:
             return self.status(plan_id)
         execution_id = authorization["executionId"]
-        plan = self.metadata.get_migration_plan(plan_id, include_private=True)
         private = plan["privatePayload"]
+        expected_timeout = private.get("operationTimeoutMs")
+        if plan["sourceKind"] == "ai" and expected_timeout != operation_timeout_ms:
+            self.metadata.fail_migration_execution_before_mutation(
+                execution_id, {"code": "authority_binding_mismatch", "bound": "operationTimeoutMs"},
+            )
+            raise PostgresServiceError(409, "authority_binding_mismatch", "AI operation timeout no longer matches the reviewed plan")
         binding = private["schemaBinding"]
         try:
             if plan["adapterKind"] == "view_mutation":
@@ -157,8 +198,11 @@ class DurableMigrationCoordinator:
             connection = self.service._connect_profile(profile)
         except Exception as exc:
             self.metadata.fail_migration_execution_before_mutation(execution_id, {"code": "target_connect_failed"})
-            raise PostgresServiceError(502, "target_connect_failed", "PostgreSQL target could not be connected; the execution was not started") from exc
-        return self._execute(plan, execution_id, connection)
+            details = exc.details if isinstance(exc, PostgresServiceError) and exc.details else postgres_error_details(
+                exc, phase="connect", operation="migration_apply", retry={"safe": True, "writeAttempted": False},
+            )
+            raise PostgresServiceError(502, "target_connect_failed", "PostgreSQL target could not be connected; the execution was not started", details) from exc
+        return self._execute(plan, execution_id, connection, operation_timeout_ms=operation_timeout_ms)
 
     def status(self, plan_id: str) -> dict[str, Any]:
         aggregate = self.metadata.get_migration_status(plan_id)
@@ -190,19 +234,21 @@ class DurableMigrationCoordinator:
             return self._public_status(context)
         if execution["reconciliationStatus"] == "failed":
             return self._public_status(context)
-        profile = self.service._profile(plan["target"]["profileId"])
-        if self.service._profile_fingerprint(profile) != plan["target"]["profileFingerprint"]:
-            raise ConflictError("profile_changed", "Connection profile changed; transaction status cannot be reconciled")
-        connection = self.service._connect_profile(profile)
-        try:
-            identity = self._target_identity(connection)
-            if canonical_fingerprint(identity) != plan["target"]["connectedTargetFingerprint"]:
-                raise ConflictError("target_changed", "Connected PostgreSQL target does not match the durable execution")
-            rows = self.service._execute_rows(connection, "SELECT pg_catalog.pg_xact_status(%s::xid8) AS status", (execution["targetXid"],))
-        finally:
-            try: connection.rollback()
-            except Exception: pass
-            self.service._close(connection)
+        profile_id = plan["target"]["profileId"]
+        with self.service.execution("write", self.service.admission_target(profile_id)):
+            profile = self.service._profile(profile_id)
+            if self.service._profile_fingerprint(profile) != plan["target"]["profileFingerprint"]:
+                raise ConflictError("profile_changed", "Connection profile changed; transaction status cannot be reconciled")
+            connection = self.service._connect_profile(profile)
+            try:
+                identity = self._target_identity(connection)
+                if canonical_fingerprint(identity) != plan["target"]["connectedTargetFingerprint"]:
+                    raise ConflictError("target_changed", "Connected PostgreSQL target does not match the durable execution")
+                rows = self.service._execute_rows(connection, "SELECT pg_catalog.pg_xact_status(%s::xid8) AS status", (execution["targetXid"],))
+            finally:
+                try: connection.rollback()
+                except Exception: pass
+                self.service._close(connection)
         xid_status = rows[0].get("status") if rows else None
         if xid_status not in {"committed", "aborted"}:
             raise PostgresServiceError(503, "execution_outcome_unknown", "PostgreSQL transaction outcome remains uncertain")
@@ -223,14 +269,23 @@ class DurableMigrationCoordinator:
         layout_token: str, profile_id: str, database: str, namespace: str, live_fingerprint: str,
         desired_fingerprint: str, private: dict[str, Any], preview: dict[str, Any],
     ) -> dict[str, Any]:
-        target_identity = self._preview_target_identity(profile_id, database)
+        target_identity = self._preview_target_identity(
+            profile_id, database,
+            operation_timeout_ms=private.get("operationTimeoutMs") if source == "ai" else None,
+        )
         review = {
             "adapterKind": adapter,
             "target": {"profileId": profile_id, "database": database, "namespace": namespace},
             "steps": copy.deepcopy(preview.get("steps", [])), "warnings": copy.deepcopy(preview.get("warnings", [])),
             "destructive": bool(preview.get("destructive")),
         }
-        for key in ("kind", "columns", "rows", "rowCount", "operation", "relation"):
+        if adapter == "full_schema":
+            proof = private["completenessProof"]
+            review.update({
+                "complete": True, "applyCapable": True, "blockingDifferences": [],
+                "completenessProof": copy.deepcopy(proof),
+            })
+        for key in ("kind", "columns", "rows", "rowCount", "submittedRowCount", "effects", "effectsDigest", "secondaryWritesCounted", "operation", "relation"):
             if key in preview:
                 review[key] = copy.deepcopy(preview[key])
         digest = canonical_review_digest(review)
@@ -244,13 +299,28 @@ class DurableMigrationCoordinator:
         )
         return {"id": created["planId"], "reviewDigest": digest, **review}
 
-    def _preview_target_identity(self, profile_id: str, database: str) -> dict[str, Any]:
+    def _preview_target_identity(self, profile_id: str, database: str, *, operation_timeout_ms: int | None = None) -> dict[str, Any]:
         connection = self.service._connect_profile(self.service._profile(profile_id))
         try:
+            if operation_timeout_ms is not None:
+                timeout_cursor = connection.cursor()
+                try:
+                    narrow_statement_timeout(timeout_cursor, operation_timeout_ms)
+                finally:
+                    timeout_cursor.close()
             identity = self._target_identity(connection)
             if identity["database"] != database:
                 raise ConflictError("database_changed", "Connected PostgreSQL database does not match the requested database")
             return identity
+        except PostgresServiceError:
+            raise
+        except Exception as exc:
+            raise PostgresServiceError(
+                502, "target_identity_unavailable", "PostgreSQL target identity could not be verified",
+                postgres_error_details(
+                    exc, phase="preview", operation="target_identity", rollback={"attempted": True},
+                ),
+            ) from exc
         finally:
             try: connection.rollback()
             except Exception: pass
@@ -270,13 +340,15 @@ class DurableMigrationCoordinator:
                 "serverVersionNum": str(rows[0]["server_version_num"]),
                 "serverAddress": rows[0].get("server_address"), "serverPort": rows[0].get("server_port")}
 
-    def _execute(self, plan: dict[str, Any], execution_id: str, connection: Any) -> dict[str, Any]:
+    def _execute(self, plan: dict[str, Any], execution_id: str, connection: Any, *, operation_timeout_ms: int | None = None) -> dict[str, Any]:
         cursor = connection.cursor()
         applying = False
         commit_requested = False
         refreshed = None
         try:
             cursor.execute("BEGIN")
+            cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            narrow_statement_timeout(cursor, operation_timeout_ms)
             private = plan["privatePayload"]
             self.service._acquire_namespace_mutation_lock(cursor, plan["target"]["namespaceName"], plan["target"]["databaseName"])
             self._stale_check(plan, private, connection, cursor)
@@ -309,7 +381,12 @@ class DurableMigrationCoordinator:
                     self.metadata.finish_migration_execution(execution_id, "uncertain", "uncertain", evidence={"code": "commit_acknowledgement_lost", "postgres": postgres_error_diagnostic(exc)})
                 except MetadataStoreError:
                     pass
-                raise self._recovery_error(execution_id, "PostgreSQL commit acknowledgement was lost") from exc
+                error = self._recovery_error(execution_id, "PostgreSQL commit acknowledgement was lost")
+                error.details.update(postgres_error_details(
+                    exc, phase="commit", operation=plan.get("adapterKind", "migration"),
+                    retry={"safe": False, "reconcileRequired": True},
+                ))
+                raise error from exc
             try:
                 self.metadata.finish_migration_execution(execution_id, "succeeded", "committed", evidence={"targetIdentity": identity})
             except MetadataStoreError as exc:
@@ -328,7 +405,10 @@ class DurableMigrationCoordinator:
             if commit_requested:
                 raise
             self._rollback_failure(connection, plan, execution_id, applying)
-            raise PostgresServiceError(422, "apply_failed", "PostgreSQL mutation failed and was rolled back", {"postgres": postgres_error_diagnostic(exc)}) from exc
+            raise PostgresServiceError(422, "apply_failed", "PostgreSQL mutation failed and was rolled back", postgres_error_details(
+                exc, phase="execute", operation=plan.get("adapterKind", "migration"),
+                rollback={"proven": True, "state": "rolled_back"},
+            )) from exc
         finally:
             close = getattr(cursor, "close", None)
             if close: close()
@@ -349,7 +429,13 @@ class DurableMigrationCoordinator:
         except Exception as exc:
             if applying:
                 self.metadata.finish_migration_execution(execution_id, "uncertain", "uncertain", evidence={"code": "rollback_acknowledgement_lost"})
-                raise PostgresServiceError(500, "execution_outcome_unknown", "PostgreSQL rollback could not be proven; reconcile without replay") from exc
+                raise PostgresServiceError(
+                    500, "execution_outcome_unknown", "PostgreSQL rollback could not be proven; reconcile without replay",
+                    postgres_error_details(
+                        exc, phase="rollback", operation=plan.get("adapterKind", "migration"),
+                        rollback={"proven": False}, retry={"safe": False, "reconcileRequired": True},
+                    ),
+                ) from exc
             raise
         evidence = {"code": "validation_or_mutation_failed"}
         if applying:
@@ -368,13 +454,29 @@ class DurableMigrationCoordinator:
         adapter = plan["adapterKind"]
         if adapter == "full_schema":
             current = self.service._introspect_connection(connection, plan["target"]["profileId"], plan["target"]["namespaceName"])
-            if current["postgres"]["fingerprint"] != plan["liveFingerprint"]:
+            assessment = self.service._migration_safety_assessment(
+                plan["target"]["profileId"], plan["target"]["namespaceName"],
+                current, private["desiredSchema"], connection=connection,
+            )
+            if self.service._migration_fingerprint(current, assessment) != plan["liveFingerprint"]:
                 raise ConflictError("stale_plan", "Database schema changed after preview")
             return
         if adapter == "insert_rows":
             relation = private["relation"]
             qualified = f"{quote_identifier(plan['target']['namespaceName'])}.{quote_identifier(relation)}"
-            cursor.execute(f"LOCK TABLE {qualified} IN ROW EXCLUSIVE MODE")
+            expected = private["expectation"]
+            tree = expected["catalog"]["tree"]
+            # Lock protocol: root first in SHARE UPDATE EXCLUSIVE to conflict with attach/detach and
+            # bound-changing DDL, then every other tree relation in ascending OID order. The
+            # repeatable-read transaction keeps function/type catalogs stable through mutation.
+            root_mode = "SHARE UPDATE EXCLUSIVE" if expected["kind"] == "partitioned_table" else "ROW EXCLUSIVE"
+            cursor.execute(f"LOCK TABLE {qualified} IN {root_mode} MODE")
+            root_oid = str(expected["catalog"]["relationOid"])
+            for member in sorted(tree, key=lambda item: int(item["relation_oid"])):
+                if str(member["relation_oid"]) == root_oid:
+                    continue
+                member_qualified = f"{quote_identifier(member['namespace'])}.{quote_identifier(member['name'])}"
+                cursor.execute(f"LOCK TABLE {member_qualified} IN ROW EXCLUSIVE MODE")
             current = self.service._inspect_ai_insert_target(connection, plan["target"]["databaseName"], plan["target"]["namespaceName"], relation, private["columns"])
             if current["fingerprint"] != plan["liveFingerprint"]:
                 raise ConflictError("relation_changed", "The insert target changed after preview")
@@ -409,7 +511,14 @@ class DurableMigrationCoordinator:
         if adapter == "insert_rows":
             count = getattr(cursor, "rowcount", private["rowCount"])
             if not isinstance(count, int) or count < 0: count = private["rowCount"]
-            return {**base, "kind": "rows_inserted", "relation": private["relation"], "insertedRowCount": count}, None
+            return {
+                **base, "kind": "rows_inserted", "relation": private["relation"],
+                "target": {**base["target"], "relation": private["relation"]},
+                "submittedRowCount": private["rowCount"], "commandRowCount": count,
+                "insertedRowCount": count,
+                "insertedRowCountCompatibility": "PostgreSQL command count only; trigger and rule secondary writes are excluded",
+                "secondaryWritesCounted": False, "effectsDigest": private["effectsDigest"],
+            }, None
         relation = private["relation"]
         if private["operation"] == "delete":
             intended = {**base, "kind": "view_deleted", "operation": "delete", "relation": relation, "deletedKind": private["expectation"]["kind"]}
@@ -425,12 +534,16 @@ class DurableMigrationCoordinator:
             private = plan["privatePayload"]
             binding = private["schemaBinding"]
             if plan["adapterKind"] == "full_schema":
+                self._require_full_schema_completeness(plan)
                 if refreshed is None:
                     refreshed = self.service.introspect(plan["target"]["profileId"], plan["target"]["namespaceName"])
                 intended = self.metadata.get_migration_execution(execution_id)["intendedResult"]
                 if refreshed["postgres"]["fingerprint"] != intended["resultFingerprint"]:
                     raise SchemaStoreError(409, "schema_target_changed", "PostgreSQL changed after the committed migration")
-                receipt = self.schemas.sync_full_migration_result(binding["schemaId"], binding["revision"], binding["layoutToken"], refreshed, execution_id)
+                receipt = self.schemas.sync_full_migration_result(
+                    binding["schemaId"], binding["revision"], binding["layoutToken"], refreshed,
+                    execution_id, private["completenessProof"], plan["liveFingerprint"], plan["desiredFingerprint"],
+                )
             elif plan["adapterKind"] == "view_mutation":
                 intended = self.metadata.get_migration_execution(execution_id)["intendedResult"]
                 descriptor = intended.get("descriptor")
@@ -474,9 +587,80 @@ class DurableMigrationCoordinator:
                 pass
 
     @staticmethod
+    def _insert_effects(catalog: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
+        """Build bounded review evidence without claiming PostgreSQL semantic authorization."""
+        effects: list[dict[str, Any]] = []
+
+        def add(kind: str, certainty: str, summary: str, values: list[Any]) -> None:
+            limit = 50
+            details = copy.deepcopy(values[:limit])
+            payload = {
+                "kind": kind, "certainty": certainty, "summary": summary,
+                "objectCount": len(values), "details": details,
+                "complete": len(values) <= limit, "truncated": len(values) > limit,
+            }
+            effects.append({**payload, "digest": canonical_fingerprint(payload)})
+
+        tree = catalog.get("tree", [])
+        if catalog.get("catalogKind") == "p":
+            add("partition_routing", "certain", "PostgreSQL will route each submitted row to a matching partition", [
+                {key: item.get(key) for key in ("relation_oid", "namespace", "name", "partition_bound", "is_leaf")}
+                for item in tree
+            ])
+        columns = catalog.get("columns", [])
+        add("defaults", "conditional", "Omitted columns may evaluate PostgreSQL defaults", [
+            {"relationOid": item.get("relation_oid"), "column": item.get("name"), "expression": item.get("default")}
+            for item in columns if item.get("default") is not None
+        ])
+        add("identity_generated", "conditional", "PostgreSQL enforces identity and generated-column behavior", [
+            {"relationOid": item.get("relation_oid"), "column": item.get("name"), "identity": item.get("identity") or "", "generated": item.get("generated") or ""}
+            for item in columns if item.get("identity") or item.get("generated")
+        ])
+        add("constraints", "certain", "PostgreSQL evaluates applicable table, domain, and referential constraints", catalog.get("constraints", []) + [
+            {"typeOid": item.get("oid"), "constraints": item.get("domain_constraints")}
+            for item in catalog.get("types", []) if item.get("domain_constraints")
+        ])
+        add("triggers", "conditional", "Enabled triggers may perform secondary writes; those writes are not included in submitted or command row counts", catalog.get("triggers", []))
+        add("rules", "conditional", "Enabled rules may redirect or add writes; secondary writes are not included in submitted or command row counts", catalog.get("rules", []))
+        rls = [{key: item.get(key) for key in ("relation_oid", "namespace", "name", "row_security", "force_row_security")} for item in tree if item.get("row_security") or item.get("force_row_security")]
+        add("row_level_security", "conditional", "PostgreSQL evaluates row-level security for the executing role", rls + catalog.get("policies", []))
+        user_types = [item for item in catalog.get("types", []) if item.get("namespace") not in {None, "pg_catalog"}]
+        user_dependencies = [
+            {key: item.get(key) for key in ("kind", "namespace", "name", "referenced_oid", "dependency_type")}
+            for item in catalog.get("dependencies", [])
+            if item.get("namespace") not in {None, "pg_catalog"} and item.get("kind") in {"function", "operator", "type"}
+        ]
+        add("user_types_operators_functions", "conditional", "User-defined types, operators, and functions participate under PostgreSQL semantics", user_types + user_dependencies)
+        sequences = [item for item in catalog.get("dependencies", []) if item.get("kind") == "relation" and item.get("relation_kind") == "S"]
+        add("sequences_nontransactional", "conditional", "Sequence advancement and other external effects may not roll back with the insert", sequences)
+        external_functions = [item for item in user_dependencies if item.get("kind") == "function"]
+        add("unknown_external_function_effects", "unknown", "User-defined functions may have external or nontransactional effects that the application cannot inspect or roll back", external_functions)
+        return effects, canonical_fingerprint({"effects": effects})
+
+    @staticmethod
     def _require_binding(binding: Any) -> None:
         if not isinstance(binding, dict) or set(binding) != {"schemaId", "revision", "layoutToken"}:
             raise ConflictError("invalid_schema_binding", "Schema binding is invalid")
+
+    @staticmethod
+    def _require_full_schema_completeness(plan: dict[str, Any]) -> None:
+        if plan.get("adapterKind") != "full_schema":
+            return
+        if not has_full_schema_completeness_proof(
+            plan.get("privatePayload"), plan.get("reviewPayload"),
+            plan.get("liveFingerprint"), plan.get("desiredFingerprint"),
+        ):
+            raise ConflictError("migration_plan_incomplete", "Full-schema migration plan lacks explicit completeness proof; refresh the preview")
+
+    @staticmethod
+    def _require_insert_effects(plan: dict[str, Any]) -> None:
+        if plan.get("adapterKind") != "insert_rows":
+            return
+        private_digest = (plan.get("privatePayload") or {}).get("effectsDigest")
+        review = plan.get("reviewPayload") or {}
+        effects = review.get("effects")
+        if not isinstance(effects, list) or private_digest != review.get("effectsDigest") or private_digest != canonical_fingerprint({"effects": effects}):
+            raise ConflictError("insert_effects_incomplete", "The reviewed insert lacks exact secondary-effect evidence; create a fresh preview")
 
     @staticmethod
     def _public_status(context: dict[str, Any]) -> dict[str, Any]:

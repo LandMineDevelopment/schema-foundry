@@ -123,6 +123,8 @@ const elements = {
   postgresDialog: document.querySelector("#postgres-dialog"),
   postgresProfilesList: document.querySelector("#postgres-profiles-list"),
   postgresNamespaceSelect: document.querySelector("#postgres-namespace-select"),
+  postgresTargetPresentation: document.querySelector("#postgres-target-presentation"),
+  postgresSystemNamespaces: document.querySelector("#postgres-system-namespaces"),
   postgresStatus: document.querySelector("#postgres-status"),
   postgresCatalogSummary: document.querySelector("#postgres-catalog-summary"),
   postgresRefreshButton: document.querySelector("#postgres-refresh-button"),
@@ -229,16 +231,6 @@ const elements = {
   aiNewChat: document.querySelector("#ai-new-chat"),
   aiModelSelect: document.querySelector("#ai-model-select"),
   aiAccessSelect: document.querySelector("#ai-access-select"),
-  aiSchemaPermission: document.querySelector("#ai-schema-permission"),
-  aiDataReadPermission: document.querySelector("#ai-data-read-permission"),
-  aiWritePermission: document.querySelector("#ai-write-permission"),
-  aiRawReadPermission: document.querySelector("#ai-raw-read-permission"),
-  aiRawWritePermission: document.querySelector("#ai-raw-write-permission"),
-  aiSchemaApproval: document.querySelector("#ai-schema-approval"),
-  aiDataReadApproval: document.querySelector("#ai-data-read-approval"),
-  aiWriteApproval: document.querySelector("#ai-write-approval"),
-  aiRawReadApproval: document.querySelector("#ai-raw-read-approval"),
-  aiRawWriteApproval: document.querySelector("#ai-raw-write-approval"),
   aiPermissionsSummary: document.querySelector("#ai-permissions-summary"),
   aiAccessDisclosure: document.querySelector("#ai-access-disclosure"),
   aiFunctionCaveat: document.querySelector("#ai-function-caveat"),
@@ -400,7 +392,7 @@ let standaloneSqlState = {
   activeViewId: "query-1",
   activePane: "editor",
   views: [
-    { id: "query-1", name: "Query 1", sql: "", activePane: "editor", writeMode: false, writeGrantId: null }
+    { id: "query-1", name: "Query 1", sql: "", activePane: "editor", writeMode: false }
   ],
   historyCollapsed: true,
   savedQueries: [
@@ -411,6 +403,7 @@ let standaloneSqlState = {
   pendingWriteConfirmation: null,
   closing: false,
   targetSyncKey: null,
+  settings: null,
   history: [
     { kind: "Read", label: "Recent orders", meta: "12 rows · 31 ms", sql: 'SELECT id, status, total\nFROM "public"."orders"\nORDER BY created_at DESC\nLIMIT 12;' },
     { kind: "Write", label: "Archive stale carts", meta: "4 rows · 18 ms", sql: 'UPDATE "public"."carts"\nSET archived = true\nWHERE updated_at < now() - interval \'30 days\';' },
@@ -421,8 +414,11 @@ let postgresState = {
   token: null,
   profiles: [],
   selectedProfileId: null,
+  aiTargetExplicit: false,
   namespace: "",
   namespaces: [],
+  namespaceEntries: [],
+  targetVerifiedAt: null,
   busy: false,
   plan: null,
   schemaSnapshot: null,
@@ -498,18 +494,26 @@ function requireExactTarget(payload, binding, relation = null) {
       || (relation !== null && payload.relation !== relation)) throw new Error("PostgreSQL returned a different Views target. Refresh the saved schema before continuing");
 }
 
-function validateLineageEnvelope(value, binding, label) {
-  if (!value || value.status !== "available" || !Array.isArray(value.items) || typeof value.truncated !== "boolean") throw new Error(`${label} lineage is unavailable or invalid`);
-  return value.items.map(item => {
-    if (!item || item.database !== binding.database || typeof item.namespace !== "string" || !item.namespace || typeof item.relation !== "string" || !item.relation
-        || !["table", "view", "materialized_view", "foreign_table"].includes(item.kind)) throw new Error(`${label} lineage contains an invalid relation identity`);
-    return { database: item.database, namespace: item.namespace, relation: item.relation, kind: item.kind };
+function validateLineageEnvelope(value, binding, target, direction, label) {
+  if (!value || value.status !== "available" || value.profileId !== binding.profileId || value.database !== binding.database
+      || value.namespace !== target.namespace || value.relation !== target.relation || value.kind !== target.kind
+      || value.relationFingerprint !== target.fingerprint || value.direction !== direction
+      || typeof value.catalogFingerprint !== "string" || !/^[0-9a-f]{64}$/.test(value.catalogFingerprint)
+      || !Array.isArray(value.items) || typeof value.truncated !== "boolean" || !value.page
+      || !Number.isInteger(value.page.pageSize) || !Number.isInteger(value.page.returned)
+      || typeof value.page.hasMore !== "boolean" || (value.page.hasMore !== Boolean(value.page.nextCursor))) throw new Error(`${label} lineage is unavailable or invalid`);
+  const items = value.items.map(item => {
+    if (!item || item.profileId !== binding.profileId || item.database !== binding.database || typeof item.namespace !== "string" || !item.namespace || typeof item.relation !== "string" || !item.relation
+        || !["table", "partitioned_table", "view", "materialized_view", "foreign_table"].includes(item.kind)) throw new Error(`${label} lineage contains an invalid relation identity`);
+    return { profileId: item.profileId, database: item.database, namespace: item.namespace, relation: item.relation, kind: item.kind };
   });
+  if (items.length !== value.page.returned || value.truncated !== value.page.hasMore) throw new Error(`${label} lineage page metadata is invalid`);
+  return { ...value, items };
 }
 
-function validateRelationDescriptor(payload, binding, relation, expectedKind) {
-  requireExactTarget(payload, binding, relation);
-  if (payload.kind !== expectedKind || !["table", "view", "materialized_view"].includes(payload.kind) || typeof payload.fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(payload.fingerprint)) throw new Error("PostgreSQL returned an invalid or changed relation identity");
+function validateRelationDescriptor(payload, binding, relation, expectedIdentity) {
+  if (!payload || payload.profileId !== binding.profileId || payload.database !== binding.database || payload.namespace !== expectedIdentity.namespace || payload.relation !== relation) throw new Error("PostgreSQL returned a different relation target. Refresh the saved schema before continuing");
+  if (payload.kind !== expectedIdentity.kind || !["table", "partitioned_table", "view", "materialized_view", "foreign_table"].includes(payload.kind) || typeof payload.fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(payload.fingerprint)) throw new Error("PostgreSQL returned an invalid or changed relation identity");
   if (!Array.isArray(payload.columns)) throw new Error("PostgreSQL returned an invalid column snapshot");
   const columns = payload.columns.map((column, index) => {
     if (!column || typeof column.name !== "string" || !column.name || typeof column.type !== "string" || !column.type
@@ -528,10 +532,10 @@ function validateRelationDescriptor(payload, binding, relation, expectedKind) {
   if (payload.kind === "materialized_view") {
     if (!payload.materialized || payload.materialized.status !== "available" || typeof payload.materialized.populated !== "boolean" || typeof payload.materialized.concurrentRefreshEligible !== "boolean") throw new Error("PostgreSQL returned invalid materialized-view metadata");
   } else if (!unavailable(payload.materialized)) throw new Error("PostgreSQL returned an invalid materialization envelope");
-  const dependencies = payload.kind === "table" ? [] : validateLineageEnvelope(payload.dependencies, binding, "Upstream");
-  const dependents = payload.kind === "table" ? [] : validateLineageEnvelope(payload.dependents, binding, "Downstream");
-  if (payload.kind === "table" && (!unavailable(payload.dependencies) || !unavailable(payload.dependents))) throw new Error("PostgreSQL returned invalid table lineage envelopes");
-  return { ...payload, columns, dependencies, dependents };
+  const target = { namespace: payload.namespace, relation, kind: payload.kind, fingerprint: payload.fingerprint };
+  const dependencyPage = validateLineageEnvelope(payload.dependencies, binding, target, "dependencies", "Upstream");
+  const dependentPage = validateLineageEnvelope(payload.dependents, binding, target, "dependents", "Downstream");
+  return { ...payload, columns, dependencies: dependencyPage.items, dependents: dependentPage.items, lineage: { dependencies: dependencyPage, dependents: dependentPage } };
 }
 
 function relationIdentityKey(identity) {
@@ -554,15 +558,38 @@ function prototypeKindClass(viewItem) {
 
 async function inspectViewsRelation(identity, { knownFingerprint = null, select = false } = {}) {
   const binding = activeViewsBinding();
-  if (!binding || identity.database !== binding.database || identity.namespace !== binding.namespace) throw new Error("Only relations in the saved schema namespace can be inspected");
+  if (!binding || identity.database !== binding.database) throw new Error("Only verified lineage in the saved profile database can be inspected");
   const identityKey = relationIdentityKey(identity);
   const generation = (viewsPrototypeState.relationGenerations.get(identityKey) ?? 0) + 1;
   viewsPrototypeState.relationGenerations.set(identityKey, generation);
-  const query = new URLSearchParams({ database: binding.database, namespace: binding.namespace, relation: identity.relation, expectedKind: identity.kind });
+  const query = new URLSearchParams({ database: binding.database, namespace: identity.namespace, relation: identity.relation, expectedKind: identity.kind });
   if (knownFingerprint) query.set("expectedFingerprint", knownFingerprint);
   const payload = await postgresRequest(`/api/postgres/profiles/${encodeURIComponent(binding.profileId)}/relation?${query}`, { method: "GET" });
   if (generation !== viewsPrototypeState.relationGenerations.get(identityKey) || viewsBindingKey(binding) !== viewsBindingKey(activeViewsBinding())) return null;
-  const descriptor = validateRelationDescriptor(payload, binding, identity.relation, identity.kind);
+  const descriptor = validateRelationDescriptor(payload, binding, identity.relation, identity);
+  for (const direction of ["dependencies", "dependents"]) {
+    const envelope = descriptor.lineage[direction];
+    let cursor = envelope.page.nextCursor;
+    while (cursor) {
+      const lineageQuery = new URLSearchParams({
+        database: binding.database, namespace: identity.namespace, relation: identity.relation,
+        direction, expectedKind: descriptor.kind, expectedFingerprint: descriptor.fingerprint,
+        pageSize: String(envelope.page.pageSize), cursor,
+      });
+      const next = validateLineageEnvelope(
+        await postgresRequest(`/api/postgres/profiles/${encodeURIComponent(binding.profileId)}/lineage?${lineageQuery}`, { method: "GET" }),
+        binding, { namespace: identity.namespace, relation: identity.relation, kind: descriptor.kind, fingerprint: descriptor.fingerprint }, direction,
+        direction === "dependencies" ? "Upstream" : "Downstream",
+      );
+      if (next.catalogFingerprint !== envelope.catalogFingerprint) throw new Error("PostgreSQL lineage changed while loading; refresh it");
+      descriptor[direction].push(...next.items);
+      cursor = next.page.nextCursor;
+    }
+    envelope.items = descriptor[direction];
+    envelope.truncated = false;
+    envelope.page = { ...envelope.page, returned: descriptor[direction].length, hasMore: false, nextCursor: null };
+  }
+  if (generation !== viewsPrototypeState.relationGenerations.get(identityKey) || viewsBindingKey(binding) !== viewsBindingKey(activeViewsBinding())) return null;
   viewsPrototypeState.descriptors.set(identityKey, descriptor);
   if (select && ["view", "materialized_view"].includes(descriptor.kind)) {
     const index = viewsPrototypeState.views.findIndex(item => item.id === descriptor.relation);
@@ -590,13 +617,12 @@ async function loadViewsCatalog({ preserveSelection = true } = {}) {
     return;
   }
   try {
-    const query = new URLSearchParams({ database: binding.database, namespace: binding.namespace });
-    const payload = await postgresRequest(`/api/postgres/profiles/${encodeURIComponent(binding.profileId)}/relations?${query}`, { method: "GET" });
+    const payload = await postgresProfileRepository.relationCatalog(binding.profileId, binding.database, binding.namespace);
     if (generation !== viewsPrototypeState.catalogGeneration || viewsBindingKey(binding) !== viewsBindingKey(activeViewsBinding())) return;
     requireExactTarget(payload, binding);
     if (!Array.isArray(payload.relations)) throw new Error("PostgreSQL returned an invalid Views catalog");
     const catalog = payload.relations.map(item => {
-      if (!item || typeof item.name !== "string" || !item.name || !["table", "view", "materialized_view"].includes(item.kind)) throw new Error("PostgreSQL returned an invalid Views catalog identity");
+      if (!item || typeof item.name !== "string" || !item.name || !["table", "partitioned_table", "view", "materialized_view", "foreign_table"].includes(item.kind)) throw new Error("PostgreSQL returned an invalid Views catalog identity");
       return item;
     }).filter(item => item.kind === "view" || item.kind === "materialized_view");
     const previous = preserveSelection ? viewsPrototypeState.selectedId : null;
@@ -700,7 +726,7 @@ function updateWorkspaceRail() {
   elements.viewsBrowseButton.dataset.tooltip = viewsPrototypeState.catalogOpen ? "Hide views" : "Browse views";
   elements.viewsCreateButton.disabled = !activeViewsBinding() || viewsPrototypeState.loading;
   elements.viewsRefreshButton.disabled = !activeViewsBinding() || viewsPrototypeState.loading;
-  elements.viewsDeleteButton.disabled = !selectedView?.permissions?.canAlter;
+  elements.viewsDeleteButton.disabled = !selectedView || viewsPrototypeState.loading;
   elements.viewsDeleteButton.setAttribute("aria-label", selectedView ? `Delete ${prototypeKindLabel(selectedView).toLowerCase()} ${selectedView.namespace}.${selectedView.name}` : "Delete selected view");
   elements.viewsDeleteButton.dataset.tooltip = selectedView ? `Delete ${selectedView.kind === "materialized_view" ? "materialized view" : "view"}` : "Delete selected view";
   elements.standaloneSqlHistoryToggle.classList.toggle("active", workspace === "sql" && !standaloneSqlState.historyCollapsed);
@@ -714,6 +740,7 @@ function updateWorkspaceRail() {
 function prototypeKindLabel(viewItem) {
   if (viewItem.kind === "materialized_view") return "Materialized view";
   if (viewItem.kind === "foreign_table") return "Foreign table";
+  if (viewItem.kind === "partitioned_table") return "Partitioned table";
   return viewItem.kind === "table" ? "Table" : "View";
 }
 
@@ -724,7 +751,7 @@ function prototypeKindIcon(viewItem) {
 }
 
 function canInspectViewsRelation(identity) {
-  return ["table", "view", "materialized_view"].includes(identity.kind);
+  return ["table", "partitioned_table", "view", "materialized_view", "foreign_table"].includes(identity.kind);
 }
 
 function prototypeSourceExpansionKey(viewId, source) {
@@ -750,7 +777,7 @@ function prototypeSourceCard(source, selected, index) {
       <span>${sourceView ? prototypeKindIcon(sourceView) : '<svg viewBox="0 0 20 20" aria-hidden="true"><ellipse cx="10" cy="5" rx="6" ry="2.5"/><path d="M4 5v7c0 1.4 2.7 2.5 6 2.5s6-1.1 6-2.5V5"/></svg>'}</span>
       <small>${escapeHtml(prototypeKindLabel(source))}</small><strong>${escapeHtml(source.namespace)}.${escapeHtml(source.relation)}</strong>${inspectable ? '<i aria-hidden="true">⌄</i>' : '<i aria-hidden="true">Inspection unavailable</i>'}
     </button>
-    ${inspectable ? `<div class="prototype-source-columns" id="${detailsId}" ${expanded ? "" : "hidden"}>${columnRows ? `<ul>${columnRows}</ul>` : '<p>Loading actual source columns...</p>'}<div class="prototype-source-legend"><span>Column provenance unavailable</span></div><button class="prototype-source-inspect" type="button" data-prototype-relation="${escapeHtml(relationIdentityKey(source))}" ${source.namespace === selected.namespace ? "" : "disabled"}>Inspect relation</button></div>` : ""}
+    ${inspectable ? `<div class="prototype-source-columns" id="${detailsId}" ${expanded ? "" : "hidden"}>${columnRows ? `<ul>${columnRows}</ul>` : '<p>Loading actual source columns...</p>'}<div class="prototype-source-legend"><span>Column provenance unavailable</span></div><button class="prototype-source-inspect" type="button" data-prototype-relation="${escapeHtml(relationIdentityKey(source))}">Inspect relation</button></div>` : ""}
   </article>`;
 }
 
@@ -787,7 +814,7 @@ function togglePrototypeSourceColumns(button) {
   animation.finished.then(() => {
     if (button.getAttribute("aria-expanded") === "false") details.hidden = true;
   }).catch(() => {});
-  if (expanding && source.namespace === activeViewsBinding()?.namespace && !viewsPrototypeState.descriptors.has(relationIdentityKey(source))) {
+  if (expanding && !viewsPrototypeState.descriptors.has(relationIdentityKey(source))) {
     inspectViewsRelation(source).then(() => {
       if (button.isConnected && button.getAttribute("aria-expanded") === "true") renderViewsPrototype();
     }).catch(error => showToast(error.message));
@@ -865,7 +892,7 @@ function renderLineageFocusConcept() {
     ? selected.sources.map((source, index) => prototypeSourceCard(source, selected, index)).join("")
     : '<div class="prototype-source-unavailable"><strong>No upstream relations</strong><span>The live PostgreSQL catalog reports no relation dependencies.</span></div>';
   const dependents = selected.dependents.length
-    ? selected.dependents.map(dependent => `<button class="dependent ${viewsPrototypeState.inspectedRelation === relationIdentityKey(dependent) ? "selected" : ""}" type="button" data-prototype-relation="${escapeHtml(relationIdentityKey(dependent))}" ${dependent.namespace === selected.namespace && canInspectViewsRelation(dependent) ? "" : "disabled"}><span>&rarr;</span><small>Downstream ${escapeHtml(prototypeKindLabel(dependent))}${canInspectViewsRelation(dependent) ? "" : " · inspection unavailable"}</small><strong>${escapeHtml(dependent.namespace)}.${escapeHtml(dependent.relation)}</strong></button>`).join("")
+    ? selected.dependents.map(dependent => `<button class="dependent ${viewsPrototypeState.inspectedRelation === relationIdentityKey(dependent) ? "selected" : ""}" type="button" data-prototype-relation="${escapeHtml(relationIdentityKey(dependent))}" ${canInspectViewsRelation(dependent) ? "" : "disabled"}><span>&rarr;</span><small>Downstream ${escapeHtml(prototypeKindLabel(dependent))}${canInspectViewsRelation(dependent) ? "" : " · inspection unavailable"}</small><strong>${escapeHtml(dependent.namespace)}.${escapeHtml(dependent.relation)}</strong></button>`).join("")
     : '<article class="dependent empty"><span>&rarr;</span><small>Downstream</small><strong>No downstream objects</strong></article>';
   const selectedIdentity = relationIdentityKey({ database: binding.database, namespace: selected.namespace, relation: selected.name, kind: selected.kind });
   const relationMap = `<div class="prototype-relations-map"><div class="prototype-focus-sources"><header><span>Upstream</span><small>${selected.sources.length} relations</small></header>${sourceCards}</div><div class="prototype-focus-arrows" aria-hidden="true"><i></i></div><button class="prototype-focus-hero ${viewsPrototypeState.inspectedRelation === selectedIdentity ? "selected" : ""}" type="button" data-prototype-relation="${escapeHtml(selectedIdentity)}"><span class="prototype-focus-identity">${prototypeKindIcon(selected)}<span><small>${escapeHtml(prototypeKindLabel(selected))}</small><h3>${escapeHtml(selected.name)}</h3></span></span><span class="prototype-focus-fields">${selectedFields || '<span class="prototype-focus-field"><strong>Loading output contract...</strong></span>'}</span><p>${selected.columns.length} projected columns · inspect output contract</p></button><div class="prototype-focus-arrows outbound" aria-hidden="true"><i></i></div><div class="prototype-focus-dependents"><header><span>Downstream</span><small>${selected.dependents.length} consumers</small></header>${dependents}</div></div>`;
@@ -879,7 +906,7 @@ function renderLineageFocusConcept() {
         <header class="views-lineage-head"><button class="views-pane-heading" type="button" data-views-pane="lineage" aria-expanded="${viewsPrototypeState.activePane === "lineage"}"><span class="eyebrow">Live PostgreSQL catalog</span><span><strong>View lineage</strong><span class="prototype-kind-badge ${prototypeKindClass(selected)}">${escapeHtml(prototypeKindLabel(selected))}</span></span><small>${escapeHtml(selected.namespace)}.${escapeHtml(selected.name)}</small></button></header>
         <div class="prototype-lineage-body" ${viewsPrototypeState.activePane === "lineage" ? "" : "hidden"}><div class="prototype-focus-flow">${lineageContent}</div></div>
       </section>
-      <section class="prototype-focus-definition"><button class="views-pane-heading" type="button" data-views-pane="definition" aria-expanded="${viewsPrototypeState.activePane === "definition"}"><span><span class="eyebrow">Reviewed PostgreSQL definition</span><strong>PostgreSQL definition</strong></span><span class="prototype-kind-badge ${prototypeKindClass(selected)}">${escapeHtml(prototypeKindLabel(selected))}</span></button><div class="prototype-focus-definition-content" ${viewsPrototypeState.activePane === "definition" ? "" : "hidden"}><textarea class="prototype-definition-editor" data-prototype-definition-editor aria-label="Editable PostgreSQL view definition" spellcheck="false" ${selected.definition?.status === "available" && selected.permissions?.canAlter ? "" : "readonly"}>${escapeHtml(prototypeViewDefinition(selected))}</textarea><footer><span data-prototype-draft-status>${selected.definition?.status === "available" ? "Live definition; preview required before apply" : "Definition unavailable"}</span><div class="prototype-definition-actions"><button class="button button-primary" type="button" data-commit-prototype-definition ${selected.definition?.status === "available" && selected.permissions?.canAlter ? "" : "disabled"}>Preview changes</button></div></footer></div></section>
+      <section class="prototype-focus-definition"><button class="views-pane-heading" type="button" data-views-pane="definition" aria-expanded="${viewsPrototypeState.activePane === "definition"}"><span><span class="eyebrow">Reviewed PostgreSQL definition</span><strong>PostgreSQL definition</strong></span><span class="prototype-kind-badge ${prototypeKindClass(selected)}">${escapeHtml(prototypeKindLabel(selected))}</span></button><div class="prototype-focus-definition-content" ${viewsPrototypeState.activePane === "definition" ? "" : "hidden"}><textarea class="prototype-definition-editor" data-prototype-definition-editor aria-label="Editable PostgreSQL view definition" spellcheck="false" ${selected.definition?.status === "available" ? "" : "readonly"}>${escapeHtml(prototypeViewDefinition(selected))}</textarea><footer><span data-prototype-draft-status>${selected.definition?.status === "available" ? "Live definition; advisory privileges do not gate preview; PostgreSQL authorizes apply" : "Definition unavailable"}</span><div class="prototype-definition-actions"><button class="button button-primary" type="button" data-commit-prototype-definition ${selected.definition?.status === "available" ? "" : "disabled"}>Preview changes</button></div></footer></div></section>
     </div>
   </div>`;
 }
@@ -895,14 +922,15 @@ function renderPrototypeRelationInspector(identityKey) {
   const relationship = identity.relation === selected.id ? `${selected.sources.length} upstream · ${selected.dependents.length} downstream` : selected.sources.some(item => relationIdentityKey(item) === identityKey) ? `Source of ${selected.name}` : `Consumes ${selected.name}`;
   const owner = descriptor.owner.status === "available" ? descriptor.owner.name : `Unavailable: ${descriptor.owner.reason}`;
   const materialized = descriptor.materialized.status === "available" ? `Populated ${descriptor.materialized.populated ? "yes" : "no"} · concurrent refresh ${descriptor.materialized.concurrentRefreshEligible ? "eligible" : "unavailable"}` : "Not applicable";
-  return `<header><span><span class="eyebrow">Live relation inspector</span><strong>${escapeHtml(identity.relation)}</strong></span><button class="shared-icon-button" type="button" data-close-prototype-side aria-label="Close relation inspector"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button></header><section><span class="prototype-section-label">Identity</span><dl class="prototype-relation-identity"><div><dt>Namespace</dt><dd>${escapeHtml(identity.namespace)}</dd></div><div><dt>Kind</dt><dd>${escapeHtml(prototypeKindLabel(identity))}</dd></div><div><dt>Lineage role</dt><dd>${escapeHtml(relationship)}</dd></div><div><dt>Owner</dt><dd>${escapeHtml(owner)}</dd></div><div><dt>Permissions</dt><dd>Select ${descriptor.permissions.canSelect ? "yes" : "no"} · alter ${descriptor.permissions.canAlter ? "yes" : "no"}</dd></div><div><dt>Materialized</dt><dd>${escapeHtml(materialized)}</dd></div></dl></section><section class="prototype-relation-columns"><span class="prototype-section-label">Columns · ${descriptor.columns.length}</span>${descriptor.columns.map(column => `<article><strong>${escapeHtml(column.name)}</strong><span>${escapeHtml(column.type)}</span><small>${column.nullable ? "Nullable" : "Not null"}</small></article>`).join("")}</section><section><span class="prototype-section-label">Column provenance</span><div class="prototype-column-chips"><small>Unavailable from PostgreSQL. No source-to-output mappings are inferred.</small></div></section><footer>Verified live catalog snapshot</footer>`;
+  const mutationReason = identity.namespace !== binding.namespace ? `Read-only: ${identity.namespace} is outside the active saved namespace ${binding.namespace}.` : !["view", "materialized_view"].includes(identity.kind) ? `Read-only: ${prototypeKindLabel(identity).toLowerCase()} is not editable in the Views workspace.` : "Read-only lineage inspection; mutation remains bound to the selected saved-namespace view.";
+  return `<header><span><span class="eyebrow">Live relation inspector</span><strong>${escapeHtml(identity.relation)}</strong></span><button class="shared-icon-button" type="button" data-close-prototype-side aria-label="Close relation inspector"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button></header><section><span class="prototype-section-label">Identity</span><dl class="prototype-relation-identity"><div><dt>Namespace</dt><dd>${escapeHtml(identity.namespace)}</dd></div><div><dt>Kind</dt><dd>${escapeHtml(prototypeKindLabel(identity))}</dd></div><div><dt>Lineage role</dt><dd>${escapeHtml(relationship)}</dd></div><div><dt>Owner</dt><dd>${escapeHtml(owner)}</dd></div><div><dt>Advisory privileges</dt><dd>Select ${descriptor.permissions.canSelect ? "yes" : "no"} · alter ${descriptor.permissions.canAlter ? "yes" : "no"}; PostgreSQL authorizes requests</dd></div><div><dt>Materialized</dt><dd>${escapeHtml(materialized)}</dd></div></dl><p>${escapeHtml(mutationReason)}</p></section><section class="prototype-relation-columns"><span class="prototype-section-label">Columns · ${descriptor.columns.length}</span>${descriptor.columns.map(column => `<article><strong>${escapeHtml(column.name)}</strong><span>${escapeHtml(column.type)}</span><small>${column.nullable ? "Nullable" : "Not null"}</small></article>`).join("")}</section><section><span class="prototype-section-label">Column provenance</span><div class="prototype-column-chips"><small>Unavailable from PostgreSQL. No source-to-output mappings are inferred.</small></div></section><footer>Verified live catalog snapshot</footer>`;
 }
 
 function renderPrototypeImpactSummary(viewItem) {
   const downstream = viewItem.dependents[0];
   const identity = { database: activeViewsBinding().database, namespace: viewItem.namespace, relation: viewItem.name, kind: viewItem.kind };
   const upstream = viewItem.sources[0];
-  return `<section class="prototype-impact-compact" aria-label="Change impact"><header><span>Change impact</span><small>Migration readiness</small></header><div><button type="button" ${upstream?.namespace === viewItem.namespace && canInspectViewsRelation(upstream) ? `data-prototype-relation="${escapeHtml(relationIdentityKey(upstream))}"` : "disabled"}><strong>${viewItem.sources.length}</strong><span>Upstream</span></button><button type="button" data-prototype-relation="${escapeHtml(relationIdentityKey(identity))}"><strong>${viewItem.columns.length}</strong><span>Outputs</span></button><button type="button" ${downstream?.namespace === viewItem.namespace && canInspectViewsRelation(downstream) ? `data-prototype-relation="${escapeHtml(relationIdentityKey(downstream))}"` : "disabled"}><strong>${viewItem.dependents.length}</strong><span>Consumers</span></button><article><span>Review</span><strong>${viewItem.kind === "materialized_view" ? "Recreate and refresh" : "Replacement preview"}</strong></article></div></section>`;
+  return `<section class="prototype-impact-compact" aria-label="Change impact"><header><span>Change impact</span><small>Migration readiness</small></header><div><button type="button" ${upstream && canInspectViewsRelation(upstream) ? `data-prototype-relation="${escapeHtml(relationIdentityKey(upstream))}"` : "disabled"}><strong>${viewItem.sources.length}</strong><span>Upstream</span></button><button type="button" data-prototype-relation="${escapeHtml(relationIdentityKey(identity))}"><strong>${viewItem.columns.length}</strong><span>Outputs</span></button><button type="button" ${downstream && canInspectViewsRelation(downstream) ? `data-prototype-relation="${escapeHtml(relationIdentityKey(downstream))}"` : "disabled"}><strong>${viewItem.dependents.length}</strong><span>Consumers</span></button><article><span>Review</span><strong>${viewItem.kind === "materialized_view" ? "Recreate and refresh" : "Replacement preview"}</strong></article></div></section>`;
 }
 
 function renderCatalogWorkbenchConcept() {
@@ -970,7 +998,7 @@ function openPrototypeRelationInspector(relationName) {
   const selected = selectedPrototypeView();
   const binding = activeViewsBinding();
   const identity = selected && binding ? [...selected.sources, ...selected.dependents, { database: binding.database, namespace: selected.namespace, relation: selected.name, kind: selected.kind }].find(item => relationIdentityKey(item) === relationName) : null;
-  if (identity && canInspectViewsRelation(identity) && identity.namespace === binding.namespace && !viewsPrototypeState.descriptors.has(relationName)) {
+  if (identity && canInspectViewsRelation(identity) && !viewsPrototypeState.descriptors.has(relationName)) {
     inspectViewsRelation(identity).then(() => {
       if (viewsPrototypeState.inspectedRelation === relationName) swapPrototypeSidePanel(renderPrototypeRelationInspector(relationName), relationName);
     }).catch(error => showToast(`${error.message}. Refresh the saved schema before continuing`));
@@ -1088,14 +1116,7 @@ function openPrototypeViewEditor(viewId = null, duplicate = false) {
 }
 
 function postgresDiagnosticText(error) {
-  const postgres = error.payload?.error?.details?.postgres;
-  if (!postgres || typeof postgres !== "object") return error.message || "PostgreSQL rejected the SQL";
-  const lines = [postgres.message || error.message];
-  if (postgres.detail) lines.push(`Detail: ${postgres.detail}`);
-  if (postgres.hint) lines.push(`Hint: ${postgres.hint}`);
-  const location = [postgres.sqlstate ? `SQLSTATE ${postgres.sqlstate}` : "", Number.isInteger(postgres.position) ? `position ${postgres.position}` : ""].filter(Boolean).join(" · ");
-  if (location) lines.push(location);
-  return lines.filter(Boolean).join("\n");
+  return window.SchemiiShared.formatApiError(error, "PostgreSQL rejected the SQL");
 }
 
 function showPrototypeViewError(error) {
@@ -1105,7 +1126,7 @@ function showPrototypeViewError(error) {
 
 function deleteSelectedPrototypeView() {
   const selected = selectedPrototypeView();
-  if (!selected?.permissions?.canAlter) return;
+  if (!selected || viewsPrototypeState.loading) return;
   viewsPrototypeState.editingId = selected.id;
   viewsPrototypeState.editorExpectation = { kind: selected.kind, fingerprint: selected.fingerprint };
   elements.prototypeViewName.value = selected.name;
@@ -1199,12 +1220,12 @@ async function reloadActiveSchemaRecord() {
 function standaloneSqlTarget() {
   const selected = currentPostgresProfile();
   if (selected && postgresState.namespace) {
-    return { profileId: selected.id, profile: selected.name || selected.id, database: selected.dbname, namespace: postgresState.namespace };
+    return { profileId: selected.id, profile: selected.name || selected.id, profileFingerprint: selected.contextFingerprint, database: selected.dbname, namespace: postgresState.namespace };
   }
   const source = schema.postgres;
   if (source?.sourceProfileId && source.database && source.namespace) {
     const linked = postgresState.profiles.find(profile => profile.id === source.sourceProfileId);
-    return { profileId: source.sourceProfileId, profile: linked?.name || source.sourceProfileId, database: source.database, namespace: source.namespace };
+    return { profileId: source.sourceProfileId, profile: linked?.name || source.sourceProfileId, profileFingerprint: linked?.contextFingerprint, database: source.database, namespace: source.namespace };
   }
   return { profileId: null, profile: "Not selected", database: "Not selected", namespace: "Not selected" };
 }
@@ -1216,61 +1237,35 @@ function standaloneSqlTargetLabel() {
 }
 
 function standaloneSqlTargetKey(target = standaloneSqlTarget()) {
-  return `${target.profileId ?? ""}\u0000${target.database}\u0000${target.namespace}`;
+  return `${target.profileId ?? ""}\u0000${target.profileFingerprint ?? ""}\u0000${target.database}\u0000${target.namespace}`;
 }
 
-function clearStandaloneSqlWriteGrant(viewState) {
+function clearStandaloneSqlWriteMode(viewState) {
   viewState.writeMode = false;
-  viewState.writeGrantId = null;
-  viewState.writeGrantProfileId = null;
-  viewState.writeGrantTargetKey = null;
-  viewState.writeGrantExpiresAt = null;
 }
 
 function setStandaloneSqlWriteMode() {
   const viewState = currentStandaloneSqlView();
   const target = standaloneSqlTarget();
-  const available = Boolean(target.profileId && target.database !== "Not selected" && target.namespace !== "Not selected");
-  const enabled = Boolean(viewState.writeMode && viewState.writeGrantId);
+  const available = Boolean(target.profileId && target.profileFingerprint && target.database !== "Not selected" && target.namespace !== "Not selected");
+  const enabled = Boolean(viewState.writeMode);
   elements.standaloneSqlWriteMode.setAttribute("aria-pressed", String(enabled));
   elements.standaloneSqlWriteMode.classList.toggle("active", enabled);
-  elements.standaloneSqlWriteMode.disabled = !available || Boolean(viewState.writeGrantRequest);
+  elements.standaloneSqlWriteMode.disabled = !available;
   elements.standaloneSqlWriteMode.setAttribute("aria-label", available ? (enabled ? `Disable write mode for ${viewState.name}` : `Enable write mode for ${viewState.name}`) : "Select a PostgreSQL target to enable write mode");
   elements.standaloneSqlWriteMode.dataset.tooltip = available ? (enabled ? "Disable writes for this query" : "Enable writes for this query") : "Select a PostgreSQL target first";
   elements.standaloneSqlWriteWarning.hidden = !enabled;
   elements.standaloneSqlWriteTarget.textContent = standaloneSqlTargetLabel();
 }
 
-async function revokeStandaloneSqlWriteGrant(viewState) {
-  if (!viewState?.writeGrantId) {
-    if (viewState) clearStandaloneSqlWriteGrant(viewState);
-    return;
-  }
-  if (viewState.writeGrantRequest) return viewState.writeGrantRequest;
-  const grantId = viewState.writeGrantId;
-  const profileId = viewState.writeGrantProfileId;
-  viewState.writeGrantRequest = postgresRequest(`/api/postgres/profiles/${encodeURIComponent(profileId)}/console/write-grants/${encodeURIComponent(grantId)}`, { method: "DELETE" });
-  try {
-    await viewState.writeGrantRequest;
-    if (viewState.writeGrantId === grantId) clearStandaloneSqlWriteGrant(viewState);
-  } finally {
-    viewState.writeGrantRequest = null;
-    if (viewState.id === standaloneSqlState.activeViewId) setStandaloneSqlWriteMode();
-  }
+async function loadStandaloneSqlSettings() {
+  standaloneSqlState.settings = await postgresRequest("/api/postgres/console/settings");
+  return standaloneSqlState.settings;
 }
 
-async function revokeAllStandaloneSqlWriteGrants(clearFailures = false) {
-  const pendingRequests = standaloneSqlState.views.map(viewState => viewState.writeGrantRequest).filter(Boolean);
-  if (pendingRequests.length) await Promise.allSettled(pendingRequests);
-  const grantedViews = standaloneSqlState.views.filter(viewState => viewState.writeGrantId);
-  const results = await Promise.allSettled(grantedViews.map(viewState => revokeStandaloneSqlWriteGrant(viewState)));
-  const failures = [];
-  results.forEach((result, index) => {
-    if (result.status === "rejected") failures.push(result.reason);
-    if (clearFailures && result.status === "rejected") clearStandaloneSqlWriteGrant(grantedViews[index]);
-  });
+function clearAllStandaloneSqlWriteModes() {
+  standaloneSqlState.views.forEach(clearStandaloneSqlWriteMode);
   setStandaloneSqlWriteMode();
-  if (failures.length) throw failures[0];
 }
 
 function renderStandaloneSqlTarget(target) {
@@ -1288,18 +1283,12 @@ async function syncStandaloneSqlTarget(resetWriteMode = false) {
   if (targetChanged && standaloneSqlState.open) {
     if (standaloneSqlState.targetSyncKey === targetKey) return;
     standaloneSqlState.targetSyncKey = targetKey;
-    standaloneSqlState.views.forEach(viewState => { viewState.writeMode = false; });
-    setStandaloneSqlWriteMode();
-    try {
-      await revokeAllStandaloneSqlWriteGrants(true);
-    } catch (error) {
-      showToast(`${error.message}. Write mode was reset; server expiry remains authoritative.`);
-    } finally {
-      standaloneSqlState.targetSyncKey = null;
-    }
+    await Promise.all(standaloneSqlState.views.map(viewState => closeStandaloneSqlResultResources(viewState.resultTabs)));
+    clearAllStandaloneSqlWriteModes();
+    standaloneSqlState.targetSyncKey = null;
     if (standaloneSqlTargetKey() !== targetKey) return syncStandaloneSqlTarget(resetWriteMode);
   } else if (resetWriteMode) {
-    standaloneSqlState.views.forEach(clearStandaloneSqlWriteGrant);
+    clearAllStandaloneSqlWriteModes();
   }
   standaloneSqlState.targetKey = targetKey;
   renderStandaloneSqlTarget(target);
@@ -1438,42 +1427,36 @@ async function enableStandaloneSqlWriteMode() {
     return;
   }
   elements.standaloneSqlWriteConfirm.disabled = true;
-  viewState.writeGrantRequest = postgresRequest(`/api/postgres/profiles/${encodeURIComponent(pending.target.profileId)}/console/write-grants`, {
-    method: "POST",
-    body: JSON.stringify({ consoleId: viewState.consoleId, database: pending.target.database, namespace: pending.target.namespace, confirmed: true }),
-  });
   try {
-    const grant = await viewState.writeGrantRequest;
-    if (!grant.writeGrantId) throw new Error("The server did not return write authorization");
+    let settings = await loadStandaloneSqlSettings();
     if (standaloneSqlState.closing || viewState.id !== standaloneSqlState.activeViewId || pending.targetKey !== standaloneSqlTargetKey()) {
-      viewState.writeGrantId = grant.writeGrantId;
-      viewState.writeGrantProfileId = pending.target.profileId;
-      viewState.writeGrantRequest = null;
-      await revokeStandaloneSqlWriteGrant(viewState);
       throw new Error("The query or PostgreSQL target changed while write mode was being enabled");
     }
-    viewState.writeGrantId = grant.writeGrantId;
+    if (settings.writeIntent !== "enabled") {
+      settings = await postgresRequest("/api/postgres/console/settings", {
+        method: "PUT",
+        body: JSON.stringify({
+          expectedRevision: settings.revision, writeIntent: "enabled",
+          defaultMode: settings.defaultMode, statementLimit: settings.statementLimit,
+          rowPageSize: settings.rowPageSize,
+        }),
+      });
+      standaloneSqlState.settings = settings;
+    }
     viewState.writeMode = true;
-    viewState.writeGrantProfileId = pending.target.profileId;
-    viewState.writeGrantTargetKey = pending.targetKey;
-    viewState.writeGrantExpiresAt = grant.expiresAt ?? grant.expiresAtEpoch ?? null;
     elements.standaloneSqlWriteDialog.close();
   } catch (error) {
     showToast(error.message);
   } finally {
-    viewState.writeGrantRequest = null;
     if (viewState.id === standaloneSqlState.activeViewId) setStandaloneSqlWriteMode();
   }
 }
 
 async function toggleStandaloneSqlWriteMode() {
   const viewState = currentStandaloneSqlView();
-  if (!viewState.writeMode || !viewState.writeGrantId) return openStandaloneSqlWriteDialog();
-  try {
-    await revokeStandaloneSqlWriteGrant(viewState);
-  } catch (error) {
-    showToast(`${error.message}. Write mode remains enabled until revocation succeeds or the grant expires.`);
-  }
+  if (!viewState.writeMode) return openStandaloneSqlWriteDialog();
+  clearStandaloneSqlWriteMode(viewState);
+  setStandaloneSqlWriteMode();
 }
 
 function nextStandaloneSqlViewName() {
@@ -1496,7 +1479,7 @@ function addStandaloneSqlView() {
   if (standaloneSqlState.running) return;
   captureStandaloneSqlView();
   const name = nextStandaloneSqlViewName();
-  const viewState = { id: crypto.randomUUID(), name, sql: "", activePane: "editor", writeMode: false, writeGrantId: null };
+  const viewState = { id: crypto.randomUUID(), name, sql: "", activePane: "editor", writeMode: false };
   standaloneSqlState.views.push(viewState);
   standaloneSqlState.activeViewId = viewState.id;
   standaloneSqlState.renamingViewId = viewState.id;
@@ -1509,15 +1492,11 @@ async function removeStandaloneSqlView(viewId = standaloneSqlState.activeViewId)
   const removed = standaloneSqlState.views.find(viewState => viewState.id === viewId);
   if (!removed) return;
   if ((removed.sql.trim() || removed.resultTabs?.length) && !confirm(`Remove ${removed.name} and its browser-local SQL and results?`)) return;
-  try {
-    await revokeStandaloneSqlWriteGrant(removed);
-  } catch (error) {
-    showToast(`${error.message}. ${removed.name} was retained so its write grant can be revoked safely.`);
-    return;
-  }
+  await closeStandaloneSqlResultResources(removed.resultTabs);
+  clearStandaloneSqlWriteMode(removed);
   const index = standaloneSqlState.views.findIndex(viewState => viewState.id === removed.id);
   standaloneSqlState.views.splice(index, 1);
-  if (!standaloneSqlState.views.length) standaloneSqlState.views.push({ id: crypto.randomUUID(), name: "Query 1", sql: "", activePane: "editor", writeMode: false, writeGrantId: null });
+  if (!standaloneSqlState.views.length) standaloneSqlState.views.push({ id: crypto.randomUUID(), name: "Query 1", sql: "", activePane: "editor", writeMode: false });
   if (removed.id === standaloneSqlState.activeViewId) {
     const next = standaloneSqlState.views[Math.min(index, standaloneSqlState.views.length - 1)];
     standaloneSqlState.activeViewId = next.id;
@@ -1623,8 +1602,54 @@ function standaloneSqlTabContent(tab) {
   if (tab.kind === "error") return standaloneSqlEmpty(tab.message, tab.detail, true);
   const statement = tab.statement;
   if (!statement.columns.length) return `<div class="standalone-sql-command"><span>${tab.committed ? "Committed write transaction" : "Read-only transaction"}</span><strong>${escapeHtml(statement.command)} ${statement.rowCount}</strong><small>${tab.committed ? "Committed transactionally" : "Rolled back after execution"}</small></div>`;
-  const transactionState = tab.committed ? "committed" : "rolled back";
-  return `<table class="standalone-sql-table"><thead><tr>${statement.columns.map(column => `<th>${escapeHtml(column.name)}</th>`).join("")}</tr></thead><tbody>${statement.rows.map(row => `<tr>${row.map(value => `<td>${standaloneSqlCell(value)}</td>`).join("")}</tr>`).join("")}</tbody><caption>${statement.truncated ? "Result truncated at the configured safety limit" : `${statement.rowCount} rows returned`} · ${transactionState}</caption></table>`;
+  const transactionState = tab.committed ? "committed" : statement.transactionRetention && statement.hasMore ? "snapshot retained" : "rolled back";
+  const state = statement.truncationEvents?.length ? "Display/export truncated by an application limit" : statement.hasMore ? `${statement.rows.length} rows loaded · more rows retained` : `${statement.rows.length} rows returned`;
+  const actions = statement.hasMore ? `<div class="standalone-sql-result-actions"><button type="button" data-load-result-page="${escapeHtml(tab.id)}">Load more</button><button type="button" data-export-result="${escapeHtml(tab.id)}">Export JSON</button><button type="button" data-close-result-resource="${escapeHtml(tab.id)}">Close result</button></div>` : "";
+  return `<table class="standalone-sql-table"><thead><tr>${statement.columns.map(column => `<th>${escapeHtml(column.name)}</th>`).join("")}</tr></thead><tbody>${statement.rows.map(row => `<tr>${row.map(value => `<td>${standaloneSqlCell(value)}</td>`).join("")}</tr>`).join("")}</tbody><caption>${state} · ${transactionState}</caption></table>${actions}`;
+}
+
+function standaloneSqlResultUrl(tab, includeCursor = false) {
+  const statement = tab.statement;
+  const query = new URLSearchParams({
+    consoleId: tab.consoleId, database: tab.target.database, namespace: tab.target.namespace,
+    statementIndex: String(statement.statementIndex), resultIndex: String(statement.resultIndex),
+  });
+  if (includeCursor) query.set("cursor", statement.nextCursor);
+  return `/api/postgres/profiles/${encodeURIComponent(tab.target.profileId)}/console/executions/${encodeURIComponent(statement.executionId)}/results/${encodeURIComponent(statement.resultId)}?${query}`;
+}
+
+async function closeStandaloneSqlResultResource(tab) {
+  if (tab?.kind !== "result" || !tab.statement?.hasMore) return;
+  await postgresRequest(standaloneSqlResultUrl(tab), { method: "DELETE" });
+  Object.assign(tab.statement, { hasMore: false, nextCursor: null, resourceState: "closed", closureEvents: ["closed"] });
+}
+
+async function closeStandaloneSqlResultResources(tabs) {
+  await Promise.allSettled((tabs || []).filter(tab => tab.kind === "result" && tab.statement?.hasMore).map(closeStandaloneSqlResultResource));
+}
+
+async function loadStandaloneSqlResultPage(tab) {
+  if (tab?.kind !== "result" || !tab.statement?.hasMore || !tab.statement.nextCursor) return;
+  const rows = tab.statement.rows;
+  const page = await postgresRequest(standaloneSqlResultUrl(tab, true));
+  rows.push(...page.rows);
+  Object.assign(tab.statement, page, { rows });
+  tab.meta = `${tab.statement.command} · ${rows.length}${page.hasMore ? "+" : ""} rows · ${tab.committed ? "committed" : "rolled back"}`;
+  renderStandaloneSqlResultTabs();
+}
+
+async function exportStandaloneSqlResult(tab) {
+  while (tab?.statement?.hasMore) await loadStandaloneSqlResultPage(tab);
+  if (!tab?.statement) return;
+  const blob = new Blob([JSON.stringify({
+    columns: tab.statement.columns, rows: tab.statement.rows,
+    truncationEvents: tab.statement.truncationEvents || [],
+  }, null, 2)], { type: "application/json" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = `console-${tab.statement.executionId}-statement-${tab.statement.statementIndex + 1}.json`;
+  link.click();
+  URL.revokeObjectURL(link.href);
 }
 
 function uniqueStandaloneSqlTabLabel(viewState, requested, excludedId = null, reserved = []) {
@@ -1679,6 +1704,7 @@ function renderStandaloneSqlResultTabs() {
 }
 
 function replaceStandaloneSqlUnpinnedTabs(newTabs, viewState = currentStandaloneSqlView()) {
+  void closeStandaloneSqlResultResources(viewState.resultTabs.filter(tab => !tab.pinned));
   viewState.resultTabs = [...viewState.resultTabs.filter(tab => tab.pinned), ...newTabs];
   viewState.activeResultTabId = newTabs[0]?.id ?? viewState.resultTabs.at(-1)?.id ?? null;
   if (viewState.id === standaloneSqlState.activeViewId) renderStandaloneSqlResultTabs();
@@ -1712,6 +1738,15 @@ async function runStandaloneSql(runAll = false) {
     return;
   }
   if (standaloneSqlState.running) return;
+  let settings;
+  try {
+    settings = await loadStandaloneSqlSettings();
+    await closeStandaloneSqlResultResources(viewState.resultTabs.filter(tab => !tab.pinned));
+  } catch (error) {
+    replaceStandaloneSqlUnpinnedTabs([{ id: crypto.randomUUID(), label: "Settings unavailable", meta: "Not run", kind: "error", pinned: false, message: error.message, detail: "Console settings must be available before execution." }], viewState);
+    setStandaloneSqlActivePane("result");
+    return;
+  }
   const executionId = crypto.randomUUID();
   standaloneSqlState.running = true;
   standaloneSqlState.executionId = executionId;
@@ -1721,8 +1756,7 @@ async function runStandaloneSql(runAll = false) {
   elements.standaloneSqlCancel.disabled = false;
   elements.standaloneSqlCancel.hidden = false;
   updateWorkspaceRail();
-  const writeMode = Boolean(viewState.writeMode && viewState.writeGrantId);
-  const writeGrantId = writeMode ? viewState.writeGrantId : null;
+  const writeMode = Boolean(viewState.writeMode);
   replaceStandaloneSqlUnpinnedTabs([{ id: `running-${executionId}`, label: runAll ? "Run all" : "Run", meta: "Running", kind: "loading", pinned: false, message: `Executing a ${writeMode ? "write" : "read-only"} PostgreSQL transaction...` }], viewState);
   setStandaloneSqlActivePane("result");
   try {
@@ -1734,15 +1768,17 @@ async function runStandaloneSql(runAll = false) {
         database: target.database,
         namespace: target.namespace,
         sql,
-        mode: writeMode ? "write" : "read",
-        writeGrantId,
+        mode: writeMode ? "managed" : "managed_read",
+        settingsRevision: settings.revision,
+        profileFingerprint: target.profileFingerprint,
       }),
     });
     if (standaloneSqlState.executionId !== executionId) return;
     const totalRows = result.statements.reduce((count, statement) => count + statement.rowCount, 0);
     const labels = standaloneSqlResultLabels(viewState, result.statements.length);
     replaceStandaloneSqlUnpinnedTabs(result.statements.map((statement, index) => ({
-      id: crypto.randomUUID(), label: labels[index], meta: `${statement.command} · ${statement.rowCount}${statement.truncated ? "+" : ""} rows · ${result.committed ? "committed" : "rolled back"}`, kind: "result", pinned: false, statement, committed: result.committed === true,
+      id: crypto.randomUUID(), label: labels[index], meta: `${statement.command} · ${statement.rowCount}${statement.hasMore ? "+" : ""} rows · ${result.committed ? "committed" : "rolled back"}`, kind: "result", pinned: false, statement, committed: result.committed === true,
+      target, consoleId: viewState.consoleId,
     })), viewState);
     standaloneSqlState.history.unshift({ kind: result.committed ? "Write" : "Read", label: result.statements.map(statement => statement.command).join(" · "), meta: `${totalRows} rows · ${result.committed ? "committed" : "rolled back"}`, sql });
     standaloneSqlState.history = standaloneSqlState.history.slice(0, 3);
@@ -1750,20 +1786,20 @@ async function runStandaloneSql(runAll = false) {
     if (result.committed) void checkPostgresDrift();
   } catch (error) {
     if (standaloneSqlState.executionId !== executionId) return;
-    const grantInvalid = ["write_grant_required", "write_grant_expired", "write_grant_target_changed", "execution_outcome_unknown"].includes(error.code);
-    if (grantInvalid) {
-      clearStandaloneSqlWriteGrant(viewState);
+    const authorizationInvalid = ["console_write_intent_disabled", "console_settings_changed", "console_target_changed", "execution_outcome_unknown"].includes(error.code);
+    if (authorizationInvalid) {
+      clearStandaloneSqlWriteMode(viewState);
       if (viewState.id === standaloneSqlState.activeViewId) setStandaloneSqlWriteMode();
     }
     const details = error.payload?.error?.details;
     const suffix = [details?.sqlstate, Number.isInteger(details?.statementIndex) ? `statement ${details.statementIndex + 1}` : ""].filter(Boolean).join(" · ");
     const uncertain = error.code === "execution_outcome_unknown";
     const errorMeta = `${suffix ? `${suffix} · ` : ""}${uncertain ? "Outcome unknown" : "Rolled back"}`;
-    const grantDetail = uncertain
+    const authorizationDetail = uncertain
       ? "Do not retry this write until you verify PostgreSQL. Write authorization was cleared."
-      : grantInvalid ? "Write authorization is no longer current. Re-enable writes for this query before running it again." : "The transaction was rolled back.";
+      : authorizationInvalid ? "Write authorization is no longer current. Re-enable writes for this query before running it again." : "The transaction was rolled back.";
     const diagnostic = postgresDiagnosticText(error);
-    replaceStandaloneSqlUnpinnedTabs([{ id: crypto.randomUUID(), label: error.code === "execution_cancelled" ? "Cancelled" : "Error", meta: errorMeta, kind: "error", pinned: false, message: diagnostic, detail: suffix ? `${suffix}\n${grantDetail}` : grantDetail }], viewState);
+    replaceStandaloneSqlUnpinnedTabs([{ id: crypto.randomUUID(), label: error.code === "execution_cancelled" ? "Cancelled" : "Error", meta: errorMeta, kind: "error", pinned: false, message: diagnostic, detail: suffix ? `${suffix}\n${authorizationDetail}` : authorizationDetail }], viewState);
     standaloneSqlState.history.unshift({ kind: error.code === "execution_cancelled" ? "Cancelled" : "Error", label: error.message, meta: errorMeta, sql });
     standaloneSqlState.history = standaloneSqlState.history.slice(0, 3);
     renderStandaloneSqlHistory();
@@ -1840,14 +1876,8 @@ async function closeStandaloneSqlWorkspace({ restoreLayer = true } = {}) {
   if (standaloneSqlState.closing) return;
   standaloneSqlState.closing = true;
   abandonStandaloneSqlRun();
-  try {
-    await revokeAllStandaloneSqlWriteGrants();
-  } catch (error) {
-    standaloneSqlState.closing = false;
-    showToast(`${error.message}. The SQL Console remains open so write authorization can be revoked safely.`);
-    return;
-  }
-  standaloneSqlState.views.forEach(clearStandaloneSqlWriteGrant);
+  await Promise.all(standaloneSqlState.views.map(viewState => closeStandaloneSqlResultResources(viewState.resultTabs)));
+  clearAllStandaloneSqlWriteModes();
   setStandaloneSqlWriteMode();
   standaloneSqlState.open = false;
   standaloneSqlState.closing = false;
@@ -2397,6 +2427,22 @@ const sharedSessionClient = window.SchemiiShared.createSessionClient({
 });
 const sharedPostgresClient = window.SchemiiShared.createPostgresClient({ sessionClient: sharedSessionClient });
 const postgresProfileRepository = window.SchemiiShared.createProfileRepository({ postgresClient: sharedPostgresClient });
+const sharedConsole = window.SchemiiShared.createPostgresConsole({
+  button: elements.standaloneSqlButton,
+  postgresClient: sharedPostgresClient,
+  getTarget: () => {
+    const target = standaloneSqlTarget();
+    const profile = postgresState.profiles.find(item => item.id === target.profileId);
+    return target.profileId && profile?.contextFingerprint ? { ...target, profileFingerprint: profile.contextFingerprint } : null;
+  },
+  targetControls: [elements.postgresProfilesList, elements.postgresNamespaceSelect],
+  onCommittedWrite: async () => {
+    viewsPrototypeState.targetKey = null;
+    viewsPrototypeState.descriptors.clear();
+    postgresState.dismissedFingerprint = null;
+    await checkPostgresDrift();
+  },
+});
 const postgresProfileForm = window.SchemiiShared.createProfileForm({ fields: {
   name: elements.postgresProfileName,
   host: elements.postgresProfileHost,
@@ -2520,6 +2566,7 @@ async function initializeSchemaLibrary() {
     schemaLibrary = { activeId: activeSchemaId, schemas: records };
     schema = migrateSchema(clone(records.find(record => record.id === activeSchemaId).schema));
     view = clone(schema.layout.layers.tables.viewport);
+    try { postgresState.profiles = await postgresProfileRepository.list(); } catch { postgresState.profiles = []; }
     elements.saveStatus.textContent = "Saved to file";
     render();
   } catch (error) {
@@ -3197,6 +3244,13 @@ function resetSchemaSession() {
   elements.relationBanner.hidden = true;
   elements.mainLayout.classList.remove("inspector-dismissed", "inspector-content-collapsed", "inspector-content-expanding");
   elements.inspector.classList.remove("mobile-open");
+  postgresState.selectedProfileId = null;
+  postgresState.aiTargetExplicit = false;
+  postgresState.namespace = "";
+  postgresState.namespaces = [];
+  postgresState.namespaceEntries = [];
+  postgresState.plan = null;
+  aiAssistant.invalidateContext("Project changed. The next message starts a new conversation for this design.");
 }
 
 async function createNewSchema() {
@@ -3378,6 +3432,7 @@ function render() {
   renderConnections();
   renderInspector();
   applyView();
+  syncAiTargetAvailability();
 }
 
 function renderTables() {
@@ -5177,10 +5232,27 @@ function updatePostgresControls() {
   elements.postgresPreviewButton.disabled = postgresState.busy || !ready;
   elements.postgresObjectsButton.disabled = postgresState.busy || !ready;
   elements.postgresImportButton.textContent = designMatchesPostgresTarget() ? "Refresh design" : "Import";
-  elements.applyMigrationButton.disabled = postgresState.busy || !postgresState.plan;
+  elements.applyMigrationButton.disabled = postgresState.busy || !postgresState.plan || postgresState.plan.applyCapable !== true;
   if (postgresState.previewOnly) elements.applyMigrationButton.disabled = true;
   document.querySelectorAll("[data-postgres-action]").forEach(button => { button.disabled = postgresState.busy; });
+  renderPostgresTargetPresentation();
   syncStandaloneSqlTarget();
+}
+
+function postgresTargetPresentation() {
+  const profile = currentPostgresProfile();
+  if (!profile || !postgresState.namespace) return null;
+  const linked = schema.postgres?.sourceProfileId === profile.id && schema.postgres?.database === profile.dbname && schema.postgres?.namespace === postgresState.namespace;
+  return window.SchemiiShared.targetPresentation({
+    state: postgresState.aiTargetExplicit ? "selected" : linked ? "linked" : "suggested",
+    profileName: profile.name, profileId: profile.id, database: profile.dbname, namespace: postgresState.namespace,
+    verifiedAt: postgresState.targetVerifiedAt, verificationSource: postgresState.targetVerifiedAt ? "PostgreSQL namespace catalog" : linked ? "Saved schema link" : "Automatic workspace suggestion",
+  });
+}
+
+function renderPostgresTargetPresentation() {
+  const target = postgresTargetPresentation();
+  elements.postgresTargetPresentation.textContent = target ? window.SchemiiShared.formatTargetPresentation(target) : "No complete PostgreSQL target";
 }
 
 function setPostgresBusy(busy, message = "") {
@@ -5195,10 +5267,14 @@ function renderPostgresProfiles() {
     updatePostgresControls();
     return;
   }
-  elements.postgresProfilesList.innerHTML = postgresState.profiles.map(profile => `
+  elements.postgresProfilesList.innerHTML = postgresState.profiles.map(profile => {
+    const active = profile.id === postgresState.selectedProfileId;
+    const linked = schema.postgres?.sourceProfileId === profile.id;
+    const stateLabel = postgresState.aiTargetExplicit ? "Selected" : linked ? "Linked" : "Suggested";
+    return `
     <article class="postgres-profile-item ${profile.id === postgresState.selectedProfileId ? "selected" : ""}" data-profile-id="${escapeHtml(profile.id)}">
       <div>
-        <div class="postgres-profile-name">${escapeHtml(profile.name)}${profile.id === postgresState.selectedProfileId ? '<span class="current-badge">Selected</span>' : ""}</div>
+        <div class="postgres-profile-name">${escapeHtml(profile.name)}${active ? `<span class="current-badge">${stateLabel}</span>` : ""}</div>
         <div class="postgres-profile-meta">${escapeHtml(profile.user)}@${escapeHtml(profile.host)}:${profile.port} / ${escapeHtml(profile.dbname)} · SSL ${escapeHtml(profile.sslmode)}</div>
       </div>
       <div class="postgres-profile-actions">
@@ -5207,12 +5283,13 @@ function renderPostgresProfiles() {
         <button class="button button-ghost" data-postgres-action="delete" type="button">Delete</button>
       </div>
     </article>
-  `).join("");
+  `;
+  }).join("");
   updatePostgresControls();
 }
 
 function renderNamespaceOptions() {
-  window.SchemiiShared.initializeNamespaceSelect(elements.postgresNamespaceSelect, postgresState.namespaces, {
+  window.SchemiiShared.initializeNamespaceSelect(elements.postgresNamespaceSelect, postgresState.namespaceEntries, {
     preferred: postgresState.namespace,
   });
   updatePostgresControls();
@@ -5239,6 +5316,7 @@ async function loadPostgresProfiles() {
     if (postgresState.selectedProfileId) await loadPostgresNamespaces();
     else {
       postgresState.namespaces = [];
+      postgresState.namespaceEntries = [];
       postgresState.namespace = "";
       renderNamespaceOptions();
     }
@@ -5255,7 +5333,13 @@ async function loadPostgresNamespaces() {
   if (!postgresState.selectedProfileId) return false;
   setPostgresBusy(true, "Connecting and loading namespaces...");
   try {
-    postgresState.namespaces = await postgresProfileRepository.namespaces(postgresState.selectedProfileId);
+    const profile = postgresState.profiles.find(item => item.id === postgresState.selectedProfileId);
+    const catalog = await postgresProfileRepository.namespaceCatalog(postgresState.selectedProfileId, profile.dbname, {
+      scope: elements.postgresSystemNamespaces.checked ? "all" : "user",
+    });
+    postgresState.namespaceEntries = catalog.entries;
+    postgresState.namespaces = catalog.namespaces;
+    postgresState.targetVerifiedAt = new Date().toISOString();
     const preferred = schema.postgres?.sourceProfileId === postgresState.selectedProfileId ? schema.postgres.namespace : "public";
     if (!postgresState.namespaces.includes(postgresState.namespace)) {
       postgresState.namespace = postgresState.namespaces.includes(preferred) ? preferred : postgresState.namespaces[0] ?? "";
@@ -5265,6 +5349,8 @@ async function loadPostgresNamespaces() {
     return true;
   } catch (error) {
     postgresState.namespaces = [];
+    postgresState.namespaceEntries = [];
+    postgresState.targetVerifiedAt = null;
     postgresState.namespace = "";
     renderNamespaceOptions();
     setPostgresStatus(error.message, true);
@@ -5393,16 +5479,21 @@ function renderMigrationPreview() {
   for (const step of plan.steps) counts.set(step.action, (counts.get(step.action) ?? 0) + 1);
   elements.migrationSummary.innerHTML = plan.steps.length
     ? [...counts].map(([action, count]) => `<span>${count} ${escapeHtml(action.replaceAll("_", " "))}</span>`).join("")
-    : "<span>No database changes</span>";
-  const warningMessages = (plan.warnings ?? []).map(warning => warning.message);
+    : plan.complete ? "<span>No database changes</span>" : "<span>Migration preview is incomplete</span>";
+  const warningMessages = [
+    ...(plan.blockingDifferences ?? []).map(item => `${item.message} Next action: ${item.nextAction}`),
+    ...(plan.warnings ?? []).map(warning => warning.message),
+  ];
   elements.migrationWarnings.hidden = !warningMessages.length;
   elements.migrationWarnings.innerHTML = warningMessages.map(message => `<div>${escapeHtml(message)}</div>`).join("");
   elements.migrationSql.value = plan.steps.length
     ? `BEGIN;\n\n${plan.steps.map(step => `-- ${step.action} ${step.objectType}: ${step.name}\n${step.sql}`).join("\n\n")}\n\nCOMMIT;`
-    : "-- The design already matches the selected PostgreSQL namespace.";
+    : plan.complete
+      ? "-- The design already matches the selected PostgreSQL namespace."
+      : "-- No executable steps resolve every requested difference. Review the blocking reasons above.";
   elements.destructiveConfirmation.hidden = !plan.destructive;
   elements.confirmDestructive.checked = false;
-  elements.applyMigrationButton.textContent = plan.steps.length ? "Apply migration" : "Done";
+  elements.applyMigrationButton.textContent = plan.applyCapable ? (plan.steps.length ? "Apply migration" : "Done") : "Resolve blocking differences";
   updatePostgresControls();
 }
 
@@ -5436,6 +5527,7 @@ async function previewPostgresMigration() {
 
 async function applyPostgresMigration() {
   if (!postgresState.plan) return;
+  if (postgresState.plan.applyCapable !== true) return showToast("Resolve the blocking differences and refresh the migration preview");
   if (postgresState.schemaSnapshot !== JSON.stringify(schema)) return showToast("The design changed. Refresh the migration preview");
   if (!postgresState.plan.steps.length) {
     elements.migrationDialog.close();
@@ -5477,7 +5569,7 @@ async function applyPostgresMigration() {
     elements.migrationWarnings.hidden = false;
     elements.migrationWarnings.textContent = databaseApplied ? `PostgreSQL was updated, but local synchronization failed: ${error.message}` : error.message;
   } finally {
-    elements.applyMigrationButton.textContent = postgresState.plan?.steps?.length ? "Apply migration" : "Done";
+    elements.applyMigrationButton.textContent = postgresState.plan?.applyCapable === false ? "Resolve blocking differences" : (postgresState.plan?.steps?.length ? "Apply migration" : "Done");
     setPostgresBusy(false);
   }
 }
@@ -6025,11 +6117,13 @@ function renderAiAction(proposal, context) {
     const review = document.createElement("pre");
     review.className = "ai-action-review";
     const target = [payload.database, payload.namespace, payload.relation].filter(Boolean).join(".");
+    const targetState = postgresTargetPresentation();
+    const targetReview = targetState ? window.SchemiiShared.formatTargetPresentation(targetState) : target;
     review.textContent = type === "insert_rows_preview"
-      ? `${target}\n${payload.rows?.length ?? 0} row(s)\n${JSON.stringify(payload.rows ?? [], null, 2)}`
+      ? `${targetReview}\n${payload.rows?.length ?? 0} row(s)\n${JSON.stringify(payload.rows ?? [], null, 2)}`
       : type === "create_view_preview"
-        ? `${target}\n${String(payload.definition ?? "")}`
-        : `${target}\nReviewed plan: ${String(payload.planId ?? "")}${payload.rowCount != null ? `\nRows: ${payload.rowCount}` : ""}\n${payload.reviewedPlan?.kind === "insert_rows" ? JSON.stringify(payload.reviewedPlan.rows ?? [], null, 2) : String(payload.reviewedPlan?.steps?.[0]?.sql ?? "")}`;
+        ? `${targetReview}\n${String(payload.definition ?? "")}`
+        : `${targetReview}\nReviewed plan: ${String(payload.planId ?? "")}${payload.rowCount != null ? `\nSubmitted rows: ${payload.rowCount}` : ""}${payload.effectsDigest ? `\nEffects digest: ${payload.effectsDigest}` : ""}\n${payload.reviewedPlan?.kind === "insert_rows" ? `${JSON.stringify(payload.reviewedPlan.rows ?? [], null, 2)}\n\nReviewed effects (secondary writes are not counted):\n${(payload.reviewedPlan.effects ?? []).map(effect => `${effect.kind} [${effect.certainty}]: ${effect.summary} (${effect.objectCount}; ${effect.complete ? "complete" : "truncated"})`).join("\n")}` : String(payload.reviewedPlan?.steps?.[0]?.sql ?? "")}`;
     card.append(review);
   } else {
     const payload = aiActionPayload(action);
@@ -6058,7 +6152,10 @@ function renderAiAction(proposal, context) {
 function renderServerAiProposal(proposal, context) {
   const capture = clone(context);
   if (proposal.operation) {
-    handleSchemiiAiOperationResult(proposal.operation.result, capture).catch(error => aiAssistant.appendMessage("assistant", `Automatic action failed: ${error.message}`));
+    if (proposal.operation.state !== "succeeded") {
+      const error = aiAssistant.operationError(proposal.operation);
+      if (!aiAssistant.renderError(error)) aiAssistant.appendMessage("assistant", `Automatic action failed: ${error.message}`);
+    } else handleSchemiiAiOperationResult(proposal.operation.result, capture).catch(error => aiAssistant.appendMessage("assistant", `Automatic action failed: ${error.message}`));
     return;
   }
   renderAiAction(proposal, capture);
@@ -6074,16 +6171,18 @@ async function confirmAiAction(proposal, context, card, button) {
   }
   if (type === "data_read") {
     if (!aiAccessIncludes(context.accessLevel, "structured") || !aiAccessIncludes(elements.aiAccessSelect.value, "structured")) return detailAiActionError(card, "Data read permission is no longer active");
-    if (!confirm("Read this bounded table page using the server-generated query?")) return;
   }
-  if (type === "migration_apply" && aiActionPayload(action).destructive && !confirm("This migration contains destructive PostgreSQL changes and may lose data. Apply the exact reviewed plan?")) return;
   if (AI_POSTGRES_ACTIONS.has(type)) {
     const permission = type === "raw_write" ? "rawwrite" : "write";
     if (!aiAccessIncludes(context.accessLevel, permission) || !aiAccessIncludes(elements.aiAccessSelect.value, permission)) return detailAiActionError(card, `${type === "raw_write" ? "Raw write" : "Data write"} permission is no longer active`);
     const currentTarget = currentAiPostgresTarget();
     if (currentTarget.profileId !== context.profileId || currentTarget.database !== context.database || currentTarget.namespace !== context.namespace) return detailAiActionError(card, "The selected PostgreSQL target changed; request a fresh proposal");
   }
-  const confirmationText = type === "postgres_write_apply"
+  const confirmationText = type === "data_read"
+    ? "Read this bounded table page using the server-generated query?"
+    : type === "migration_apply" && aiActionPayload(action).destructive
+      ? "This migration contains destructive PostgreSQL changes and may lose data. Apply the exact reviewed plan?"
+    : type === "postgres_write_apply"
     ? `Apply this separately reviewed PostgreSQL write to ${context.database}.${context.namespace}?`
     : type === "raw_write"
       ? `Execute this exact raw SQL script transactionally against ${context.database}.${context.namespace}? All statements commit together or roll back together.`
@@ -6097,7 +6196,7 @@ async function confirmAiAction(proposal, context, card, button) {
     await flushPendingSave();
     const response = await aiAssistant.executeProposal(proposal, context);
     const operation = response.operation;
-    if (operation?.state !== "succeeded") throw new Error(operation?.error?.message || "The operation did not succeed");
+    if (operation?.state !== "succeeded") throw aiAssistant.operationError(operation);
     const resultLabel = await handleSchemiiAiOperationResult(operation.result, context);
     if (operation.result?.kind === "data_result") {
       const revision = schemaLibrary.schemas.find(item => item.id === context.schemaId)?.revision;
@@ -6111,7 +6210,7 @@ async function confirmAiAction(proposal, context, card, button) {
   } catch (error) {
     button.disabled = true;
     button.textContent = "Failed";
-    detailAiActionError(card, error.message);
+    if (!aiAssistant.renderError(error)) detailAiActionError(card, error.message);
   }
 }
 
@@ -6138,6 +6237,8 @@ async function handleSchemiiAiOperationResult(result, context) {
       });
     } else if (result.migrationPreview?.status === "unavailable") {
       aiAssistant.appendMessage("assistant", `Saved the design, but PostgreSQL migration preview is unavailable: ${result.migrationPreview.error?.message || "unknown error"}`);
+    } else if (result.migrationPreview?.status === "incomplete") {
+      aiAssistant.appendMessage("assistant", "Saved the design, but the full-schema migration preview is incomplete. Resolve the blocking differences shown in the preview before applying.");
     }
     return "Saved";
   }
@@ -6173,6 +6274,7 @@ async function handleSchemiiAiOperationResult(result, context) {
     const fingerprint = profile?.contextFingerprint ?? null;
     if (!profile || profile.name !== command.name || profile.dbname !== command.database || fingerprint !== command.profileFingerprint) throw new Error("The saved connection changed; reload before continuing");
     postgresState.selectedProfileId = profile.id;
+    postgresState.aiTargetExplicit = true;
     postgresState.namespace = command.namespace;
     if (!await loadPostgresNamespaces() || postgresState.namespace !== command.namespace) throw new Error("The PostgreSQL namespace changed; request a fresh proposal");
     renderPostgresProfiles();
@@ -6184,12 +6286,14 @@ async function handleSchemiiAiOperationResult(result, context) {
     const profile = postgresState.profiles.find(item => item.id === target?.profileId);
     if (!profile || profile.dbname !== target.database) throw new Error("The migration target changed; request a fresh preview");
     postgresState.selectedProfileId = profile.id;
+    postgresState.aiTargetExplicit = true;
     postgresState.namespace = target.namespace;
     postgresState.plan = result.plan;
     postgresState.previewOnly = true;
     postgresState.schemaSnapshot = JSON.stringify(schema);
     renderMigrationPreview();
     if (!elements.migrationDialog.open) elements.migrationDialog.showModal();
+    if (!result.plan.applyCapable) return "Preview incomplete; resolve blocking differences";
     if (!result.applyProposal) throw new Error("The server did not issue an apply proposal for this migration preview");
     renderServerAiProposal(result.applyProposal, { ...context, schemaSnapshot: postgresState.schemaSnapshot });
     return "Previewed, no changes applied";
@@ -6205,9 +6309,9 @@ async function handleSchemiiAiOperationResult(result, context) {
   if (result?.kind === "rows_inserted") {
     const target = result.target;
     const current = currentAiPostgresTarget();
-    if (!target || !Number.isInteger(result.insertedRowCount) || result.insertedRowCount < 0 || current.profileId !== target.profileId || current.database !== target.database || current.namespace !== target.namespace) throw new Error("The server returned an insertion receipt for a different PostgreSQL target");
+    if (!target || !Number.isInteger(result.submittedRowCount) || result.submittedRowCount < 0 || !Number.isInteger(result.commandRowCount) || result.commandRowCount < 0 || !/^[0-9a-f]{64}$/.test(result.effectsDigest ?? "") || current.profileId !== target.profileId || current.database !== target.database || current.namespace !== target.namespace) throw new Error("The server returned an insertion receipt for a different PostgreSQL target");
     if (tableDataState.target && tableDataState.target.profileId === target.profileId && tableDataState.target.database === target.database && tableDataState.target.namespace === target.namespace && tableDataState.target.tableName === target.relation) await reloadTableData();
-    return `Inserted ${result.insertedRowCount} row(s)`;
+    return `Submitted ${result.submittedRowCount} row(s); PostgreSQL command count ${result.commandRowCount}. Secondary trigger/rule writes are not counted. Effects digest: ${result.effectsDigest}`;
   }
   if (result?.kind === "view_created") {
     if (result.schemaSync?.status === "conflict") {
@@ -6263,13 +6367,27 @@ function boundedAiQueryResult(result) {
 }
 
 function currentAiPostgresTarget() {
-  const profileId = postgresState.selectedProfileId || schema.postgres?.sourceProfileId;
-  const namespace = postgresState.selectedProfileId ? postgresState.namespace : schema.postgres?.namespace;
+  const useExplicit = postgresState.aiTargetExplicit && postgresState.selectedProfileId;
+  const profileId = useExplicit ? postgresState.selectedProfileId : schema.postgres?.sourceProfileId;
+  const namespace = useExplicit ? postgresState.namespace : schema.postgres?.namespace;
   const profile = (postgresState.profiles ?? []).find(item => item.id === profileId);
   return {
     profileId, namespace, database: profile?.dbname || schema.postgres?.database,
     profileFingerprint: profile?.contextFingerprint,
   };
+}
+
+function completeAiPostgresTarget() {
+  const target = currentAiPostgresTarget();
+  return target.profileId && target.database && target.namespace ? target : null;
+}
+
+function aiAccessNeedsTarget(access) {
+  return ["structured", "write", "rawread", "rawwrite"].some(permission => aiAccessIncludes(access, permission));
+}
+
+function aiSessionUsesTarget(access, target) {
+  return Boolean(target) && (access === "schema" || aiAccessNeedsTarget(access));
 }
 
 async function executeAiReadQuery(proposal, context, card, button) {
@@ -6286,7 +6404,7 @@ async function executeAiReadQuery(proposal, context, card, button) {
     if (!Number.isInteger(revision)) throw new Error("The saved schema revision is unavailable");
     const response = await aiAssistant.executeProposal(proposal, context);
     const operation = response.operation;
-    if (operation?.state !== "succeeded" || operation.result?.kind !== "sql_result") throw new Error(operation?.error?.message || "The query did not succeed");
+    if (operation?.state !== "succeeded" || operation.result?.kind !== "sql_result") throw aiAssistant.operationError(operation, "The query did not succeed");
     const result = operation.result;
     appendAiQueryResult(result.display);
     button.textContent = "Ran query";
@@ -6296,6 +6414,7 @@ async function executeAiReadQuery(proposal, context, card, button) {
   } catch (error) {
     button.disabled = false;
     button.textContent = "Run query";
+    if (aiAssistant.renderError(error)) return;
     detailAiActionError(card, error.message);
     const text = `Tool error for SQL:\n${sql}\n${error.message}`;
     appendAiMessage("tool", text);
@@ -6316,9 +6435,13 @@ function updateAiAccessDisclosure() {
   const rawWriteAllowed = aiAccessIncludes(access, "rawwrite");
   elements.aiFunctionCaveat.hidden = !rawReadAllowed;
   const enabled = [schemaAllowed && "schema", dataReadAllowed && "data read", writeAllowed && "data write", rawReadAllowed && "raw read", rawWriteAllowed && "raw write"].filter(Boolean);
-  elements.aiPermissionsSummary.textContent = enabled.length ? enabled.join(", ") : "Metadata only";
-  elements.aiAccessDisclosure.textContent = enabled.length
-    ? `Metadata is always included. This chat permits ${enabled.join(", ")} against its exact selected target.`
+  elements.aiPermissionsSummary.textContent = aiState.settings ? (enabled.length ? enabled.join(", ") : "All disabled") : "Policy unavailable";
+  const target = completeAiPostgresTarget();
+  const targetLabel = postgresTargetPresentation();
+  elements.aiAccessDisclosure.textContent = aiAccessNeedsTarget(access) && !target
+    ? "This local design is not connected to PostgreSQL. Select a connection and namespace to enable data or raw SQL permissions; metadata and schema assistance remain available."
+    : enabled.length
+    ? `Metadata is included for this chat. Effective server policy permits ${enabled.join(", ")}${targetLabel ? ` against ${window.SchemiiShared.formatTargetPresentation(targetLabel)}` : " for this local design"}.`
     : "Metadata is always included. No additional permissions are enabled.";
 }
 
@@ -6326,28 +6449,20 @@ function aiAccessIncludes(access, permission) {
   return access.split("-").includes(permission);
 }
 
-function syncAiPermissions() {
-  const permissions = [
-    elements.aiSchemaPermission.checked && "schema",
-    elements.aiDataReadPermission.checked && "structured",
-    elements.aiWritePermission.checked && "write",
-    elements.aiRawReadPermission.checked && "rawread",
-    elements.aiRawWritePermission.checked && "rawwrite",
-  ].filter(Boolean);
+function syncSchemiiAiPolicy(settings = aiState.settings) {
+  const aliases = { schema: "schema", structured_read: "structured", structured_write: "write", raw_read: "rawread", raw_write: "rawwrite" };
+  const targetAvailable = Boolean(completeAiPostgresTarget());
+  const targetCapabilities = new Set(["structured_read", "structured_write", "raw_read", "raw_write"]);
+  const permissions = ["schema", "structured_read", "structured_write", "raw_read", "raw_write"]
+    .filter(name => settings?.capabilities?.[name]?.effectiveMode !== "disabled" && (targetAvailable || !targetCapabilities.has(name)))
+    .map(name => aliases[name]);
   const next = permissions.join("-") || "metadata";
-  if (elements.aiAccessSelect.value === next) return;
   elements.aiAccessSelect.value = next;
-  elements.aiAccessSelect.dispatchEvent(new Event("change"));
+  updateAiAccessDisclosure();
 }
 
-function currentAiApprovals() {
-  return {
-    schema: elements.aiSchemaApproval.value,
-    structured: elements.aiDataReadApproval.value,
-    write: elements.aiWriteApproval.value,
-    rawread: elements.aiRawReadApproval.value,
-    rawwrite: elements.aiRawWriteApproval.value,
-  };
+function syncAiTargetAvailability() {
+  syncSchemiiAiPolicy();
 }
 
 const aiAssistant = window.SchemiiShared.createAiAssistant({
@@ -6359,26 +6474,27 @@ const aiAssistant = window.SchemiiShared.createAiAssistant({
   storageKey: "schemii.ai.lastModel",
   state: aiState,
   getContext: () => {
-    const postgresTarget = currentAiPostgresTarget();
+    const postgresTarget = completeAiPostgresTarget();
     return {
       schemaId: activeSchemaId,
       schemaSnapshot: JSON.stringify(schema),
       accessLevel: elements.aiAccessSelect.value,
-      profileId: postgresTarget.profileId || undefined,
-      database: postgresTarget.database || undefined,
-      namespace: postgresTarget.namespace || undefined,
-      profileFingerprint: postgresTarget.profileFingerprint || undefined,
+      profileId: postgresTarget?.profileId,
+      database: postgresTarget?.database,
+      namespace: postgresTarget?.namespace,
+      profileFingerprint: postgresTarget?.profileFingerprint,
     };
   },
   contextKey: (context, accessLevel) => context
-    ? `${context.schemaId}:${accessLevel}${!["metadata", "schema"].includes(accessLevel) ? `:${window.SchemiiShared.aiContextCacheKey([context.profileId, context.database, context.namespace])}` : ""}`
+    ? `${context.schemaId}:${accessLevel}${aiSessionUsesTarget(accessLevel, context.profileId && context.database && context.namespace ? context : null) ? `:${window.SchemiiShared.aiContextCacheKey([context.profileId, context.database, context.namespace])}` : ""}`
     : null,
   buildSessionPayload: (context, accessLevel, model) => ({
-    model, schemaId: context.schemaId, accessLevel, approvals: currentAiApprovals(),
-    ...(accessLevel !== "metadata" && accessLevel !== "schema" ? { profileId: context.profileId, database: context.database, namespace: context.namespace } : {}),
+    model, schemaId: context.schemaId, accessLevel,
+    ...(aiSessionUsesTarget(accessLevel, context.profileId && context.database && context.namespace ? context : null) ? { profileId: context.profileId, database: context.database, namespace: context.namespace } : {}),
   }),
   parseSession: session => {
-    const accessLevel = Array.isArray(session.capabilities) && session.capabilities.length ? session.capabilities.join("-") : "metadata";
+    const order = ["schema", "structured", "write", "rawread", "rawwrite"];
+    const accessLevel = Array.isArray(session.capabilities) && session.capabilities.length ? order.filter(item => session.capabilities.includes(item)).join("-") : "metadata";
     const target = session.target ?? {};
     return {
       key: `${session.schemaId}:${accessLevel}${Object.keys(target).length ? `:${window.SchemiiShared.aiContextCacheKey([target.profileId, target.database, target.namespace])}` : ""}`,
@@ -6386,14 +6502,14 @@ const aiAssistant = window.SchemiiShared.createAiAssistant({
       title: session.title || "Schema chat",
     };
   },
-  canViewSession: (binding, currentKey) => ["metadata", "schema"].includes(binding.accessLevel) || binding.key === currentKey,
+  canViewSession: (binding, currentKey) => binding.key === currentKey,
   buildMessagePayload: ({ text, model, capture, accessLevel, extras }) => ({
     text, model,
     ...(extras.resultRef ? { resultRef: extras.resultRef, expectedRevision: extras.expectedRevision } : {}),
   }),
   buildHistoryQuery: (capture, accessLevel) => ({
     schemaId: capture.schemaId, accessLevel,
-    ...(!["metadata", "schema"].includes(accessLevel) ? { profileId: capture.profileId, database: capture.database, namespace: capture.namespace } : {}),
+    ...(aiSessionUsesTarget(accessLevel, capture.profileId && capture.database && capture.namespace ? capture : null) ? { profileId: capture.profileId, database: capture.database, namespace: capture.namespace } : {}),
   }),
   buildProposalClaimPayload: () => ({}),
   renderAction: (proposal, context) => renderAiAction(proposal, context),
@@ -6416,16 +6532,8 @@ const aiAssistant = window.SchemiiShared.createAiAssistant({
     }
   },
   onAccessChange: updateAiAccessDisclosure,
-  extraBusyControls: [elements.aiSchemaPermission, elements.aiDataReadPermission, elements.aiWritePermission, elements.aiRawReadPermission, elements.aiRawWritePermission, elements.aiSchemaApproval, elements.aiDataReadApproval, elements.aiWriteApproval, elements.aiRawReadApproval, elements.aiRawWriteApproval],
+  onPolicyChange: syncSchemiiAiPolicy,
 });
-elements.aiSchemaPermission.addEventListener("change", syncAiPermissions);
-elements.aiDataReadPermission.addEventListener("change", syncAiPermissions);
-elements.aiWritePermission.addEventListener("change", syncAiPermissions);
-elements.aiRawReadPermission.addEventListener("change", syncAiPermissions);
-elements.aiRawWritePermission.addEventListener("change", syncAiPermissions);
-for (const select of [elements.aiSchemaApproval, elements.aiDataReadApproval, elements.aiWriteApproval, elements.aiRawReadApproval, elements.aiRawWriteApproval]) {
-  select.addEventListener("change", () => aiAssistant.reset("Approval policy changed. The next message starts a new conversation with this policy."));
-}
 updateAiAccessDisclosure();
 
 elements.tablesLayer.addEventListener("pointerdown", event => {
@@ -7467,10 +7575,34 @@ elements.standaloneSqlResultTabs.addEventListener("click", event => {
     const index = viewState.resultTabs.findIndex(item => item.id === closeButton.dataset.closeResultTab);
     if (index !== -1) {
       const [removed] = viewState.resultTabs.splice(index, 1);
+      void closeStandaloneSqlResultResource(removed);
       if (viewState.activeResultTabId === removed.id) viewState.activeResultTabId = viewState.resultTabs[Math.min(index, viewState.resultTabs.length - 1)]?.id ?? null;
     }
   }
   renderStandaloneSqlResultTabs();
+});
+elements.standaloneSqlResultBody.addEventListener("click", async event => {
+  const viewState = currentStandaloneSqlView();
+  const tab = viewState.resultTabs.find(item => item.id === viewState.activeResultTabId);
+  try {
+    if (event.target.closest("[data-load-result-page]")) await loadStandaloneSqlResultPage(tab);
+    if (event.target.closest("[data-export-result]")) await exportStandaloneSqlResult(tab);
+    if (event.target.closest("[data-close-result-resource]")) {
+      await closeStandaloneSqlResultResource(tab);
+      renderStandaloneSqlResultTabs();
+    }
+  } catch (error) {
+    showToast(error.message);
+  }
+});
+window.addEventListener("beforeunload", () => {
+  for (const viewState of standaloneSqlState.views) {
+    for (const tab of viewState.resultTabs || []) {
+      if (tab.kind === "result" && tab.statement?.hasMore) {
+        void postgresRequest(standaloneSqlResultUrl(tab), { method: "DELETE", keepalive: true }).catch(() => {});
+      }
+    }
+  }
 });
 function finishStandaloneSqlTabRename(input, cancel = false) {
   const viewState = currentStandaloneSqlView();
@@ -7540,9 +7672,13 @@ document.querySelector("#add-postgres-profile-button").addEventListener("click",
 elements.postgresRefreshButton.addEventListener("click", loadPostgresProfiles);
 elements.postgresNamespaceSelect.addEventListener("change", event => {
   postgresState.namespace = event.target.value;
+  postgresState.aiTargetExplicit = Boolean(postgresState.selectedProfileId && postgresState.namespace);
   postgresState.plan = null;
   updatePostgresControls();
+  aiAssistant.invalidateContext("PostgreSQL namespace changed. The next message starts a new target-bound conversation.");
+  syncAiTargetAvailability();
 });
+elements.postgresSystemNamespaces.addEventListener("change", () => { void loadPostgresNamespaces(); });
 elements.postgresImportButton.addEventListener("click", importPostgresSchema);
 elements.postgresPreviewButton.addEventListener("click", previewPostgresMigration);
 elements.postgresObjectsButton.addEventListener("click", () => {
@@ -7560,15 +7696,17 @@ elements.postgresProfilesList.addEventListener("click", async event => {
   if (action === "test") return testPostgresProfile(profileId);
   if (action === "delete") {
     const profile = postgresState.profiles.find(item => item.id === profileId);
-    if (!confirm(`Delete PostgreSQL connection ${profile?.name ?? profileId}?`)) return;
-    setPostgresBusy(true, "Deleting connection...");
+    setPostgresBusy(true, "Loading connection deletion impact...");
     try {
       const preview = await postgresProfileRepository.deletionImpact(profileId);
-      const counts = Object.values(preview.impact).reduce((total, items) => total + items.length, 0);
-      if (counts && !confirm(`This connection has ${counts} saved or active dependenc${counts === 1 ? "y" : "ies"}. Delete the profile without deleting those resources?`)) return;
+      if (!confirm(window.SchemiiShared.profileDeletionConfirmation(profile, preview))) return;
+      setPostgresStatus("Deleting connection...");
       await postgresProfileRepository.remove(profileId, preview);
       if (postgresState.selectedProfileId === profileId) postgresState.selectedProfileId = null;
+      if (postgresState.selectedProfileId === null) postgresState.aiTargetExplicit = false;
       await loadPostgresProfiles();
+      aiAssistant.invalidateContext("PostgreSQL connection changed. The next message starts a new conversation with the current target.");
+      syncAiTargetAvailability();
     } catch (error) {
       setPostgresStatus(error.message, true);
     } finally {
@@ -7577,10 +7715,15 @@ elements.postgresProfilesList.addEventListener("click", async event => {
     return;
   }
   postgresState.selectedProfileId = profileId;
+  postgresState.aiTargetExplicit = true;
+  postgresState.targetVerifiedAt = null;
   postgresState.namespace = "";
   postgresState.plan = null;
   renderPostgresProfiles();
+  aiAssistant.invalidateContext("PostgreSQL connection changed. The next message starts a new target-bound conversation.");
+  syncAiTargetAvailability();
   await loadPostgresNamespaces();
+  syncAiTargetAvailability();
 });
 elements.postgresProfileForm.addEventListener("submit", async event => {
   event.preventDefault();
@@ -7767,16 +7910,6 @@ window.addEventListener("keydown", event => {
   }
 });
 window.addEventListener("keyup", event => { if (event.code === "Space") spacePressed = false; });
-window.addEventListener("pagehide", () => {
-  if (!postgresState.token) return;
-  standaloneSqlState.views.filter(viewState => viewState.writeGrantId && viewState.writeGrantProfileId).forEach(viewState => {
-    fetch(`/api/postgres/profiles/${encodeURIComponent(viewState.writeGrantProfileId)}/console/write-grants/${encodeURIComponent(viewState.writeGrantId)}`, {
-      method: "DELETE",
-      headers: { "X-Schemii-Token": postgresState.token },
-      keepalive: true,
-    }).catch(() => {});
-  });
-});
 window.addEventListener("resize", () => {
   hideTooltip();
   closeObjectIconMenu();

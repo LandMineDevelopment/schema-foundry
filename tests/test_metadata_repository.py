@@ -68,7 +68,7 @@ TARGET = {
 class MetadataRepositoryMigrationTests(unittest.TestCase):
     def test_0002_is_additive_and_adds_repository_evidence(self):
         migrations = packaged_migrations()
-        self.assertEqual([migration.version for migration in migrations], [1, 2, 3, 4])
+        self.assertEqual([migration.version for migration in migrations], [1, 2, 3, 4, 5, 6, 7])
         sql = resources.files("schemii.metadata.migrations").joinpath("0002_authority_repository.sql").read_text()
         self.assertIn("ADD COLUMN binding jsonb", sql)
         self.assertIn("lease_expires_at", sql)
@@ -81,9 +81,126 @@ class MetadataRepositoryMigrationTests(unittest.TestCase):
         self.assertIn("adapter_kind", durable)
         self.assertIn("private_payload_redacted_at", durable)
         self.assertNotIn("DROP TABLE", durable)
+        console = resources.files("schemii.metadata.migrations").joinpath("0005_console_execution_receipts.sql").read_text()
+        self.assertIn("metadata_console_execution_receipts", console)
+        self.assertIn("metadata_console_execution_receipts_isolation", console)
+        self.assertNotIn("sql_text", console)
+        self.assertNotIn("DROP TABLE", console)
+        agent_policy = resources.files("schemii.metadata.migrations").joinpath("0006_versioned_ai_agent_policy.sql").read_text()
+        self.assertIn("metadata_agent_policy_revisions", agent_policy)
+        self.assertIn("metadata_ai_operation_usage", agent_policy)
+        self.assertIn("metadata_agent_settings_isolation", agent_policy)
+        self.assertIn("agent_policy_revision_id IS NULL", agent_policy)
+        self.assertNotIn("DROP TABLE", agent_policy)
+        reservations = resources.files("schemii.metadata.migrations").joinpath("0007_console_execution_reservations.sql").read_text()
+        self.assertIn("'reserved', 'running'", reservations)
+        self.assertNotIn("DROP TABLE", reservations)
 
 
 class MetadataRepositoryContractTests(unittest.TestCase):
+    def test_console_reservation_uses_global_execution_key_without_owner_readback(self):
+        execution, console = uuid.uuid4(), uuid.uuid4()
+        connection = FakeConnection(rowcounts=[0])
+        receipt = {
+            "executionId": str(execution), "applicationId": "schemer", "sessionBinding": "new-session",
+            "serverId": "new-server", "profileId": "other-profile", "profileFingerprint": "a" * 64,
+            "database": "app", "namespace": "public", "consoleId": str(console), "mode": "managed",
+            "settingsRevision": 1, "state": "reserved", "outcome": "not_started",
+            "completedStatementIndexes": [], "errorCode": None, "postgresEvidence": None,
+            "reconciliationEvidence": None,
+        }
+        with self.assertRaises(MetadataStoreError) as caught:
+            MetadataStore(lambda: connection).put_console_execution_receipt(receipt)
+        self.assertEqual(caught.exception.code, "execution_conflict")
+        self.assertEqual(len(connection.cursor_value.executions), 1)
+        sql, _ = connection.cursor_value.executions[0]
+        self.assertIn("ON CONFLICT (execution_id) DO NOTHING", sql)
+        self.assertNotIn("SELECT", sql)
+
+    def test_exact_claim_abandonment_is_uncertain_and_never_requeues(self):
+        attempt, operation, chat = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+        token = "exact-token"
+        from schemii.metadata.store import _token_hash
+        connection = FakeConnection(rows=[
+            {"operation_id": operation, "state": "running", "claim_token_hash": _token_hash(token)},
+            {"chat_id": chat}, {"application_id": "schemii"},
+        ])
+        result = MetadataStore(lambda: connection).abandon_operation_attempt(str(attempt), token)
+        self.assertEqual(result["state"], "uncertain")
+        statements = [sql for sql, _ in connection.cursor_value.executions]
+        self.assertTrue(any("state = 'abandoned'" in sql for sql in statements))
+        self.assertTrue(any("'uncertain'" in sql and "metadata_operation_outcomes" in sql for sql in statements))
+        self.assertFalse(any("state = 'ready'" in sql for sql in statements))
+
+    def test_cleanup_bounds_private_payload_redaction_as_well_as_deletes(self):
+        connection = FakeConnection(rowcounts=[3, 0, 0, 0])
+        result = MetadataStore(lambda: connection).cleanup(before=datetime.now(timezone.utc), limit=3)
+        sql, params = connection.cursor_value.executions[0]
+        self.assertIn("LIMIT %s", sql)
+        self.assertIn("SKIP LOCKED", sql)
+        self.assertEqual(params[-1], 3)
+        self.assertEqual(result["planPayloadsRedacted"], 3)
+
+    def test_terminal_operation_readback_uses_durable_outcome_after_restart(self):
+        operation, proposal, chat = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+        timestamp = datetime.now(timezone.utc)
+        row = {
+            "operation_id": operation, "proposal_id": proposal, "chat_id": chat,
+            "capability": "schema", "state": "succeeded", "created_at": timestamp,
+            "updated_at": timestamp, "attempt_id": None, "worker_id": None,
+            "lease_expires_at": None, "outcome_state": "succeeded",
+            "result": {"kind": "durable_receipt"}, "error": None,
+        }
+        restarted_store = MetadataStore(lambda: FakeConnection(rows=[row]))
+        result = restarted_store.get_operation(str(operation))
+        self.assertEqual(result["state"], "succeeded")
+        self.assertEqual(result["outcome"]["result"], {"kind": "durable_receipt"})
+        self.assertIsNone(result["attempt"])
+
+    def test_console_receipt_stores_only_operational_evidence_and_enforces_owner(self):
+        execution, console = uuid.uuid4(), uuid.uuid4()
+        timestamp = datetime.now(timezone.utc)
+        binding_hash = hashlib.sha256(b"browser-session").hexdigest()
+        row = {"application_id": "schemii", "session_binding_hash": binding_hash, "server_id": "server",
+               "profile_id": "profile", "profile_fingerprint": "a" * 64, "database_name": "app",
+               "namespace_name": "public", "console_id": console, "mode": "managed", "settings_revision": 7, "state": "uncertain",
+               "outcome": "uncertain", "completed_statement_indexes": [0], "error_code": "execution_outcome_unknown",
+               "postgres_evidence": {"sqlstate": "08006"}, "reconciliation_evidence": {"commitAttempted": True},
+               "created_at": timestamp, "updated_at": timestamp}
+        inserted = FakeConnection()
+        connections = [inserted, FakeConnection(rows=[row])]
+        store = MetadataStore(lambda: connections.pop(0))
+        receipt = {"executionId": str(execution), "applicationId": "schemii", "sessionBinding": "browser-session",
+                   "serverId": "server", "profileId": "profile", "profileFingerprint": "a" * 64,
+                    "database": "app", "namespace": "public", "consoleId": str(console), "mode": "managed", "settingsRevision": 7,
+                   "state": "uncertain", "outcome": "uncertain", "completedStatementIndexes": [0],
+                   "errorCode": "execution_outcome_unknown", "postgresEvidence": {"sqlstate": "08006"},
+                   "reconciliationEvidence": {"commitAttempted": True}}
+        result = store.put_console_execution_receipt(receipt)
+        self.assertEqual(result["outcome"], "uncertain")
+        sql, params = inserted.cursor_value.executions[0]
+        self.assertIn("metadata_console_execution_receipts", sql)
+        self.assertNotIn("browser-session", params)
+        encoded = json.dumps(receipt)
+        self.assertNotIn("password", encoded)
+        self.assertNotIn("SELECT", encoded)
+
+        wrong = FakeConnection(rows=[row])
+        with self.assertRaises(MetadataStoreError) as caught:
+            MetadataStore(lambda: wrong).get_console_execution_receipt(
+                str(execution), "schemer", "browser-session", "server", "profile", "a" * 64,
+                "app", "public", str(console),
+            )
+        self.assertEqual(caught.exception.code, "execution_not_found")
+
+    def test_chat_listing_casts_optional_filters_for_postgresql(self):
+        connection = FakeConnection(rows=[[]])
+        self.assertEqual(MetadataStore(lambda: connection).list_chats(resource_kind="schema", resource_id="schema_one", states=["active"]), [])
+        sql, params = connection.cursor_value.executions[0]
+        self.assertIn("%s::text IS NULL", sql)
+        self.assertIn("cardinality(%s::text[])", sql)
+        self.assertEqual(params[:4], ("schema", "schema", "schema_one", "schema_one"))
+
     def test_public_migration_records_serialize_postgresql_timestamps(self):
         timestamp = datetime(2026, 8, 14, 3, tzinfo=timezone(timedelta(hours=3)))
         plan = _plan_record({
@@ -214,11 +331,18 @@ class MetadataRepositoryContractTests(unittest.TestCase):
 
     def test_create_plan_persists_exact_binding_and_canonical_digest(self):
         connection = FakeConnection()
-        review = {"steps": [], "warnings": []}
+        proof = {
+            "version": 1, "complete": True,
+            "liveFingerprint": "c" * 64, "desiredFingerprint": "d" * 64,
+        }
+        review = {
+            "steps": [], "warnings": [], "complete": True, "applyCapable": True,
+            "blockingDifferences": [], "completenessProof": proof,
+        }
         digest = canonical_review_digest(review)
         result = MetadataStore(lambda: connection).create_migration_plan(
             "schemii", "schema", "schema-1", 7, "layout-7", TARGET,
-            "c" * 64, "d" * 64, {"desired": {}}, review, digest, True,
+            "c" * 64, "d" * 64, {"desired": {}, "completenessProof": proof}, review, digest, True,
             adapter_kind="full_schema", source_kind="normal",
         )
         self.assertEqual(result["reviewDigest"], digest)
@@ -231,13 +355,26 @@ class MetadataRepositoryContractTests(unittest.TestCase):
         plan = uuid.uuid4()
         existing = FakeConnection(rows=[{
             "review_payload": {"steps": []}, "review_digest": canonical_review_digest({"steps": []}),
-            "destructive": False, "state": "ready", "current": True,
+            "destructive": False, "state": "ready", "current": True, "adapter_kind": "insert_rows",
         }, {"execution_id": execution, "state": "applying"}])
         result = MetadataStore(lambda: existing).create_migration_execution(
             str(plan), canonical_review_digest({"steps": []}), False,
         )
         self.assertFalse(result["executionOwner"])
         self.assertEqual(result["executionId"], str(execution))
+
+    def test_full_schema_execution_rejects_legacy_plan_without_completeness_proof(self):
+        review = {"steps": []}
+        connection = FakeConnection(rows=[{
+            "review_payload": review, "review_digest": canonical_review_digest(review),
+            "destructive": False, "state": "ready", "current": True, "adapter_kind": "full_schema",
+            "private_payload": {}, "live_fingerprint": "a" * 64, "desired_fingerprint": "b" * 64,
+        }])
+        with self.assertRaises(MetadataStoreError) as caught:
+            MetadataStore(lambda: connection).create_migration_execution(
+                str(uuid.uuid4()), canonical_review_digest(review), False,
+            )
+        self.assertEqual(caught.exception.code, "migration_plan_incomplete")
 
     def test_begin_execution_records_target_evidence_before_applying_transition(self):
         execution = uuid.uuid4()
@@ -391,7 +528,7 @@ class MetadataRepositoryContractTests(unittest.TestCase):
         self.assertEqual(result, {"planPayloadsRedacted": 2, "results": 3, "plans": 4, "chats": 1})
         self.assertTrue(all(len(params) == 1 or params[1] == 25 for _, params in connection.cursor_value.executions))
         sql = "\n".join(item[0] for item in connection.cursor_value.executions)
-        self.assertIn("state IN ('consumed', 'uncertain', 'expired')", sql)
+        self.assertIn("state IN ('consumed', 'uncertain', 'expired', 'revoked')", sql)
         self.assertIn("e.execution_id IS NULL", sql)
         self.assertIn("state = 'deleted'", sql)
 

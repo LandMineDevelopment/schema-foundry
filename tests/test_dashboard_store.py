@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from schemii.dashboard_store import DashboardStore, DashboardStoreError, mercury_dashboard_record
 from schemii.schemer_examples import build_mercury_dashboard
+from tests.capability_test_support import capabilities_for_formatted_type
 
 
 SOURCE = {
@@ -143,6 +144,21 @@ class DashboardStoreTests(unittest.TestCase):
         self.assertEqual({widget["configuration"]["source"]["relation"] for widget in widgets}, {"order_summary"})
         self.assertEqual([widget["configuration"]["visualization"]["mode"] for widget in widgets], ["kpi", "kpi", "kpi", "line", "donut", "table"])
         self.assertEqual(widgets[-1]["configuration"]["query"]["limit"], 10)
+
+    def test_live_mercury_template_preserves_catalog_capability_snapshot(self):
+        descriptor = {
+            **MERCURY_DESCRIPTOR,
+            "snapshotVersion": 2,
+            "columns": [
+                {**column, "capabilities": capabilities_for_formatted_type(column["type"])}
+                for column in MERCURY_COLUMNS
+            ],
+        }
+        record = build_mercury_dashboard(descriptor)
+        for widget in record["dashboard"]["widgets"]:
+            source = widget["configuration"]["source"]
+            self.assertEqual(source["snapshotVersion"], 2)
+            self.assertTrue(all("capabilities" in column for column in source["columns"]))
 
     def test_mercury_reset_preserves_layout_viewport_and_custom_widgets(self):
         self.store.initialize_once()

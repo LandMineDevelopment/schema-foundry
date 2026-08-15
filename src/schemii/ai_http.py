@@ -39,6 +39,7 @@ class AiHttpRouter:
         delete_session_handler: Callable[[Any, OpenCodeService, str], Any] | None = None,
         policy_handler: Callable[[Any, OpenCodeService, str, dict[str, Any] | None], Any] | None = None,
         proposal_operations: frozenset[str] | None = None,
+        settings_handler: Callable[[Any, dict[str, Any] | None], Any] | None = None,
     ):
         self.service = service
         self.message_handler = message_handler
@@ -50,6 +51,7 @@ class AiHttpRouter:
         self.delete_session_handler = delete_session_handler
         self.policy_handler = policy_handler
         self.proposal_operations = proposal_operations or frozenset({"execute", "reconcile"})
+        self.settings_handler = settings_handler
 
     @staticmethod
     def _authorize(handler) -> bool:
@@ -66,9 +68,12 @@ class AiHttpRouter:
         activity_match = AI_ACTIVITY_PATH.fullmatch(path)
         operation_match = AI_OPERATION_PATH.fullmatch(path)
         policy_match = AI_POLICY_PATH.fullmatch(path)
-        if path not in {"/api/ai/status", "/api/ai/sessions"} and not session_match and not activity_match and not operation_match and not policy_match:
+        if path not in {"/api/ai/status", "/api/ai/sessions", "/api/ai/settings"} and not session_match and not activity_match and not operation_match and not policy_match:
             return False
         if not self._authorize(handler):
+            return True
+        if path == "/api/ai/settings" and self.settings_handler is not None:
+            self.settings_handler(handler, None)
             return True
         if path == "/api/ai/status" and self.service is None:
             handler.send_json(200, {"available": False, "enabled": False, "healthy": False, "providers": [], "authMethods": {}, "skills": []})
@@ -102,6 +107,16 @@ class AiHttpRouter:
         return True
 
     def handle_put(self, handler, path: str) -> bool:
+        if path == "/api/ai/settings" and self.settings_handler is not None:
+            if not self._authorize(handler):
+                return True
+            body = handler._body_or_error(AI_MAX_BODY_SIZE)
+            if body is not None:
+                if not isinstance(body, dict):
+                    handler.send_json(400, {"error": {"code": "validation_error", "message": "AI settings request must be an object"}})
+                else:
+                    self.settings_handler(handler, body)
+            return True
         policy_match = AI_POLICY_PATH.fullmatch(path)
         if not policy_match or self.policy_handler is None:
             return False

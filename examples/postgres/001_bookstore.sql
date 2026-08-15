@@ -3,8 +3,16 @@ SELECT CASE WHEN to_regnamespace('bookstore') IS NULL THEN 'true' ELSE 'false' E
 
 BEGIN;
 
-SET LOCAL lock_timeout = '5s';
-SET LOCAL statement_timeout = '30s';
+SELECT pg_catalog.set_config(
+    'lock_timeout',
+    CASE
+        WHEN pg_catalog.current_setting('lock_timeout') = '0'
+          OR pg_catalog.current_setting('lock_timeout')::interval > interval '5 seconds'
+        THEN '5s'
+        ELSE pg_catalog.current_setting('lock_timeout')
+    END,
+    true
+);
 SELECT pg_catalog.pg_advisory_xact_lock(
     pg_catalog.hashtext('schemii:bookstore')::bigint
 );
@@ -195,8 +203,16 @@ THEN 'true' ELSE 'false' END AS reconcile_bookstore_v4 \gset
 
 BEGIN;
 
-SET LOCAL lock_timeout = '5s';
-SET LOCAL statement_timeout = '30s';
+SELECT pg_catalog.set_config(
+    'lock_timeout',
+    CASE
+        WHEN pg_catalog.current_setting('lock_timeout') = '0'
+          OR pg_catalog.current_setting('lock_timeout')::interval > interval '5 seconds'
+        THEN '5s'
+        ELSE pg_catalog.current_setting('lock_timeout')
+    END,
+    true
+);
 SELECT pg_catalog.pg_advisory_xact_lock(
     pg_catalog.hashtext('schemii:bookstore')::bigint
 );
@@ -510,8 +526,16 @@ THEN 'true' ELSE 'false' END AS expand_bookstore \gset
 
 BEGIN;
 
-SET LOCAL lock_timeout = '5s';
-SET LOCAL statement_timeout = '30s';
+SELECT pg_catalog.set_config(
+    'lock_timeout',
+    CASE
+        WHEN pg_catalog.current_setting('lock_timeout') = '0'
+          OR pg_catalog.current_setting('lock_timeout')::interval > interval '5 seconds'
+        THEN '5s'
+        ELSE pg_catalog.current_setting('lock_timeout')
+    END,
+    true
+);
 SELECT pg_catalog.pg_advisory_xact_lock(
     pg_catalog.hashtext('schemii:bookstore')::bigint
 );
@@ -660,8 +684,16 @@ THEN 'true' ELSE 'false' END AS add_dashboard_view \gset
 
 BEGIN;
 
-SET LOCAL lock_timeout = '5s';
-SET LOCAL statement_timeout = '30s';
+SELECT pg_catalog.set_config(
+    'lock_timeout',
+    CASE
+        WHEN pg_catalog.current_setting('lock_timeout') = '0'
+          OR pg_catalog.current_setting('lock_timeout')::interval > interval '5 seconds'
+        THEN '5s'
+        ELSE pg_catalog.current_setting('lock_timeout')
+    END,
+    true
+);
 SELECT pg_catalog.pg_advisory_xact_lock(
     pg_catalog.hashtext('schemii:bookstore')::bigint
 );

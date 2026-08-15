@@ -279,7 +279,9 @@ def _widget_configuration(value: Any, widget_id: str, widget_kind: str) -> dict[
         if "columns" not in normalized_source:
             raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} query requires a source column snapshot")
         try:
-            normalized["query"] = normalize_query(value["query"], normalized_source["columns"])
+            normalized["query"] = normalize_query(
+                value["query"], normalized_source["columns"], allow_legacy_snapshot=True,
+            )
         except QueryValidationError as exc:
             raise DashboardStoreError(400, "invalid_dashboard", f"Widget {widget_id} query is invalid: {exc}") from exc
     if "table" in value:

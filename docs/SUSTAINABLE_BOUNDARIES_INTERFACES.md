@@ -13,23 +13,26 @@ This is the Phase 0 inventory of authority-relevant persistence and wire contrac
 | Legacy AI proposals/operations/results | `ai_authority/v1/{app}/*.json` | Retired JSON authority | Archived as inert evidence; never imported or replayed. |
 | Legacy AI migration/write plans | `ai_migration_plans/*.json` | Retired PostgreSQL-service compatibility | Archived as inert evidence; durable coordinator plans are the only executable plans. |
 | Normal migration/view plans | Process memory | PostgreSQL service | Reset; replaced by durable plan store. |
-| Console grants/executions | Process memory | Console service | Reset by design. |
+| Console settings/execution receipts | Metadata PostgreSQL | Shared Console metadata authority | Durable application-scoped optimistic settings and exact-owner terminal receipts; retired write grants are not authority. |
+| Active Console executions/transactions/results | Process memory | Shared Console service | Cancellation, explicit transactions, retained snapshots, and result cursors are intentionally process-lifetime resources; restart rolls back/closes them while durable receipts prevent write replay. |
 | Schemii schemas | schema directory | Schemii domain store | Preserve exactly, including unknown fields, semantic IDs, receipts, and complete layout. |
 | Schemer dashboards | dashboard directory | Schemer domain store | Preserve exactly, including widget order, source snapshots, queries, viewport, and layouts. |
 | OpenCode sessions/credentials | OpenCode volumes | OpenCode | Preserve opaque upstream data. Store only verified external session references in metadata DB. |
 
 ## AI wire contracts
 
-Current shared routes include status/auth, session creation/list/history/activity/delete, messages, proposal execute/reconcile, operation status, and Schemii policy GET/PUT. Claim/finalize/release proposal routes no longer exist.
+Current shared routes include status/auth, versioned agent settings GET/PUT, session creation/list/history/activity/delete, messages, proposal execute/reconcile, and operation status. Claim/finalize/release proposal routes no longer exist.
 
 Target changes:
 
 - Application chat ID becomes distinct from external OpenCode session ID.
 - Both applications use durable chat ownership; titles are display-only.
 - Browser does not resend resource, target, capability, or policy authority after chat creation.
+- Each chat owns an immutable version-2 snapshot of agent policy revision, effective capability modes/floors, bounds, disclosure, and target verification. Settings changes revoke only incompatible linked future authority.
 - Proposal execution and reconciliation are the only proposal transitions exposed to browsers.
 - Query-result delivery adds explicit pre-dispatch reservation and post-dispatch uncertain states.
 - Pending valid proposals are restored from metadata authority, never reconstructed from model history.
+- Lifecycle maintenance heartbeats active operation leases, abandons stale attempts, recovers result reservations/delivery, and performs retention cleanup; lost or uncertain work is reconciled and never replayed.
 
 ## Migration wire contracts
 

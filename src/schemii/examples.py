@@ -242,7 +242,7 @@ class ExampleInstaller:
             result["errors"].append({"component": "postgres", "message": "The tutorial connection reached an unexpected database"})
             return False
         namespace = "bookstore"
-        if namespace not in self.service.list_namespaces(POSTGRES_PROFILE_ID):
+        if not self.service.namespace_exists(POSTGRES_PROFILE_ID, self.postgres_profile["dbname"], namespace):
             result["errors"].append({"component": "postgres", "message": "The bookstore tutorial namespace is unavailable"})
             return False
         if self._schema_exists(POSTGRES_SCHEMA_ID):

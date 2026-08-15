@@ -23,6 +23,7 @@ from schemii.postgres_service import (
     quote_identifier,
 )
 from schemii.postgres_safety import namespace_lock_keys
+from tests.capability_test_support import capabilities_for_formatted_type
 
 
 PROFILE = {
@@ -41,22 +42,64 @@ class Cursor:
         self.connection = connection
         self.rows = []
         self.description = []
+        self.offset = 0
 
     def execute(self, sql, params=()):
         self.connection.executed.append((sql, params))
+        self.offset = 0
         if self.connection.fail_on and self.connection.fail_on in sql:
             raise self.connection.failure or RuntimeError("database detail that must not escape")
         if "AS namespace_exists" in sql and not any(marker in sql for marker in self.connection.responses):
             self.rows = [{"namespace_exists": True}]
             self.description = [Column("namespace_exists")]
             return
-        for marker, response in self.connection.responses.items():
+        responses = list(self.connection.responses.items())
+        comment = sql.split("/*", 1)[1].split("*/", 1)[0].strip() if "/*" in sql and "*/" in sql else ""
+        source_columns = self.connection.responses.get("a.attname AS column_name", [])
+        if comment == "structured_query_operators" and source_columns:
+            self.rows = []
+            for source in source_columns:
+                capability = capabilities_for_formatted_type(source["data_type"])
+                for item in capability["filterOperators"]:
+                    identities = []
+                    if "operator" in item:
+                        identities.append((item["name"] if item["name"] not in {"in", "not_in", "contains", "starts_with", "ends_with"} else "eq" if item["name"] in {"in", "not_in"} else "like", item["operator"]))
+                    elif "operators" in item:
+                        continue
+                    for logical, identity in identities:
+                        if any(row["ordinal"] == source["ordinal"] and row["logical_name"] == logical for row in self.rows):
+                            continue
+                        self.rows.append({"ordinal": source["ordinal"], "logical_name": logical, "operator_oid": identity["oid"], "operator_namespace": identity["namespace"], "operator_name": identity["name"], "input_type_oid": identity["inputTypeOid"], "result_type_oid": identity["resultTypeOid"], "catalog_version": identity["catalogVersion"] + self.connection.capability_version_suffix})
+            self.description = [Column(name) for name in self.rows[0]] if self.rows else []
+            return
+        if comment == "structured_query_aggregates" and source_columns:
+            self.rows = []
+            for source in source_columns:
+                for item in capabilities_for_formatted_type(source["data_type"])["aggregates"]:
+                    identity = item["aggregate"]
+                    self.rows.append({"ordinal": source["ordinal"], "logical_name": item["name"], "aggregate_oid": identity["oid"], "aggregate_namespace": identity["namespace"], "aggregate_name": identity["name"], "input_type_oid": identity["inputTypeOid"], "result_type_oid": identity["resultTypeOid"], "output_sortable": item["sortable"], "output_zeroable": item["zeroable"], "catalog_version": identity["catalogVersion"] + self.connection.capability_version_suffix})
+            self.description = [Column(name) for name in self.rows[0]] if self.rows else []
+            return
+        exact = [(marker, response) for marker, response in responses if comment == marker or comment.startswith(marker + "_")]
+        for marker, response in (exact or responses):
             if marker in sql:
                 if isinstance(response, dict) and "rows" in response:
                     self.rows = response["rows"]
                     self.description = [Column(name) for name in response.get("columns", [])]
                 else:
                     self.rows = [dict(row) if isinstance(row, dict) else row for row in response]
+                    if comment == "structured_query_column_types":
+                        for row in self.rows:
+                            capability = capabilities_for_formatted_type(row["data_type"])
+                            row.update({
+                                "declared_type_oid": capability["declaredTypeOid"], "base_type_oid": capability["baseTypeOid"],
+                                "declared_type_namespace": capability["declaredType"]["namespace"], "declared_type_name": capability["declaredType"]["name"],
+                                "declared_type_kind": capability["declaredType"]["kind"], "declared_type_category": capability["declaredType"]["category"],
+                                "base_type_namespace": capability["type"]["namespace"], "base_type_name": capability["type"]["name"],
+                                "base_type_kind": capability["type"]["kind"], "base_type_category": capability["type"]["category"],
+                                "type_catalog_version": capability["type"]["catalogVersion"] + self.connection.capability_version_suffix, "collation_oid": None,
+                                "array_type_oid": None, "range_type_oid": None,
+                            })
                     if "server_version_num" in sql:
                         for row in self.rows:
                             row.setdefault("server_version_num", 160000)
@@ -74,17 +117,20 @@ class Cursor:
         return self.rows
 
     def fetchmany(self, size):
-        return self.rows[:size]
+        rows = self.rows[self.offset:self.offset + size]
+        self.offset += len(rows)
+        return rows
 
     def close(self):
         pass
 
 
 class Connection:
-    def __init__(self, responses=None, fail_on=None, failure=None):
+    def __init__(self, responses=None, fail_on=None, failure=None, capability_version_suffix=""):
         self.responses = responses or {}
         self.fail_on = fail_on
         self.failure = failure
+        self.capability_version_suffix = capability_version_suffix
         self.executed = []
         self.commits = 0
         self.rollbacks = 0
@@ -110,6 +156,21 @@ def empty_schema(fingerprint="live"):
     }
 
 
+def migration_assessment(table_name, *, dependencies=None, blockers=None, kind="r", available=True, opaque="one"):
+    if not available:
+        return {"status": "unavailable", "relations": {table_name: {"status": "unavailable"}}}
+    dependency_manifest = {"status": "available", "items": dependencies or [], "truncated": False}
+    manifest = {
+        "status": "available", "inventory": {"opaque_metadata": opaque},
+        "viewDependencies": dependency_manifest, "blockers": blockers or [],
+    }
+    manifest["fingerprint"] = canonical_fingerprint(manifest)
+    return {"status": "available", "relations": {table_name: {
+        "status": "available", "catalogKind": kind, "viewDependencies": dependency_manifest,
+        "reconstruction": manifest,
+    }}}
+
+
 class PostgresServiceTests(unittest.TestCase):
     def setUp(self):
         self.temporary_directory = tempfile.TemporaryDirectory()
@@ -122,7 +183,7 @@ class PostgresServiceTests(unittest.TestCase):
     def test_profile_secret_redaction_permissions_and_blank_update(self):
         self.assertNotIn("password", self.profile)
         self.assertNotIn("password", self.service.list_profiles()[0])
-        self.assertRegex(self.service.list_profiles()[0]["contextFingerprint"], r"^[0-9a-f]{16}$")
+        self.assertRegex(self.service.list_profiles()[0]["contextFingerprint"], r"^[0-9a-f]{64}$")
         store = Path(self.temporary_directory.name) / "postgres_profiles.json"
         if os.name != "nt":
             self.assertEqual(stat.S_IMODE(Path(self.temporary_directory.name).stat().st_mode), 0o700)
@@ -133,6 +194,23 @@ class PostgresServiceTests(unittest.TestCase):
         PostgresService(self.temporary_directory.name)
         if os.name != "nt":
             self.assertEqual(stat.S_IMODE(store.stat().st_mode), 0o600)
+
+    def test_profile_context_fingerprint_tracks_only_connection_identity(self):
+        original = self.service.profile_context_fingerprint("local")
+
+        self.service.save_profile("local", {**PROFILE, "name": "Renamed", "password": "changed", "timeout": 30})
+        self.assertEqual(self.service.profile_context_fingerprint("local"), original)
+
+        for field, value in (
+            ("host", "127.0.0.1"),
+            ("port", 5433),
+            ("dbname", "other"),
+            ("user", "reader"),
+            ("sslmode", "require"),
+        ):
+            with self.subTest(field=field):
+                self.service.save_profile("local", {**PROFILE, field: value})
+                self.assertNotEqual(self.service.profile_context_fingerprint("local"), original)
 
     def test_profile_validation_identifier_quoting_and_plan_invalidation(self):
         for change in ({"port": 0}, {"timeout": True}, {"sslmode": "maybe"}, {"host": "bad host"}):
@@ -153,6 +231,17 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertIsNone(plan["id"])
         self.assertTrue(plan["previewOnly"])
         self.assertFalse((Path(self.temporary_directory.name) / "ai_migration_plans").exists())
+
+    def test_migration_plan_ttl_uses_its_own_injected_clock(self):
+        service = PostgresService(
+            self.temporary_directory.name, plan_ttl_seconds=41,
+            temporal_manifest_ttl_seconds=13, clock=lambda: 1000.25,
+        )
+        service.introspect = lambda profile_id, namespace: empty_schema()
+
+        plan = service.preview("local", "public", empty_schema(), persist=False)
+
+        self.assertEqual(plan["expiresAt"], 1041.25)
 
     def test_preview_reports_actual_connected_database(self):
         self.service.introspect = lambda profile_id, namespace: empty_schema("live") | {"postgres": {**empty_schema("live")["postgres"], "database": "other"}}
@@ -180,6 +269,74 @@ class PostgresServiceTests(unittest.TestCase):
         )
         service.test_profile("local")
         self.assertEqual(captured["application_name"], "schemer")
+
+    def test_namespace_discovery_uses_a_read_only_transaction(self):
+        connection = Connection(responses={
+            "SELECT current_database() AS database": [{"database": "demo"}],
+            "namespace_catalog_fingerprint": [{"first_hash": "a" * 32, "second_hash": "b" * 32}],
+            "namespace_catalog_page": [{"namespace": "public", "classification": "user"}],
+        })
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connection)
+
+        self.assertEqual(service.list_namespaces("local"), ["public"])
+        self.assertEqual(connection.executed[0][0], "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        self.assertEqual(connection.rollbacks, 1)
+
+    def test_namespace_pages_classify_system_schemas_and_bind_cursors(self):
+        fingerprint = {"first_hash": "a" * 32, "second_hash": "b" * 32}
+        first = Connection(responses={
+            "SELECT current_database() AS database": [{"database": "demo"}],
+            "namespace_catalog_fingerprint": [fingerprint],
+            "namespace_catalog_page": [
+                {"namespace": "information_schema", "classification": "information_schema"},
+                {"namespace": "pg_catalog", "classification": "pg_catalog"},
+                {"namespace": "pg_temp_3", "classification": "temporary"},
+            ],
+        })
+        second = Connection(responses={
+            "SELECT current_database() AS database": [{"database": "demo"}],
+            "namespace_catalog_fingerprint": [fingerprint],
+            "namespace_catalog_page": [{"namespace": "pg_temp_3", "classification": "temporary"}],
+        })
+        def catalog_connection(value=fingerprint):
+            return Connection(responses={
+                "SELECT current_database() AS database": [{"database": "demo"}],
+                "namespace_catalog_fingerprint": [value], "namespace_catalog_page": [],
+            })
+
+        connections = [first, second, catalog_connection(), catalog_connection(), catalog_connection({"first_hash": "c" * 32, "second_hash": "d" * 32})]
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connections.pop(0))
+
+        page = service.list_namespace_page("local", "demo", scope="all", page_size="2")
+        self.assertEqual([item["classification"] for item in page["entries"]], ["information_schema", "pg_catalog"])
+        self.assertTrue(page["page"]["hasMore"])
+        classification_sql = next(sql for sql, _ in first.executed if "namespace_catalog_page" in sql)
+        for classification in ("pg_catalog", "information_schema", "temporary", "toast", "other_system", "user"):
+            self.assertIn(f"'{classification}'", classification_sql)
+        continued = service.list_namespace_page("local", "demo", scope="all", page_size="2", cursor=page["page"]["nextCursor"])
+        self.assertEqual(continued["namespaces"], ["pg_temp_3"])
+        page_sql, page_params = next(item for item in second.executed if "namespace_catalog_page" in item[0])
+        self.assertIn("nspname > %s", page_sql)
+        self.assertEqual(page_params, ("pg_catalog", 3))
+
+        with self.assertRaises(PostgresServiceError) as malformed:
+            service.list_namespace_page("local", "demo", cursor="not-a-cursor")
+        self.assertEqual(malformed.exception.code, "invalid_catalog_cursor")
+        with self.assertRaises(PostgresServiceError) as mismatch:
+            service.list_namespace_page("local", "demo", scope="user", page_size="2", cursor=page["page"]["nextCursor"])
+        self.assertEqual(mismatch.exception.code, "catalog_cursor_mismatch")
+        with self.assertRaises(PostgresServiceError) as stale:
+            service.list_namespace_page("local", "demo", scope="all", page_size="2", cursor=page["page"]["nextCursor"])
+        self.assertEqual(stale.exception.code, "catalog_cursor_stale")
+
+    def test_namespace_exact_existence_does_not_depend_on_a_catalog_page(self):
+        connection = Connection(responses={
+            "SELECT current_database() AS database": [{"database": "demo"}],
+            "AS namespace_exists": [{"namespace_exists": True}],
+        })
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connection)
+        self.assertTrue(service.namespace_exists("local", "demo", "after_the_page"))
+        self.assertFalse(any("namespace_catalog_page" in sql for sql, _ in connection.executed))
 
     def test_table_data_preview_is_paginated_ordered_and_json_safe(self):
         connection = Connection(responses={
@@ -212,10 +369,12 @@ class PostgresServiceTests(unittest.TestCase):
         connection = Connection(responses={
             "SELECT current_database() AS database": [{"database": "demo"}],
             "AS namespace_exists": [{"namespace_exists": True}],
+            "relation_catalog_fingerprint": [{"first_hash": "a" * 32, "second_hash": "b" * 32}],
             "c.relname AS relation_name": [
-                {"relation_name": "orders", "relation_kind": "table"},
-                {"relation_name": "order_summary", "relation_kind": "view"},
-                {"relation_name": "daily_sales", "relation_kind": "materialized_view"},
+                {"relation_name": "orders", "catalog_kind": "r", "relation_kind": "table"},
+                {"relation_name": "order_summary", "catalog_kind": "v", "relation_kind": "view"},
+                {"relation_name": "daily_sales", "catalog_kind": "m", "relation_kind": "materialized_view"},
+                {"relation_name": "remote_orders", "catalog_kind": "f", "relation_kind": "foreign_table"},
             ],
         })
         service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connection)
@@ -223,9 +382,9 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertEqual(result["profileId"], "local")
         self.assertEqual(result["database"], "demo")
         self.assertEqual(result["namespace"], "public")
-        self.assertEqual([item["kind"] for item in result["relations"]], ["table", "view", "materialized_view"])
+        self.assertEqual([item["kind"] for item in result["relations"]], ["table", "view", "materialized_view", "foreign_table"])
         catalog_query = next(sql for sql, _ in connection.executed if "c.relname AS relation_name" in sql)
-        self.assertIn("c.relkind IN ('r', 'p', 'v', 'm')", catalog_query)
+        self.assertIn("c.relkind IN ('r', 'p', 'v', 'm', 'f')", catalog_query)
         self.assertEqual(connection.executed[0][0], "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         self.assertEqual(connection.rollbacks, 1)
         self.assertTrue(connection.closed)
@@ -240,6 +399,35 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertFalse(any("c.relname AS relation_name" in sql for sql, _ in connection.executed))
         self.assertEqual(connection.rollbacks, 1)
         self.assertTrue(connection.closed)
+
+    def test_relation_catalog_keyset_continues_with_filters(self):
+        fingerprint = {"first_hash": "a" * 32, "second_hash": "b" * 32}
+        common = {
+            "SELECT current_database() AS database": [{"database": "demo"}],
+            "AS namespace_exists": [{"namespace_exists": True}],
+            "relation_catalog_fingerprint": [fingerprint],
+        }
+        first = Connection(responses={**common, "relation_catalog_page": [
+            {"relation_name": "remote_001", "catalog_kind": "f", "relation_kind": "foreign_table"},
+            {"relation_name": "remote_002", "catalog_kind": "f", "relation_kind": "foreign_table"},
+        ]})
+        second = Connection(responses={**common, "relation_catalog_page": [
+            {"relation_name": "remote_002", "catalog_kind": "f", "relation_kind": "foreign_table"},
+        ]})
+        connections = [first, second]
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connections.pop(0))
+
+        page = service.list_relations("local", "demo", "public", kind="foreign_table", search="remote", page_size="1")
+        continued = service.list_relations(
+            "local", "demo", "public", kind="foreign_table", search="remote", page_size="1",
+            cursor=page["page"]["nextCursor"],
+        )
+
+        self.assertEqual(page["entries"][0]["relation"], "remote_001")
+        self.assertEqual(continued["entries"][0]["relation"], "remote_002")
+        sql, params = next(item for item in second.executed if "relation_catalog_page" in item[0])
+        self.assertIn("(c.relname, c.relkind) > (%s, %s)", sql)
+        self.assertEqual(params, ("public", "f", "remote", "remote_001", "f", 2))
 
     def test_full_introspection_uses_one_read_only_snapshot_and_reports_missing_namespace(self):
         connection = Connection()
@@ -262,6 +450,46 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertEqual((error.exception.status, error.exception.code), (404, "namespace_not_found"))
         self.assertFalse(any("c.oid AS table_oid" in sql for sql, _ in missing.executed))
 
+    def test_full_introspection_projects_collections_above_result_limit_without_partial_fingerprint(self):
+        table_rows = [
+            {"table_oid": number, "table_name": f"table_{number:04}", "relation_kind": "r", "is_partition": False}
+            for number in range(1001)
+        ]
+        connection = Connection(responses={
+            "current_setting('server_version')": [{
+                "database": "demo", "server_version": "16", "server_version_num": "160000", "timezone": "UTC",
+            }],
+            "c.oid AS table_oid": table_rows,
+        })
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connection)
+
+        result = service.introspect("local", "public")
+
+        self.assertEqual(len(result["tables"]), 1001)
+        self.assertEqual(result["tables"][-1]["name"], "table_1000")
+        self.assertEqual(result["postgres"]["fingerprint"], canonical_fingerprint(result))
+        self.assertFalse(any("catalog_collection_too_large" in str(item) for item in connection.executed))
+        self.assertEqual(connection.rollbacks, 1)
+
+    def test_full_introspection_rejects_oversized_definition_instead_of_returning_partial_schema(self):
+        connection = Connection(responses={
+            "current_setting('server_version')": [{
+                "database": "demo", "server_version": "16", "server_version_num": "160000", "timezone": "UTC",
+            }],
+            "p.proname AS name": [{
+                "name": "oversized", "kind": "f", "identity_arguments": "", "arguments": "",
+                "return_type": "integer", "language": "sql", "definition": "x" * (64 * 1024 + 1),
+            }],
+        })
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connection)
+
+        with self.assertRaises(PostgresServiceError) as error:
+            service.introspect("local", "public")
+
+        self.assertEqual(error.exception.code, "catalog_definition_too_large")
+        self.assertEqual(error.exception.details["limitation"], "application")
+        self.assertEqual(connection.rollbacks, 1)
+
     def test_namespace_lock_identity_is_domain_separated_database_scoped_and_stable(self):
         first = namespace_lock_keys("demo", "public")
         self.assertEqual(first, namespace_lock_keys("demo", "public"))
@@ -282,7 +510,7 @@ class PostgresServiceTests(unittest.TestCase):
         first = service.inspect_relation("local", "demo", "reporting", "order_summary")
         second = service.inspect_relation("local", "demo", "reporting", "order_summary")
         self.assertEqual(first["kind"], "view")
-        self.assertEqual(first["columns"], [
+        self.assertEqual([{key: column[key] for key in ("name", "type", "nullable", "ordinal", "suggestions")} for column in first["columns"]], [
             {"name": "id", "type": "bigint", "nullable": False, "ordinal": 1, "suggestions": ["dimension", "identifier"]},
             {"name": "total", "type": "numeric(12,2)", "nullable": True, "ordinal": 2, "suggestions": ["dimension", "measure"]},
         ])
@@ -303,6 +531,40 @@ class PostgresServiceTests(unittest.TestCase):
         }]}
         definition_service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: Connection(responses=changed_definition))
         self.assertNotEqual(first["fingerprint"], definition_service.inspect_relation("local", "demo", "reporting", "order_summary")["fingerprint"])
+
+    def test_foreign_table_inspection_is_a_read_source_with_advisory_select(self):
+        responses = {
+            "SELECT current_database() AS database": [{"database": "demo", "server_version_num": 160000}],
+            "c.relkind AS catalog_kind": [{
+                "live_oid": 42, "catalog_kind": "f", "relation_kind": "foreign_table", "view_definition": None,
+                "owner_name": "fdw_owner", "current_role": "reporter", "can_select": True,
+                "materialized_populated": False,
+            }],
+            "a.attname AS column_name": [{
+                "column_name": "remote_id", "data_type": "bigint", "nullable": False, "ordinal": 1,
+                "type_category": "N", "type_name": "int8",
+            }],
+            "relation_dependents": [{"namespace": "reports", "relation_name": "remote_orders_view", "relation_kind": "view"}],
+        }
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: Connection(responses=responses))
+
+        descriptor = service.inspect_relation("local", "demo", "public", "remote_orders", "foreign_table")
+
+        self.assertEqual(descriptor["kind"], "foreign_table")
+        self.assertTrue(descriptor["permissions"]["canSelect"])
+        self.assertRegex(descriptor["fingerprint"], r"^[0-9a-f]{64}$")
+        self.assertEqual(descriptor["definition"], {"status": "unavailable", "reason": "not_supported"})
+        self.assertEqual(descriptor["dependencies"]["status"], "available")
+        self.assertEqual(descriptor["dependencies"]["items"], [])
+        self.assertFalse(descriptor["dependencies"]["page"]["hasMore"])
+        self.assertEqual(descriptor["dependents"]["status"], "available")
+        self.assertEqual(descriptor["dependents"]["items"][0]["namespace"], "reports")
+        source = {
+            **{key: descriptor[key] for key in ("profileId", "database", "namespace", "relation", "kind", "fingerprint")},
+            "snapshotVersion": 2,
+            "columns": [{key: column[key] for key in ("name", "type", "nullable", "ordinal", "capabilities")} for column in descriptor["columns"]],
+        }
+        self.assertEqual(service.verify_relation_source("local", source)["status"], "verified")
 
     def test_relation_inspection_adds_advisory_capabilities_and_bounded_oid_free_lineage(self):
         dependents = [
@@ -336,17 +598,18 @@ class PostgresServiceTests(unittest.TestCase):
         })
         self.assertEqual(result["columnProvenance"], {"status": "unavailable", "reason": "not_supported"})
         self.assertEqual(result["materialized"], {"status": "unavailable", "reason": "not_applicable"})
-        self.assertEqual(result["dependencies"], {
-            "status": "available", "truncated": False, "items": [
-                {"database": "demo", "namespace": "sales", "relation": "orders", "kind": "table"},
-                {"database": "demo", "namespace": "shared", "relation": "rates", "kind": "foreign_table"},
-            ],
-        })
-        self.assertEqual(len(result["dependents"]["items"]), 500)
+        self.assertEqual(result["dependencies"]["status"], "available")
+        self.assertEqual(
+            [(item["namespace"], item["relation"], item["kind"]) for item in result["dependencies"]["items"]],
+            [("sales", "orders", "table"), ("shared", "rates", "foreign_table")],
+        )
+        self.assertFalse(result["dependencies"]["page"]["hasMore"])
+        self.assertEqual(len(result["dependents"]["items"]), 100)
         self.assertTrue(result["dependents"]["truncated"])
+        self.assertTrue(result["dependents"]["page"]["nextCursor"])
         self.assertNotIn("liveOid", json.dumps(result["dependencies"]))
         lineage_queries = [item for item in connection.executed if "relation_depend" in item[0]]
-        self.assertEqual([item[1] for item in lineage_queries], [(20, 20, 501), (20, 20, 501)])
+        self.assertTrue(all(item[1][:2] == (20, 20) for item in lineage_queries))
         self.assertTrue(all("SELECT DISTINCT" in item[0] for item in lineage_queries))
 
         changed = {**responses, "c.relkind AS catalog_kind": [{
@@ -405,13 +668,98 @@ class PostgresServiceTests(unittest.TestCase):
         service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connection)
         result = service.inspect_relation("local", "demo", "public", "orders")
         column_query = next(item for item in connection.executed if "a.attname AS column_name" in item[0])
+        operator_query = next(item for item in connection.executed if "structured_query_operators" in item[0])
+        aggregate_query = next(item for item in connection.executed if "structured_query_aggregates" in item[0])
+        self.assertIn("WITH RECURSIVE type_chain", column_query[0])
+        self.assertIn("pg_catalog.pg_opclass", operator_query[0])
+        self.assertIn("opclass.opcdefault", operator_query[0])
+        self.assertIn("binary_cast.castsource = base.oid", operator_query[0])
+        self.assertIn("binary_cast.casttarget = opclass.opcintype", operator_query[0])
+        self.assertIn("binary_cast.castmethod = 'b'", operator_query[0])
+        self.assertIn("binary_cast.castcontext = 'i'", operator_query[0])
+        self.assertIn("opclass_type.typcategory = base_type.typcategory", operator_query[0])
+        self.assertIn("opclass_type.typispreferred", operator_query[0])
+        self.assertIn("selected.cast_identity", operator_query[0])
+        self.assertIn("pg_catalog.pg_aggregate", aggregate_query[0])
         self.assertIn("a.attrelid = %s", column_query[0])
-        self.assertEqual(column_query[1], (77,))
-        unavailable = {"status": "unavailable", "reason": "not_applicable"}
-        self.assertEqual(result["dependencies"], unavailable)
-        self.assertEqual(result["dependents"], unavailable)
+        self.assertIn("pg_catalog.pg_collation coll", column_query[0])
+        self.assertIn("pg_catalog.pg_constraint con", column_query[0])
+        self.assertIn("pg_catalog.pg_range rng", column_query[0])
+        self.assertNotIn("pg_catalog.pg_collation collation", column_query[0])
+        lineage_fingerprint_queries = [
+            sql for sql, _ in connection.executed if "relation_dependencies_fingerprint" in sql or "relation_dependents_fingerprint" in sql
+        ]
+        self.assertTrue(lineage_fingerprint_queries)
+        self.assertTrue(all("catalog_kind::text" in sql for sql in lineage_fingerprint_queries))
+        self.assertEqual(column_query[1], (77, 77))
+        self.assertEqual(result["dependencies"]["items"], [])
+        self.assertEqual(result["dependents"]["items"], [])
         self.assertEqual(connection.executed[0][0], "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         self.assertEqual(connection.rollbacks, 1)
+
+    def test_relation_lineage_pages_cross_namespace_table_and_foreign_dependents_and_rejects_stale_cursor(self):
+        base = {
+            "SELECT current_database() AS database": [{"database": "demo", "server_version_num": 160000}],
+            "c.relkind AS catalog_kind": [{
+                "live_oid": 77, "catalog_kind": "r", "relation_kind": "table", "view_definition": None,
+            }],
+            "a.attname AS column_name": [],
+            "relation_dependencies_fingerprint": [{"first_hash": "1" * 32, "second_hash": "2" * 32}],
+            "relation_dependencies_page": [],
+            "relation_dependents_fingerprint": [{"first_hash": "3" * 32, "second_hash": "4" * 32}],
+            "relation_lineage_identity": [{"live_oid": 77}],
+        }
+        first_rows = [
+            {"namespace": "analytics", "relation_name": "orders_view", "catalog_kind": "v", "relation_kind": "view"},
+            {"namespace": "remote", "relation_name": "orders_fdw", "catalog_kind": "f", "relation_kind": "foreign_table"},
+        ]
+        first = Connection(responses={**base, "relation_dependents_page": first_rows})
+        second = Connection(responses={**base, "relation_dependents_page": first_rows[1:]})
+        connections = [first, second]
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connections.pop(0))
+        descriptor = service.inspect_relation("local", "demo", "public", "orders")
+
+        # Recreate connections because descriptor inspection consumed the first one.
+        first = Connection(responses={**base, "relation_dependents_page": first_rows})
+        second = Connection(responses={**base, "relation_dependents_page": first_rows[1:]})
+        connections[:] = [first, second]
+        page = service.list_relation_lineage(
+            "local", "demo", "public", "orders", "dependents",
+            expected_kind="table", expected_fingerprint=descriptor["fingerprint"], page_size="1",
+        )
+        continued = service.list_relation_lineage(
+            "local", "demo", "public", "orders", "dependents",
+            expected_kind="table", expected_fingerprint=descriptor["fingerprint"], page_size="1",
+            cursor=page["page"]["nextCursor"],
+        )
+        self.assertEqual((page["items"][0]["namespace"], page["items"][0]["kind"]), ("analytics", "view"))
+        self.assertEqual((continued["items"][0]["namespace"], continued["items"][0]["kind"]), ("remote", "foreign_table"))
+        self.assertEqual(page["catalogFingerprint"], continued["catalogFingerprint"])
+        self.assertTrue(all(connection.executed[0][0] == "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY" for connection in (first, second)))
+
+        stale = Connection(responses={
+            **base,
+            "relation_dependents_fingerprint": [{"first_hash": "5" * 32, "second_hash": "6" * 32}],
+            "relation_dependents_page": first_rows[1:],
+        })
+        service._connect_factory = lambda **kwargs: stale
+        with self.assertRaises(PostgresServiceError) as error:
+            service.list_relation_lineage(
+                "local", "demo", "public", "orders", "dependents",
+                expected_kind="table", expected_fingerprint=descriptor["fingerprint"], page_size="1",
+                cursor=page["page"]["nextCursor"],
+            )
+        self.assertEqual(error.exception.code, "catalog_cursor_stale")
+
+        mismatch = Connection(responses={**base, "relation_dependents_page": []})
+        service._connect_factory = lambda **kwargs: mismatch
+        with self.assertRaises(PostgresServiceError) as error:
+            service.list_relation_lineage(
+                "local", "demo", "public", "orders", "dependencies",
+                expected_kind="table", expected_fingerprint=descriptor["fingerprint"], page_size="1",
+                cursor=page["page"]["nextCursor"],
+            )
+        self.assertEqual(error.exception.code, "catalog_cursor_mismatch")
 
     def test_relation_definitions_are_bounded_and_tables_do_not_claim_complete_ddl(self):
         base = {
@@ -515,12 +863,21 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertFalse(result["stableOrder"])
         preview_connection = connections[-1]
         self.assertEqual(preview_connection.executed[0][0], "SET TRANSACTION READ ONLY")
-        self.assertIn("SET LOCAL statement_timeout", preview_connection.executed[1][0])
+        self.assertFalse(any("statement_timeout" in sql for sql, _ in preview_connection.executed))
         data_sql, parameters = next(item for item in preview_connection.executed if 'FROM "public"."orders"' in item[0])
         self.assertNotIn("*", data_sql)
         self.assertNotIn("JOIN", data_sql.upper())
         self.assertEqual(parameters, (3, 10))
         self.assertTrue(preview_connection.closed)
+
+        stale_columns = {**source, "columns": [
+            {"name": "id", "type": "integer", "nullable": False, "ordinal": 1},
+            {"name": "amount", "type": "numeric", "nullable": True, "ordinal": 2},
+        ]}
+        with self.assertRaises(PostgresServiceError) as error:
+            service.preview_relation_rows("local", stale_columns, limit=2)
+        self.assertEqual(error.exception.code, "relation_changed")
+        self.assertFalse(any('FROM "public"."orders"' in sql for sql, _ in connections[-1].executed))
 
     def test_verified_relation_preview_rejects_stale_or_unbounded_sources_before_select(self):
         responses = {
@@ -559,7 +916,8 @@ class PostgresServiceTests(unittest.TestCase):
         descriptor = service.inspect_relation("local", "demo", "public", "orders")
         source = {
             **{key: descriptor[key] for key in ("profileId", "database", "namespace", "relation", "kind", "fingerprint")},
-            "columns": [{key: column[key] for key in ("name", "type", "nullable", "ordinal")} for column in descriptor["columns"]],
+            "snapshotVersion": 2,
+            "columns": [{key: column[key] for key in ("name", "type", "nullable", "ordinal", "capabilities")} for column in descriptor["columns"]],
         }
         self.assertEqual(service.verify_relation_source("local", source)["status"], "verified")
 
@@ -573,7 +931,7 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertFalse(result["matches"])
         self.assertEqual(result["missingColumns"], ["status"])
         self.assertEqual(result["addedColumns"], ["created_at"])
-        self.assertEqual(result["changedColumns"], [{"name": "id", "changes": ["type", "nullable", "ordinal"]}])
+        self.assertEqual(result["changedColumns"], [{"name": "id", "changes": ["type", "nullable", "ordinal", "capabilities"]}])
 
         missing = {**base, "c.relkind AS catalog_kind": []}
         missing_service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: Connection(responses=missing))
@@ -602,7 +960,8 @@ class PostgresServiceTests(unittest.TestCase):
         descriptor = service.inspect_relation("local", "demo", "public", "orders")
         source = {
             **{key: descriptor[key] for key in ("profileId", "database", "namespace", "relation", "kind", "fingerprint")},
-            "columns": [{key: column[key] for key in ("name", "type", "nullable", "ordinal")} for column in descriptor["columns"]],
+            "snapshotVersion": 2,
+            "columns": [{key: column[key] for key in ("name", "type", "nullable", "ordinal", "capabilities")} for column in descriptor["columns"]],
         }
         query = {
             "version": 2,
@@ -644,6 +1003,28 @@ class PostgresServiceTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             service.execute_widget_query("local", duplicate_ordinals, query)
 
+    def test_capability_catalog_mutation_stales_source_before_query_sql(self):
+        responses = {
+            "SELECT current_database() AS database": [{"database": "demo"}],
+            "c.relkind AS catalog_kind": [{"catalog_kind": "r", "relation_kind": "table", "view_definition": None}],
+            "a.attname AS column_name": [{"column_name": "status", "data_type": "text", "nullable": False, "ordinal": 1, "type_category": "S", "type_name": "text"}],
+        }
+        initial = Connection(responses=responses)
+        changed = Connection(responses=responses, capability_version_suffix=":changed")
+        connections = [initial, changed]
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connections.pop(0))
+        descriptor = service.inspect_relation("local", "demo", "public", "orders")
+        source = {
+            **{key: descriptor[key] for key in ("profileId", "database", "namespace", "relation", "kind", "fingerprint")},
+            "snapshotVersion": 2,
+            "columns": [{key: column[key] for key in ("name", "type", "nullable", "ordinal", "capabilities")} for column in descriptor["columns"]],
+        }
+        query = {"version": 2, "dimensions": [], "measures": [{"id": "m", "label": "Rows", "column": None, "aggregation": "count_rows", "distinct": False, "nullBehavior": "preserve", "numberFormat": {"style": "integer"}}], "filters": [], "sort": [], "limit": 10}
+        with self.assertRaises(PostgresServiceError) as error:
+            service.execute_widget_query("local", source, query)
+        self.assertEqual(error.exception.code, "relation_changed")
+        self.assertFalse(any('AS "__schemer_m0"' in sql for sql, _ in changed.executed))
+
     def test_temporal_series_manifest_and_windows_use_one_proportional_utc_domain(self):
         responses = {
             "SELECT current_database() AS database": [{"database": "demo"}],
@@ -652,7 +1033,7 @@ class PostgresServiceTests(unittest.TestCase):
                 {"column_name": "ordered_on", "data_type": "date", "nullable": False, "ordinal": 1, "type_category": "D", "type_name": "date"},
                 {"column_name": "amount", "data_type": "numeric", "nullable": True, "ordinal": 2, "type_category": "N", "type_name": "numeric"},
             ],
-            "pg_catalog.min": [{"__schemer_min": datetime(2026, 1, 1), "__schemer_max": datetime(2026, 1, 10), "__schemer_points": 10}],
+            'AS "__schemer_min"': [{"__schemer_min": datetime(2026, 1, 1), "__schemer_max": datetime(2026, 1, 10), "__schemer_points": 10}],
             "pg_catalog.to_timestamp": {
                 "columns": ["__schemer_t0", "__schemer_m0"],
                 "rows": [
@@ -665,11 +1046,15 @@ class PostgresServiceTests(unittest.TestCase):
         service = PostgresService(
             self.temporary_directory.name,
             connect_factory=lambda **kwargs: (connections.append(Connection(responses=responses)) or connections[-1]),
+            plan_ttl_seconds=111,
+            temporal_manifest_ttl_seconds=17,
+            clock=lambda: 1000.25,
         )
         descriptor = service.inspect_relation("local", "demo", "public", "orders")
         source = {
             **{key: descriptor[key] for key in ("profileId", "database", "namespace", "relation", "kind", "fingerprint")},
-            "columns": [{key: column[key] for key in ("name", "type", "nullable", "ordinal")} for column in descriptor["columns"]],
+            "snapshotVersion": 2,
+            "columns": [{key: column[key] for key in ("name", "type", "nullable", "ordinal", "capabilities")} for column in descriptor["columns"]],
         }
         query = {
             "version": 2,
@@ -684,7 +1069,7 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertEqual(manifest["series"]["alignedStart"], "2026-01-01T00:00:00.000Z")
         self.assertEqual(manifest["series"]["alignedEndExclusive"], "2026-01-11T00:00:00.000Z")
         self.assertEqual(manifest["series"]["refreshGeneration"], "refresh-one")
-        self.assertGreater(manifest["series"]["expiresAtEpoch"], 0)
+        self.assertEqual(manifest["series"]["expiresAtEpoch"], 1018)
         self.assertEqual(len(manifest["series"]["key"]), 64)
         manifest_connection = connections[-1]
         self.assertIn(("SET LOCAL TIME ZONE 'UTC'", ()), manifest_connection.executed)
@@ -739,7 +1124,8 @@ class PostgresServiceTests(unittest.TestCase):
         descriptor = service.inspect_relation("local", "demo", "public", "orders")
         source = {
             **{key: descriptor[key] for key in ("profileId", "database", "namespace", "relation", "kind", "fingerprint")},
-            "columns": [{key: column[key] for key in ("name", "type", "nullable", "ordinal")} for column in descriptor["columns"]],
+            "snapshotVersion": 2,
+            "columns": [{key: column[key] for key in ("name", "type", "nullable", "ordinal", "capabilities")} for column in descriptor["columns"]],
         }
         query = {
             "version": 2,
@@ -840,17 +1226,59 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertTrue(result["truncated"])
         self.assertEqual(result["rows"][0], [str(UUID(int=1)), "0.25"])
         self.assertEqual(connection.executed[0][0], "SET TRANSACTION READ ONLY")
+        self.assertFalse(any("statement_timeout" in sql for sql, _ in connection.executed))
         self.assertEqual(connection.rollbacks, 1)
         self.assertTrue(connection.closed)
 
+    def test_read_only_sql_accepts_show_and_keeps_the_result_contract(self):
+        statement = "SHOW lock_timeout"
+        connection = Connection(responses={
+            "SELECT current_database() AS database": [{"database": "demo"}],
+            "SELECT EXISTS": [{"exists": True}],
+            statement: {"columns": ["lock_timeout"], "rows": [("250ms",)]},
+        })
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connection)
+
+        result = service.execute_read_only_sql("local", "public", statement)
+
+        self.assertEqual(result["rows"], [["250ms"]])
+        self.assertEqual(connection.executed[0][0], "SET TRANSACTION READ ONLY")
+
     def test_read_only_sql_rejects_invalid_or_failed_queries(self):
-        for statement in ("", "UPDATE payments SET amount = 0", "SELECT 1; SELECT 2", "DO $$ BEGIN NULL; END $$"):
+        for statement in ("", "SELECT 1; SELECT 2"):
             with self.subTest(statement=statement), self.assertRaises(ValidationError):
                 self.service.execute_read_only_sql("local", "public", statement)
         metadata = {
             "SELECT current_database() AS database": [{"database": "demo"}],
             "SELECT EXISTS": [{"exists": True}],
         }
+
+        class ReadOnlyDiagnostic:
+            message_primary = "cannot execute UPDATE in a read-only transaction"
+            message_detail = "The transaction was declared read only."
+            message_hint = "Use a write-authorized operation."
+
+        class ReadOnlyError(Exception):
+            sqlstate = "25006"
+            diag = ReadOnlyDiagnostic()
+
+        connection = Connection(responses=metadata, fail_on="UPDATE payments", failure=ReadOnlyError())
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connection)
+        with self.assertRaises(PostgresServiceError) as error:
+            service.execute_read_only_sql("local", "public", "UPDATE payments SET amount = 0")
+        self.assertEqual(error.exception.details["postgres"], {
+            "sqlstate": "25006",
+            "message": "cannot execute UPDATE in a read-only transaction",
+            "detail": "The transaction was declared read only.",
+            "hint": "Use a write-authorized operation.",
+        })
+
+        connection = Connection(responses=metadata)
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connection)
+        with self.assertRaises(ValidationError) as error:
+            service.execute_read_only_sql("local", "public", "DO $$ BEGIN NULL; END $$")
+        self.assertEqual(error.exception.message, "The SQL query did not return a result set")
+
         connection = Connection(responses=metadata, fail_on="SELECT secret FROM payments")
         service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connection)
         with self.assertRaises(PostgresServiceError) as error:
@@ -870,10 +1298,8 @@ class PostgresServiceTests(unittest.TestCase):
         service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connection)
         with self.assertRaises(PostgresServiceError) as error:
             service.execute_read_only_sql("local", "public", "SELECT DISTINCT ON (id) id FROM payments ORDER BY created_at")
-        self.assertEqual(
-            error.exception.message,
-            "Read-only SQL query failed: SELECT DISTINCT ON expressions must match initial ORDER BY expressions",
-        )
+        self.assertEqual(error.exception.message, "Read-only SQL query failed")
+        self.assertEqual(error.exception.details["postgres"]["sqlstate"], "42P10")
 
     def test_read_only_sql_verifies_exact_target_and_schemer_limits(self):
         with self.assertRaises(PostgresServiceError) as error:
@@ -945,6 +1371,29 @@ class PostgresServiceTests(unittest.TestCase):
         second["tables"][0]["name"] = "y"
         self.assertNotEqual(canonical_fingerprint(first), canonical_fingerprint(second))
 
+    def test_namespace_mutation_lock_retains_stricter_postgres_policy(self):
+        connection = Connection()
+        cursor = connection.cursor()
+
+        self.service._acquire_namespace_mutation_lock(cursor, "public", "demo")
+
+        timeout_sql = connection.executed[0][0]
+        self.assertIn("current_setting('lock_timeout')", timeout_sql)
+        self.assertIn("interval '5000 milliseconds'", timeout_sql)
+        self.assertIn("ELSE pg_catalog.current_setting('lock_timeout')", timeout_sql)
+        self.assertFalse(any("statement_timeout" in sql for sql, _ in connection.executed))
+        self.assertIn("pg_advisory_xact_lock", connection.executed[1][0])
+
+    def test_migration_row_presence_probe_uses_a_read_only_transaction(self):
+        connection = Connection(responses={"AS has_rows": [{"has_rows": True}]})
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connection)
+
+        populated = service._tables_with_rows("local", "public", {"orders"})
+
+        self.assertEqual(populated, {"orders"})
+        self.assertEqual(connection.executed[0][0], "SET TRANSACTION READ ONLY")
+        self.assertEqual(connection.rollbacks, 1)
+
     def test_introspection_maps_composite_keys_indexes_triggers_and_routines(self):
         columns = [
             {"table_name": "parent", "column_name": "tenant", "ordinal": 1, "data_type": "uuid", "nullable": False, "default_sql": None, "identity_kind": "", "generated_kind": ""},
@@ -983,11 +1432,207 @@ class PostgresServiceTests(unittest.TestCase):
         live = empty_schema()
         live["tables"] = desired["tables"]
         self.service.introspect = lambda profile_id, namespace: live
+        self.service._migration_safety_assessment = lambda *args, **kwargs: migration_assessment("new table")
         omitted = self.service.preview("local", "public", empty_schema(), False, persist=False)
         self.assertEqual(omitted["steps"], [])
-        self.assertEqual(omitted["warnings"][0]["code"], "destructive_omitted")
+        self.assertEqual(omitted["warnings"], [])
+        self.assertEqual(omitted["blockingDifferences"][0]["code"], "destructive_omitted")
+        self.assertFalse(omitted["complete"])
+        self.assertFalse(omitted["applyCapable"])
         included = self.service.preview("local", "public", empty_schema(), True, persist=False)
         self.assertTrue(included["steps"][0]["destructive"])
+        self.assertTrue(included["complete"])
+        self.assertTrue(included["applyCapable"])
+
+    def test_unsupported_desired_difference_blocks_preview_while_information_stays_warning(self):
+        live = empty_schema()
+        live["tables"] = [{
+            "id": "t", "name": "events", "columns": [{"id": "c", "name": "id", "type": "integer", "nullable": True}],
+            "uniqueConstraints": [], "checks": [], "indexes": [], "triggers": [],
+        }]
+        desired = copy.deepcopy(live)
+        desired["tables"][0]["columns"][0].setdefault("postgres", {})["identity"] = "d"
+        self.service.introspect = lambda profile_id, namespace: live
+
+        preview = self.service.preview("local", "public", desired, persist=False)
+
+        self.assertFalse(preview["complete"])
+        self.assertEqual(preview["warnings"], [])
+        self.assertEqual(preview["blockingDifferences"][0]["code"], "unsupported")
+        self.assertIn("nextAction", preview["blockingDifferences"][0])
+
+    def test_data_movement_warning_does_not_make_full_preview_incomplete(self):
+        live = empty_schema()
+        live["tables"] = [{
+            "id": "t", "name": "events", "postgres": {"hasRows": True},
+            "columns": [
+                {"id": "a", "name": "first", "type": "integer", "nullable": True},
+                {"id": "b", "name": "second", "type": "text", "nullable": True},
+            ],
+            "uniqueConstraints": [], "checks": [], "indexes": [], "triggers": [],
+        }]
+        desired = copy.deepcopy(live)
+        desired["tables"][0]["columns"].reverse()
+        self.service.introspect = lambda profile_id, namespace: copy.deepcopy(live)
+        self.service._tables_with_rows = lambda profile_id, namespace, tables: {"events"}
+        self.service._migration_safety_assessment = lambda *args, **kwargs: migration_assessment("events")
+
+        preview = self.service.preview("local", "public", desired, True, persist=False)
+
+        self.assertTrue(preview["complete"])
+        self.assertTrue(preview["applyCapable"])
+        self.assertEqual(preview["blockingDifferences"], [])
+        self.assertEqual(preview["warnings"][0]["code"], "data_movement")
+
+    def test_partition_blocking_is_scoped_to_concrete_touches_and_dependencies(self):
+        partition = {
+            "id": "partitioned", "name": "events_by_month", "postgres": {"partitioned": True},
+            "columns": [{"id": "partition_id", "name": "id", "type": "integer", "nullable": False}],
+            "uniqueConstraints": [], "checks": [], "indexes": [], "triggers": [],
+        }
+        ordinary = {
+            "id": "ordinary", "name": "notes",
+            "columns": [{"id": "note_id", "name": "id", "type": "integer", "nullable": False}],
+            "uniqueConstraints": [], "checks": [], "indexes": [], "triggers": [],
+        }
+        live = empty_schema()
+        live["tables"] = [partition, ordinary]
+        desired = copy.deepcopy(live)
+        desired["tables"][1]["columns"].append({"id": "body", "name": "body", "type": "text", "nullable": True})
+        self.service.introspect = lambda *args: copy.deepcopy(live)
+        self.service._migration_safety_assessment = lambda *args, **kwargs: migration_assessment("notes")
+
+        unrelated = self.service.preview("local", "public", desired, persist=False)
+        self.assertTrue(unrelated["complete"])
+        self.assertFalse(any(item.get("relation") == "events_by_month" for item in unrelated["blockingDifferences"]))
+
+        touched = copy.deepcopy(live)
+        touched["tables"][0]["columns"].append({"id": "payload", "name": "payload", "type": "text", "nullable": True})
+        self.service._migration_safety_assessment = lambda *args, **kwargs: migration_assessment("events_by_month", kind="p")
+        blocked = self.service.preview("local", "public", touched, persist=False)
+        self.assertFalse(blocked["complete"])
+        self.assertEqual(blocked["blockingDifferences"][0]["code"], "unsupported_relation")
+
+        dependency = copy.deepcopy(live)
+        dependency["relationships"] = [{
+            "id": "fk_notes_partition", "name": "notes_partition_fkey", "constraintName": "notes_partition_fkey",
+            "fromTableId": "ordinary", "fromColumnId": "note_id", "toTableId": "partitioned",
+            "toColumnId": "partition_id", "targetNamespace": "public", "targetTableName": "events_by_month",
+            "targetColumnNames": ["id"], "onUpdate": "NO ACTION", "onDelete": "NO ACTION",
+            "matchType": "SIMPLE", "validated": True,
+        }]
+        self.service._migration_safety_assessment = lambda *args, **kwargs: {
+            "status": "available", "relations": {
+                "events_by_month": migration_assessment("events_by_month", kind="p")["relations"]["events_by_month"],
+                "notes": migration_assessment("notes")["relations"]["notes"],
+            },
+        }
+        blocked_dependency = self.service.preview("local", "public", dependency, persist=False)
+        self.assertTrue(any(item.get("relation") == "events_by_month" for item in blocked_dependency["blockingDifferences"]))
+
+    def test_view_dependency_checks_are_relation_and_column_scoped(self):
+        live = empty_schema()
+        live["tables"] = [{
+            "id": "events", "name": "events",
+            "columns": [{"id": "value", "name": "value", "type": "integer", "nullable": True}],
+            "uniqueConstraints": [], "checks": [], "indexes": [], "triggers": [],
+        }]
+        live["views"] = [{"id": "unrelated", "name": "other_view", "queryDefinition": "SELECT 1"}]
+        desired = copy.deepcopy(live)
+        desired["tables"][0]["columns"][0]["type"] = "bigint"
+        self.service.introspect = lambda *args: copy.deepcopy(live)
+        self.service._migration_safety_assessment = lambda *args, **kwargs: migration_assessment("events")
+
+        unrelated = self.service.preview("local", "public", desired, True, persist=False)
+        self.assertTrue(unrelated["complete"])
+        self.assertTrue(any(" TYPE bigint" in step["sql"] for step in unrelated["steps"]))
+
+        dependent = [{
+            "column_name": "value", "dependent_namespace": "public",
+            "dependent_relation": "event_totals", "dependent_kind": "view",
+        }]
+        self.service._migration_safety_assessment = lambda *args, **kwargs: migration_assessment("events", dependencies=dependent)
+        blocked = self.service.preview("local", "public", desired, True, persist=False)
+        self.assertFalse(blocked["complete"])
+        self.assertIn("dependent objects", blocked["blockingDifferences"][0]["message"])
+
+        removed = copy.deepcopy(live)
+        removed["tables"][0]["columns"] = []
+        blocked_drop = self.service.preview("local", "public", removed, True, persist=False)
+        self.assertFalse(blocked_drop["complete"])
+        self.assertFalse(any("DROP COLUMN" in step["sql"] for step in blocked_drop["steps"]))
+
+    def test_reconstruction_requires_complete_metadata_neutral_inventory(self):
+        live = empty_schema()
+        live["tables"] = [{
+            "id": "events", "name": "events",
+            "columns": [
+                {"id": "first", "name": "first", "type": "integer", "nullable": True},
+                {"id": "second", "name": "second", "type": "text", "nullable": True},
+            ],
+            "uniqueConstraints": [], "checks": [], "indexes": [], "triggers": [],
+        }]
+        desired = copy.deepcopy(live)
+        desired["tables"][0]["columns"].reverse()
+        self.service.introspect = lambda *args: copy.deepcopy(live)
+        self.service._tables_with_rows = lambda *args: set()
+
+        for assessment, complete, code in (
+            (migration_assessment("events"), True, None),
+            (migration_assessment("events", blockers=["relation comment"]), False, "reconstruction_preservation_unsupported"),
+            (migration_assessment("events", available=False), False, "reconstruction_inventory_unavailable"),
+        ):
+            with self.subTest(code=code):
+                self.service._migration_safety_assessment = lambda *args, value=assessment, **kwargs: value
+                preview = self.service.preview("local", "public", desired, True, persist=False)
+                self.assertEqual(preview["complete"], complete)
+                if code:
+                    self.assertEqual(preview["blockingDifferences"][0]["code"], code)
+                self.assertFalse(any(" CASCADE" in step["sql"].upper() for step in preview["steps"]))
+
+    def test_migration_fingerprint_tracks_opaque_metadata_and_timezone_inputs(self):
+        live = empty_schema("catalog")
+        live["postgres"]["timeZone"] = "UTC"
+        first = self.service._migration_fingerprint(live, migration_assessment("events", opaque="one"))
+        opaque_changed = self.service._migration_fingerprint(live, migration_assessment("events", opaque="two"))
+        timezone_changed = copy.deepcopy(live)
+        timezone_changed["postgres"]["timeZone"] = "America/New_York"
+        timezone_fingerprint = self.service._migration_fingerprint(
+            timezone_changed, migration_assessment("events", opaque="one"),
+        )
+
+        self.assertNotEqual(first, opaque_changed)
+        self.assertNotEqual(first, timezone_fingerprint)
+
+    def test_migration_dependency_inventory_uses_pg_depend_and_pg_rewrite(self):
+        connection = Connection(responses={
+            "migration_relation_identity": [{"oid": 41, "relkind": "r"}],
+            "migration_view_dependencies": [{
+                "column_name": "value", "dependent_namespace": "reports",
+                "dependent_relation": "event_totals", "dependent_kind": "view",
+            }],
+            "migration_reconstruction_inventory": [{
+                "relation_oid": "41", "relation_xmin": "7", "owner": "developer", "current_role": "developer",
+                "replica_identity": "d", "persistence": "p", "opaque_metadata": {},
+            }],
+        })
+
+        assessment = self.service._migration_safety_assessment_connection(
+            connection, "public", ["events"], {"events"},
+        )
+
+        dependencies = assessment["relations"]["events"]["viewDependencies"]
+        self.assertEqual(dependencies["items"][0]["dependent_relation"], "event_totals")
+        sql = next(sql for sql, _ in connection.executed if "migration_view_dependencies" in sql)
+        self.assertIn("pg_catalog.pg_depend", sql)
+        self.assertIn("pg_catalog.pg_rewrite", sql)
+        self.assertIn("d.refobjsubid", sql)
+        inventory_sql = next(sql for sql, _ in connection.executed if "migration_reconstruction_inventory" in sql)
+        for catalog in (
+            "pg_default_acl", "pg_policy", "pg_publication_rel", "pg_seclabel", "pg_extension",
+            "pg_statistic_ext", "pg_index", "pg_constraint", "pg_trigger", "pg_inherits",
+        ):
+            self.assertIn(catalog, inventory_sql)
 
     def test_preview_rejects_additional_top_level_sql_statements(self):
         self.service.introspect = lambda profile_id, namespace: empty_schema()

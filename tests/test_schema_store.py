@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from schemii.schema_store import SchemaStore, SchemaStoreError, schema_layout_token
+from schemii.migration_contract import full_schema_completeness_proof
 from schemii.ai_schema_mutations import apply_schema_action, deterministic_id
 
 
@@ -214,11 +215,21 @@ class SchemaStoreTests(unittest.TestCase):
         result = self.store.sync_full_migration_result(
             "schema_one", saved["revision"], saved["layoutToken"], refreshed,
             "12345678-1234-4123-8123-123456789abc",
+            full_schema_completeness_proof("a" * 64, "b" * 64), "a" * 64, "b" * 64,
         )
         after = self.store.get("schema_one")
         self.assertEqual(result["status"], "saved")
         self.assertEqual(after["schema"]["layout"], layout_snapshot)
         self.assertEqual({key: after["schema"]["tables"][0][key] for key in ("x", "y", "color")}, legacy_snapshot)
+
+    def test_full_migration_sync_rejects_missing_completeness_proof(self):
+        saved = self.store.save("schema_one", record("schema_one"), expected_layout_token=None, layout_protocol=None)
+        with self.assertRaises(SchemaStoreError) as caught:
+            self.store.sync_full_migration_result(
+                "schema_one", saved["revision"], saved["layoutToken"], self.store.get("schema_one")["schema"],
+                "12345678-1234-4123-8123-123456789abc",
+            )
+        self.assertEqual(caught.exception.payload["error"]["code"], "migration_plan_incomplete")
 
     def test_v2_table_view_and_viewport_replacements_require_layout_token(self):
         original = record("schema_one")

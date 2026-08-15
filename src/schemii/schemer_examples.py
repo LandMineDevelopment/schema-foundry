@@ -97,10 +97,23 @@ def build_mercury_dashboard(descriptor: dict[str, Any]) -> dict[str, Any]:
         key: descriptor[key]
         for key in ("profileId", "database", "namespace", "relation", "kind", "fingerprint")
     }
-    source["columns"] = [
-        {key: column[key] for key in ("name", "type", "nullable", "ordinal")}
-        for column in descriptor["columns"]
-    ]
+    snapshot_version = descriptor.get("snapshotVersion", 1)
+    if snapshot_version == 2:
+        if any("capabilities" not in column for column in descriptor["columns"]):
+            raise PostgresServiceError(502, "mercury_source_invalid", "The Mercury tutorial source capability snapshot is incomplete")
+        source["snapshotVersion"] = 2
+        source["columns"] = [
+            {
+                **{key: column[key] for key in ("name", "type", "nullable", "ordinal")},
+                "capabilities": column["capabilities"],
+            }
+            for column in descriptor["columns"]
+        ]
+    else:
+        source["columns"] = [
+            {key: column[key] for key in ("name", "type", "nullable", "ordinal")}
+            for column in descriptor["columns"]
+        ]
     available_columns = {column["name"] for column in source["columns"]}
     expected_columns = {"order_id", "customer_id", "customer_name", "status", "ordered_at", "shipped_at", "order_date", "item_count", "order_total"}
     if not expected_columns <= available_columns:
@@ -159,7 +172,7 @@ def mercury_dashboard_from_service(service: PostgresService) -> dict[str, Any]:
     database = profile.get("dbname")
     if not isinstance(database, str):
         raise PostgresServiceError(409, "mercury_source_changed", "The included Mercury PostgreSQL profile has no database")
-    if MERCURY_NAMESPACE not in service.list_namespaces(MERCURY_PROFILE_ID):
+    if not service.namespace_exists(MERCURY_PROFILE_ID, database, MERCURY_NAMESPACE):
         raise PostgresServiceError(404, "mercury_source_unavailable", "The bookstore namespace is unavailable")
     descriptor = service.inspect_relation(MERCURY_PROFILE_ID, database, MERCURY_NAMESPACE, MERCURY_RELATION, "view")
     return build_mercury_dashboard(descriptor)

@@ -19,6 +19,19 @@ Use this order when behavior differs:
 
 Never preview or apply a saved schema against an unverified database or namespace. Never execute or refresh a Schemer widget against an inferred profile, database, namespace, relation, or dashboard revision.
 
+## PostgreSQL Wrapper Philosophy
+
+Schemii and Schemer are PostgreSQL wrappers, not a parallel database authorization system.
+
+- PostgreSQL owns role permissions, SQL semantics, constraints, triggers, defaults, generated values, row-level security, partition routing, types, operators, aggregates, extensions, transaction legality, and database/role/session timeout policy.
+- Execute against the exact saved role and let PostgreSQL provide the authoritative permission and execution result. Advisory privilege checks may improve explanations but must not become hard authorization gates.
+- The user owns which target is active, which capabilities the AI receives, each capability's approval mode, and optional agent-specific bounds. The AI must identify missing capability precisely and must never expand its own authority.
+- The applications own exact-target identity, stale-state and revision guards, destructive intent review, preservation of layouts/dashboards/saved design intent, durable operation identity, uncertain-outcome recovery, transport pagination/chunking, and process stability.
+- Do not impose application statement or lock policy by default when PostgreSQL can own it. Connection-establishment, external HTTP, startup, shutdown, and health deadlines remain application lifecycle concerns.
+- Product modeling may be narrower than PostgreSQL, but limitations must be named as application limitations and an appropriate raw PostgreSQL surface should remain available. Never describe an app limitation as PostgreSQL denying or not supporting an operation.
+- Bound individual responses for process/browser safety, but use pagination, cursors, streaming, or export instead of making otherwise valid PostgreSQL objects or results unreachable.
+- Keep no-automatic-replay guarantees for uncertain writes. PostgreSQL permission does not make replay safe.
+
 ## Working Method
 
 1. Inspect the relevant source, tests, saved schema or dashboard record, and `git status` before proposing changes.

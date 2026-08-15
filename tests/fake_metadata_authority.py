@@ -1,6 +1,7 @@
 import copy
 import uuid
 
+from schemii.ai_operation_maintenance import OperationLeaseLost
 from schemii.metadata import MetadataStoreError
 
 
@@ -8,6 +9,7 @@ class FakeSchemiiAuthority:
     """Injectable authority double for HTTP tests, never used by production."""
 
     permissions = ("schema", "structured", "write", "rawread", "rawwrite")
+    settings_application = "schemii"
 
     def __init__(self):
         self.chats = {}
@@ -43,6 +45,16 @@ class FakeSchemiiAuthority:
         chat["schemaId"] = payload.get("schemaId", chat["schemaId"])
 
     def health(self): return {"ok": True, "version": 4, "expectedVersion": 4}
+
+    def get_settings(self):
+        return {"application": self.settings_application, "agentId": "default", "revision": 1}
+
+    def update_settings(self, body):
+        if set(body) != {"expectedRevision", "policy"}:
+            raise MetadataStoreError("invalid_metadata", "AI settings request fields are invalid", status=400)
+        if body["expectedRevision"] != 1:
+            raise MetadataStoreError("policy_changed", "AI agent policy changed", status=409, details={"currentRevision": 1})
+        return {"application": self.settings_application, "agentId": "default", "revision": 2}
 
     def provision_chat(self, schema_id):
         chat_id = str(uuid.uuid4())
@@ -119,6 +131,9 @@ class FakeSchemiiAuthority:
     def operation_for_proposal(self, proposal_id, chat_id):
         return next((self.operation(key, chat_id) for key, value in self.operations.items() if value["proposalId"] == proposal_id), None)
 
+    def consume_bound(self, operation_id, name, amount, evidence):
+        return {"operationId": operation_id, "bound": name, "used": amount}
+
     def finish_operation(self, attempt_id, token, state, result=None, error=None):
         operation = next(value for value in self.operations.values() if value.get("attemptId") == attempt_id)
         operation.update({"state": state, "result": copy.deepcopy(result), "error": copy.deepcopy(error)})
@@ -138,3 +153,30 @@ class FakeSchemiiAuthority:
     def consume_result(self, delivery_id, token): return {"state": "consumed"}
     def release_result(self, delivery_id, token): return {"state": "released"}
     def uncertain_result(self, delivery_id, token): return {"state": "uncertain"}
+
+
+class FakeAiMaintenance:
+    def __init__(self, authority):
+        self.authority = authority
+        self.lost = False
+        self.tracked = []
+        self.released = []
+
+    def track(self, operation_id, attempt_id, claim_token):
+        self.tracked.append((operation_id, attempt_id, claim_token))
+
+    def assert_owned(self, attempt_id):
+        if not self.lost:
+            return
+        operation_id = self.tracked[-1][0]
+        self.authority.operations[operation_id].update({
+            "state": "uncertain", "result": None,
+            "error": {"code": "lease_lost", "message": "Reconcile without replay"},
+        })
+        raise OperationLeaseLost()
+
+    def release(self, attempt_id):
+        self.released.append(attempt_id)
+
+    def health(self):
+        return {"required": True, "status": "available", "running": True}

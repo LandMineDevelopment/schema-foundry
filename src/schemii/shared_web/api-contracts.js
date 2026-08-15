@@ -39,14 +39,28 @@
 
   function validateCatalogResponse(payload, kind = null) {
     requireObject(payload, "catalog");
+    const fingerprint = /^[0-9a-f]{64}$/;
+    if (!nonEmptyString(payload.profileId) || !nonEmptyString(payload.profileFingerprint) || !nonEmptyString(payload.database)
+        || !fingerprint.test(payload.profileFingerprint) || !fingerprint.test(payload.catalogFingerprint) || !isObject(payload.page)
+        || !Number.isInteger(payload.page.pageSize) || !Number.isInteger(payload.page.returned) || typeof payload.page.hasMore !== "boolean"
+        || (payload.page.hasMore ? !nonEmptyString(payload.page.nextCursor) : payload.page.nextCursor !== null)) {
+      throw new ApiContractError("The catalog response has invalid target or page metadata", { contract: "catalog", payload });
+    }
     if (kind === "namespaces" || Object.hasOwn(payload, "namespaces")) {
       requireArray(payload, "namespaces", "catalog");
-      if (payload.namespaces.some(namespace => !nonEmptyString(namespace))) {
+      requireArray(payload, "entries", "catalog");
+      const classifications = ["user", "pg_catalog", "information_schema", "temporary", "toast", "other_system"];
+      if (!["user", "all"].includes(payload.scope) || payload.namespaces.some(namespace => !nonEmptyString(namespace))
+          || payload.entries.some(entry => !isObject(entry) || !nonEmptyString(entry.name) || !classifications.includes(entry.classification) || typeof entry.system !== "boolean")) {
         throw new ApiContractError("The catalog response contains an invalid namespace", { contract: "catalog", payload });
       }
     } else if (kind === "relations" || Object.hasOwn(payload, "relations")) {
       requireArray(payload, "relations", "catalog");
-      if (payload.relations.some(relation => !isObject(relation) || !nonEmptyString(relation.name))) {
+      requireArray(payload, "entries", "catalog");
+      const kinds = ["table", "partitioned_table", "view", "materialized_view", "foreign_table"];
+      if (!nonEmptyString(payload.namespace) || payload.relations.some(relation => !isObject(relation) || !nonEmptyString(relation.name) || !kinds.includes(relation.kind))
+          || payload.entries.some(relation => !isObject(relation) || relation.relation !== relation.name || relation.profileId !== payload.profileId
+          || relation.database !== payload.database || relation.namespace !== payload.namespace || !kinds.includes(relation.kind))) {
         throw new ApiContractError("The catalog response contains an invalid relation", { contract: "catalog", payload });
       }
     } else if (!nonEmptyString(payload.relation) && !nonEmptyString(payload.fingerprint)) {

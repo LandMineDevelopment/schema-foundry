@@ -177,7 +177,7 @@ class Client:
 def run_attempt(client: Client, schema_id: str, model: Model, scenario: dict[str, Any]) -> tuple[dict[str, Any], float]:
     model_payload = {"providerId": model.provider_id, "modelId": model.model_id}
     session = client.request("POST", "/api/ai/sessions", {
-        "title": f"Live contract: {scenario['name']}", "model": model_payload,
+        "schemaId": schema_id, "accessLevel": "metadata", "model": model_payload,
     })
     session_id = session["id"]
     started = time.monotonic()
@@ -185,8 +185,6 @@ def run_attempt(client: Client, schema_id: str, model: Model, scenario: dict[str
         response = client.request("POST", f"/api/ai/sessions/{quote(session_id, safe='')}/messages", {
             "text": scenario["prompt"],
             "model": model_payload,
-            "schemaId": schema_id,
-            "accessLevel": "metadata",
         })
         return response, time.monotonic() - started
     finally:

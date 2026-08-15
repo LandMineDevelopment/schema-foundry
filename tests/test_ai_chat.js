@@ -121,30 +121,27 @@ assert.match(libraryLoader, /postgresProfileRepository\.list\(\)/, "schema libra
 assert.doesNotMatch(libraryLoader, /namespaces|password/, "opening the schema library must not contact PostgreSQL or expose credentials");
 
 assert.match(source, /if \(!confirm\(confirmationText\)\) return;/, "write actions must require explicit confirmation");
+const confirmationFlow = source.slice(source.indexOf("async function confirmAiAction"), source.indexOf("async function handleSchemiiAiOperationResult"));
+assert.doesNotMatch(confirmationFlow, /type === "data_read"[\s\S]{0,400}confirm\(/, "structured reads must not ask once before the proposal-wide confirmation");
+assert.doesNotMatch(confirmationFlow, /type === "migration_apply"[^\n]*&&[^\n]*confirm\(/, "destructive migration wording must be folded into the one proposal-wide confirmation");
+assert.match(confirmationFlow, /confirmationText[\s\S]*type === "migration_apply" && aiActionPayload\(action\)\.destructive[\s\S]*if \(!confirm\(confirmationText\)\) return;/, "destructive AI migration apply must retain one explicit destructive confirmation");
 assert.match(source, /Apply this separately reviewed PostgreSQL write/, "AI PostgreSQL writes must require a separate apply confirmation");
 assert.match(source, /This preview does not write/, "AI PostgreSQL preview confirmation must not imply write authorization");
 assert.match(source, /Previewed, no changes applied/, "successful write previews must not be labeled as completed writes");
-assert.match(source, /Inserted \$\{result\.insertedRowCount\} row\(s\)/, "successful insert cards must show the authoritative inserted row count");
+assert.match(source, /Submitted \$\{result\.submittedRowCount\} row\(s\)/, "successful insert cards must show submitted rows separately from PostgreSQL command count");
 assert.match(source, /if \(!confirm\("Run this generated read-only SQL query/, "every AI SQL query must require confirmation");
 assert.doesNotMatch(html, /allow-session/, "session-wide AI SQL approval must not be available");
 assert.match(source, /aiAccessIncludes\(context\.accessLevel, "rawread"\) && aiAccessIncludes\(elements\.aiAccessSelect\.value, "rawread"\)/, "SQL actions must require both captured and current raw-read permission");
 assert.match(source, /!aiAccessIncludes\(context\.accessLevel, "rawread"\) \|\| !aiAccessIncludes\(elements\.aiAccessSelect\.value, "rawread"\)/, "query execution must reject stale raw-read permission");
-assert.match(html, /id="ai-schema-permission"[^>]*type="checkbox"/, "schema permission must be an explicit checkbox");
-assert.match(html, /id="ai-data-read-permission"[^>]*type="checkbox"/, "data-read permission must be an explicit checkbox");
-assert.match(html, /id="ai-write-permission"[^>]*type="checkbox"/, "data-write permission must be an explicit checkbox");
-assert.match(html, /id="ai-raw-read-permission"[^>]*type="checkbox"/, "raw-read permission must be an explicit checkbox");
-assert.match(html, /id="ai-raw-write-permission"[^>]*type="checkbox"/, "raw-write permission must be an explicit checkbox");
-for (const id of ["ai-schema-approval", "ai-data-read-approval", "ai-write-approval", "ai-raw-read-approval", "ai-raw-write-approval"]) {
-  assert.match(html, new RegExp(`id="${id}"`), `${id} must expose approval frequency`);
-}
-assert.match(html, /value="once_per_chat"/, "approval controls must support once-per-chat grants");
-assert.match(html, /value="automatic"/, "approval controls must support server-owned automatic execution");
-assert.match(source, /permissions\.join\("-"\)/, "checked permissions must form one combined chat capability set");
+assert.doesNotMatch(html, /id="ai-(?:schema|data-read|write|raw-read|raw-write)-permission"/, "Schemii must not retain browser-owned per-chat capability checkboxes");
+assert.match(html, /class="ai-policy-summary"[\s\S]*data-ai="access"[^>]*type="hidden"/, "Schemii must show server policy while keeping session capability narrowing non-editable");
+assert.match(shared, /disabled: "Disabled"[\s\S]*every_action: "Every action"[\s\S]*once_per_chat: "Once per chat"[\s\S]*automatic: "Automatic"/, "shared policy settings must expose every supported mode");
+assert.match(source, /function syncSchemiiAiPolicy[\s\S]*settings\?\.capabilities\?\.\[name\]\?\.effectiveMode !== "disabled"/, "Schemii session capabilities must derive from effective server policy");
 assert.doesNotMatch(html, /SQL policy|ai-sql-policy/, "read approval must not require a redundant SQL policy control");
 assert.match(source, /postgresProfileForm\.clearPassword\(\)|postgresProfileForm\.fill\(profile\)/, "connection workflows must clear the password field through the shared form contract");
 assert.match(shared, /proposalRequest\(proposal, "execute", body\)/, "confirmed proposals must execute through the server-owned operation boundary");
-assert.match(source, /buildSessionPayload: \(context, accessLevel, model\) => \(\{[\s\S]*schemaId: context\.schemaId, accessLevel/, "Schemii session creation must send context fields for server-owned canonical binding");
-assert.match(source, /approvals: currentAiApprovals\(\)/, "session creation must persist approval policy on the server");
+assert.match(source, /buildSessionPayload: \(context, accessLevel, model\) => \(\{[\s\S]*schemaId: context\.schemaId, accessLevel/, "Schemii session creation must send narrowing context fields for server-owned canonical binding");
+assert.doesNotMatch(source.slice(source.indexOf("buildSessionPayload:"), source.indexOf("parseSession:", source.indexOf("buildSessionPayload:"))), /approvals|configuredMode|effectiveMode/, "session creation must not resubmit or broaden server-owned modes");
 assert.doesNotMatch(source, /createSessionTitle:/, "Schemii must not create authorization-bearing session titles in the browser");
 assert.doesNotMatch(source, /\^SCHEMII_CONTEXT:/, "Schemii must use application-owned chat records instead of parsing authorization from titles");
 assert.match(source, /const accessLevel = Array\.isArray\(session\.capabilities\)/, "history binding must use server-owned chat capabilities");
@@ -172,15 +169,22 @@ const targetContext = vm.createContext({
   postgresState: { selectedProfileId: null, namespace: "", profiles: [] },
   schema: { postgres: { sourceProfileId: "tutorial", namespace: "bookstore" } }
 });
-vm.runInContext(`${source.slice(targetResolverStart, targetResolverEnd)}\nthis.currentAiPostgresTarget = currentAiPostgresTarget;`, targetContext);
+vm.runInContext(`${source.slice(targetResolverStart, targetResolverEnd)}\nthis.currentAiPostgresTarget = currentAiPostgresTarget; this.completeAiPostgresTarget = completeAiPostgresTarget; this.aiSessionUsesTarget = aiSessionUsesTarget;`, targetContext);
 assert.equal(targetContext.currentAiPostgresTarget().profileId, "tutorial", "AI queries must use the design's linked profile when the connection dialog has not been opened");
 assert.equal(targetContext.currentAiPostgresTarget().namespace, "bookstore", "AI queries must use the design's linked namespace when the connection dialog has not been opened");
 targetContext.postgresState.selectedProfileId = "reporting";
+targetContext.postgresState.aiTargetExplicit = true;
 targetContext.postgresState.namespace = "analytics";
-targetContext.postgresState.profiles = [{ id: "reporting", dbname: "reports", contextFingerprint: "0123456789abcdef" }];
+targetContext.postgresState.profiles = [{ id: "reporting", dbname: "reports", contextFingerprint: "0123456789abcdef".repeat(4) }];
 assert.equal(targetContext.currentAiPostgresTarget().profileId, "reporting", "an explicitly selected profile must override the linked design profile");
 assert.equal(targetContext.currentAiPostgresTarget().namespace, "analytics", "an explicitly selected namespace must override the linked design namespace");
-assert.equal(targetContext.currentAiPostgresTarget().profileFingerprint, "0123456789abcdef", "AI target binding must use the server-issued redacted profile fingerprint");
+assert.equal(targetContext.currentAiPostgresTarget().profileFingerprint, "0123456789abcdef".repeat(4), "AI target binding must use the server-issued redacted profile fingerprint");
+assert.equal(targetContext.aiSessionUsesTarget("schema", targetContext.completeAiPostgresTarget()), true, "schema-only chats must retain an available exact target for migration work");
+targetContext.postgresState.aiTargetExplicit = false;
+targetContext.schema = { projectName: "Local design" };
+assert.equal(targetContext.completeAiPostgresTarget(), null, "local-only designs must not inherit a prior transient PostgreSQL target");
+assert.equal(targetContext.aiSessionUsesTarget("schema", null), false, "local schema assistance must remain targetless");
+assert.equal(targetContext.aiSessionUsesTarget("structured", null), false, "data permissions must never serialize a partial target");
 assert.doesNotMatch(targetResolverStart >= 0 ? source.slice(targetResolverStart, targetResolverEnd) : "", /aiContextFingerprint\(\[profile\./, "the browser must not independently derive profile identity");
 const queryExecutor = source.slice(source.indexOf("async function executeAiReadQuery"), source.indexOf("async function sendAiMessage"));
 assert.match(queryExecutor, /currentTarget\.profileId !== context\.profileId/, "actions must recheck the effective PostgreSQL profile");
@@ -191,6 +195,11 @@ assert.match(queryExecutor, /Tool error for SQL:/, "failed SQL must be returned 
 assert.match(queryExecutor, /await sendAiMessage\(text, "tool"\)/, "failed SQL feedback must continue through the bounded assistant context");
 assert.match(source, /handleSchemiiAiOperationResult/, "Schemii must consume only allow-listed server operation results");
 assert.match(source, /card\.querySelectorAll\("\.ai-action-error"\).*remove/, "repeated review attempts must replace prior validation errors");
+assert.match(shared, /function invalidateContext[\s\S]*state\.requestGeneration \+= 1/, "application context changes must invalidate in-flight assistant responses");
+assert.match(shared, /contextKey\(capture, capturedAccess\) !== contextKey\(currentCapture, currentAccess\)/, "proposal execution must reject stale application context at click time");
+assert.match(shared, /control\.disabled = busy \|\| control\.dataset\.aiUnavailable === "true"/, "shared busy-state updates must preserve application-disabled permission controls");
+assert.match(shared, /AI provider/, "provider status must not look like a PostgreSQL connection count");
+assert.match(source, /targetCapabilities = new Set[\s\S]*targetAvailable \|\| !targetCapabilities\.has\(name\)/, "local designs must narrow target-dependent server capabilities");
 const messageRenderer = source.slice(source.indexOf("function appendAiMessage"), source.indexOf("function aiActionSummary"));
 assert.match(shared, /body\.textContent = String\(text/, "chat text must render with textContent");
 assert.match(messageRenderer, /function appendAiQueryResult/, "structured SQL results must have a dedicated chat renderer");
@@ -209,9 +218,7 @@ assert.match(styles, /\.schema-library-connection/, "saved schema cards must dis
 assert.match(styles, /\.main-layout\.ai-open \.tool-rail/, "AI chat must visually replace the left tool rail");
 assert.match(sharedStyles, /\.ai-query-result-scroll \{[^}]*overflow: auto/, "wide or long query results must scroll inside the chat panel");
 assert.match(sharedStyles, /\.ai-query-result-table th \{[^}]*position: sticky/, "query result column headings must remain visible while scrolling");
-assert.match(sharedStyles, /\.ai-context-bar \.ai-permissions fieldset \{[^}]*right: 0;[^}]*width: min\(320px, calc\(100vw - 26px\)\)/, "permissions menu must be wide, right-aligned, and viewport-safe");
-assert.match(sharedStyles, /\.ai-context-bar \.ai-permissions label \{[^}]*grid-template-columns: auto minmax\(0, 1fr\) 112px/, "permission rows must align checkboxes, labels, and approval selectors");
-assert.match(sharedStyles, /\.ai-context-bar \.ai-permissions \{[^}]*align-self: end/, "permissions trigger must align with the model selector rather than its label");
+assert.match(sharedStyles, /\.ai-context-bar \.ai-permissions, \.ai-context-bar \.ai-policy-summary \{[^}]*align-self: end/, "the policy summary must align with the model selector");
 assert.match(shared, /elements\.prompt\.disabled = busy \|\| !state\.available \|\| !elements\.model\.value/, "chat input must remain disabled until a provider model is connected");
 assert.match(shared, /Connect a provider in settings to start chatting/, "chat must explain how to enable a provider");
 assert.match(shared, /free \? "Free access"/, "anonymous free providers must be identified accurately");
@@ -262,7 +269,14 @@ const disclosureEnd = source.indexOf("const aiAssistant =", disclosureStart);
 const disclosureElements = {
   aiAccessSelect: { value: "schema-structured-write-rawread-rawwrite" }, aiFunctionCaveat: { hidden: false }, aiAccessDisclosure: { textContent: "" }, aiPermissionsSummary: { textContent: "" }
 };
-const disclosureContext = vm.createContext({ elements: disclosureElements });
+const disclosureContext = vm.createContext({
+  elements: disclosureElements,
+  aiState: { settings: { capabilities: {} } },
+  completeAiPostgresTarget: () => ({ profileId: "local", database: "demo", namespace: "public" }),
+  aiAccessNeedsTarget: access => ["structured", "write", "rawread", "rawwrite"].some(permission => access.split("-").includes(permission)),
+  postgresTargetPresentation: () => ({ label: "Linked", identity: "Demo (local) · demo.public", freshness: "Saved schema link" }),
+  window: { SchemiiShared: { formatTargetPresentation: target => `${target.label}: ${target.identity} · Source: ${target.freshness}` } },
+});
 vm.runInContext(`${source.slice(disclosureStart, disclosureEnd)}\nthis.updateAiAccessDisclosure = updateAiAccessDisclosure;`, disclosureContext);
 disclosureContext.updateAiAccessDisclosure();
 assert.match(disclosureElements.aiAccessDisclosure.textContent, /schema, data read, data write, raw read, raw write/, "combined permissions must be disclosed together");

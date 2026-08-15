@@ -1215,3 +1215,4 @@ dialog textarea { font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consola
 .standalone-sql-workspace .standalone-sql-editor-content footer button:not(.button):hover:not(:disabled) { color: var(--accent-bright); border-color: #3f78a3; background: #132533; }
 .standalone-sql-save-dialog :is(input,select,textarea):focus { border-color: var(--accent); box-shadow: var(--focus-ring); }
 .standalone-sql-save-dialog .button-ghost:hover { color: var(--accent-bright); border-color: #3f78a3; background: #132533; }
+.standalone-sql-result-actions{display:flex;gap:7px;padding:8px 10px;border-top:1px solid #24303c;background:#0d141c}.standalone-sql-result-actions button{min-height:28px;padding:0 10px;border:1px solid #315d7d;border-radius:4px;color:#b8dff7;background:#132533;cursor:pointer}

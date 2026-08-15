@@ -11,6 +11,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .schemer_ai_actions import normalize_schemer_action
+from .ai_operation_maintenance import AiOperationMaintenance, AiOperationMaintenanceConfig, OperationLeaseLost
 from .ai_http import AiHttpRouter, authority_call, issue_ai_proposals
 from .dashboard_store import DashboardStore, DashboardStoreError
 from .http_common import make_local_app_handler, metadata_profile_dependencies
@@ -21,6 +22,7 @@ from .secret_file import read_secret_file
 from .postgres_http import (
     POSTGRES_CATALOG_CAPABILITY,
     POSTGRES_CONSOLE_CAPABILITY,
+    POSTGRES_CONSOLE_WRITE_CAPABILITY,
     POSTGRES_PROFILE_CAPABILITY,
     POSTGRES_READ_SQL_CAPABILITY,
     POSTGRES_RELATION_QUERY_CAPABILITY,
@@ -29,6 +31,7 @@ from .postgres_http import (
     PostgresHttpMixin,
 )
 from .postgres_service import PostgresService, PostgresServiceError
+from .postgres_console import ConsolePolicy
 from .schemer_ai import (
     SCHEMER_AI_SKILLS,
     SCHEMER_AI_SYSTEM_INSTRUCTIONS,
@@ -38,14 +41,15 @@ from .schemer_ai import (
 from .schemer_metadata_authority import SchemerMetadataAuthority, retire_legacy_schemer_authority
 from .schemer_ai_executor import SchemerAiExecutor
 from .widget_query import QueryValidationError, normalize_query
+from .query_type_capabilities import snapshot_column
 from .readiness import readiness_report
 
 
 def _configured_ai_widget(service, action, operation_id, widget_count):
     source = action["source"]
     descriptor = service.inspect_relation(source["profileId"], source["database"], source["namespace"], source["relation"], source["kind"], source["fingerprint"])
-    columns = [{key: column[key] for key in ("name", "type", "nullable", "ordinal")} for column in descriptor["columns"]]
-    verified_source = {key: descriptor[key] for key in ("profileId", "database", "namespace", "relation", "kind", "fingerprint")} | {"columns": columns}
+    columns = [snapshot_column(column) for column in descriptor["columns"]]
+    verified_source = {key: descriptor[key] for key in ("profileId", "database", "namespace", "relation", "kind", "fingerprint")} | {"snapshotVersion": 2, "columns": columns}
     try:
         query = normalize_query(action["query"], columns)
     except QueryValidationError as error:
@@ -109,7 +113,8 @@ def _saved_widget_projection(configuration):
         "sort": [item for item in query["sort"] if item["targetId"] in target_ids],
     }
 from .schemer_examples import mercury_dashboard_from_service
-from .server_runtime import begin_http_shutdown, parse_port, parse_proxy_setting, run_server, validate_static_directory
+from .server_runtime import begin_http_shutdown, parse_port, parse_proxy_setting, postgres_runtime_config, run_server, validate_static_directory
+from .postgres_concurrency import PostgresExecutionController
 
 
 def _ai_catalog_sources(service: PostgresService, record: dict, target: dict[str, str] | None) -> list[dict]:
@@ -144,10 +149,19 @@ def _ai_catalog_sources(service: PostgresService, record: dict, target: dict[str
             "profileId": descriptor["profileId"], "database": descriptor["database"], "namespace": descriptor["namespace"],
             "relation": descriptor["relation"], "kind": descriptor["kind"], "fingerprint": descriptor["fingerprint"],
             "columns": [
-                {key: column[key] for key in ("name", "type", "nullable", "ordinal", "suggestions") if key in column}
+                {
+                    **{key: column[key] for key in ("name", "type", "nullable", "ordinal", "suggestions") if key in column},
+                    **({"capabilities": {
+                        **{key: column["capabilities"][key] for key in ("groupable", "distinct", "sortable", "numeric", "temporal", "capabilityFingerprint")},
+                        "filterOperators": [item["name"] for item in column["capabilities"]["filterOperators"]],
+                        "aggregates": [item["name"] for item in column["capabilities"]["aggregates"]],
+                    }} if "capabilities" in column else {}),
+                }
                 for column in descriptor.get("columns", [])
             ],
         }
+        if descriptor.get("snapshotVersion") == 2:
+            safe["snapshotVersion"] = 2
         size = len(json.dumps(safe, ensure_ascii=True, separators=(",", ":")).encode("utf-8"))
         if size > 12 * 1024 or used_bytes + size > 28 * 1024:
             continue
@@ -174,6 +188,7 @@ def make_handler(
     ai_service: OpenCodeService | None = None,
     dependency_schema_store: SchemaStore | None = None,
     behind_loopback_proxy: bool = False,
+    ai_maintenance: AiOperationMaintenance | None = None,
 ):
     base_handler = make_local_app_handler(
         web_dir, service, session_token, server_id=server_id, behind_loopback_proxy=behind_loopback_proxy,
@@ -192,6 +207,9 @@ def make_handler(
         lambda handler, current_service, session_id: handler._ai_activity(current_service, session_id),
         lambda handler, current_service, session_id: handler._ai_delete_session(current_service, session_id),
         proposal_operations=frozenset({"execute", "reconcile"}),
+        settings_handler=lambda handler, body: authority_call(
+            handler, ai_authority.get_settings if body is None else lambda: ai_authority.update_settings(body),
+        ),
     )
     ai_executor = SchemerAiExecutor(
         service, dashboard_store, ai_authority,
@@ -199,11 +217,12 @@ def make_handler(
     )
 
     class SchemerHandler(PostgresHttpMixin, base_handler):
+        postgres_console_policy = ConsolePolicy(allow_write=True, human_write_intent=True)
         postgres_route_policy = PostgresRoutePolicy(
             "schemer",
             frozenset({
                 POSTGRES_PROFILE_CAPABILITY, POSTGRES_CATALOG_CAPABILITY, POSTGRES_RELATION_QUERY_CAPABILITY,
-                POSTGRES_READ_SQL_CAPABILITY, POSTGRES_CONSOLE_CAPABILITY,
+                POSTGRES_READ_SQL_CAPABILITY, POSTGRES_CONSOLE_CAPABILITY, POSTGRES_CONSOLE_WRITE_CAPABILITY,
             }),
             read_sql=ReadSqlRoutePolicy(
                 require_database=True, require_profile_fingerprint=True,
@@ -447,7 +466,7 @@ def make_handler(
             parsed = urlparse(self.path)
             path = parsed.path
             if path == "/api/readiness":
-                status, report = readiness_report(ai_authority, ai_service, service)
+                status, report = readiness_report(ai_authority, ai_service, service, ai_maintenance)
                 return self.send_json(status, report)
             if self._handle_common_get(path):
                 return
@@ -576,14 +595,27 @@ def make_handler(
                     raise OpenCodeServiceError(400, "validation_error", "AI history context is invalid")
                 dashboard_id = query.get("dashboardId", [None])[0]
                 access_level = query.get("accessLevel", [None])[0]
-                if set(query) - {"dashboardId", "accessLevel", "profileId", "database", "namespace"} or access_level not in {"metadata", "dashboard", "data"}:
+                base_fields = {"dashboardId", "accessLevel"}
+                target_fields = {"profileId", "database", "namespace"}
+                if access_level not in {"metadata", "dashboard", "data"} or set(query) != (base_fields | target_fields if access_level == "data" else base_fields):
                     raise OpenCodeServiceError(400, "validation_error", "AI history context is invalid")
+                target = {}
+                if access_level == "data":
+                    profile_id = query["profileId"][0]
+                    database = PostgresService._validate_database(query["database"][0])
+                    namespace = PostgresService._validate_namespace(query["namespace"][0])
+                    selected = next((item for item in service.list_profiles() if item.get("id") == profile_id), None)
+                    if selected is None or selected.get("dbname") != database:
+                        raise OpenCodeServiceError(404, "not_found", "AI chat target was not found")
+                    target = {
+                        "profileId": profile_id, "database": database, "namespace": namespace,
+                        "profileFingerprint": service.profile_context_fingerprint(profile_id),
+                    }
                 if session_id is None:
-                    # Query fields narrow presentation only; metadata remains authoritative.
                     identities = {item.get("id"): item for item in current_ai_service.list_sessions().get("sessions", [])}
                     sessions = []
                     for chat in ai_authority.list_chats(dashboard_id if isinstance(dashboard_id, str) else None):
-                        if chat["accessLevel"] != access_level:
+                        if chat["accessLevel"] != access_level or chat["target"] != target:
                             continue
                         identity = identities.get(chat["externalSessionId"])
                         if identity is not None:
@@ -594,6 +626,8 @@ def make_handler(
                             })
                     return {"sessions": sessions}
                 chat = self._ai_chat(session_id)
+                if chat["dashboardId"] != dashboard_id or chat["accessLevel"] != access_level or chat["target"] != target:
+                    raise OpenCodeServiceError(409, "session_context_changed", "The AI conversation belongs to a different dashboard, disclosure level, or data target")
                 result = current_ai_service.session_messages(chat["externalSessionId"])
                 pending = []
                 for proposal in ai_authority.pending_proposals(session_id):
@@ -628,7 +662,7 @@ def make_handler(
             try:
                 chat = self._ai_chat(session_id)
                 proposal_record = ai_authority.proposal(proposal_id, session_id)
-                if proposal_record["policyBinding"] != ai_authority.policy_binding(chat, proposal_record["action"]):
+                if chat.get("policySnapshot") is None and proposal_record["policyBinding"] != ai_authority.policy_binding(chat, proposal_record["action"]):
                     raise MetadataStoreError("chat_policy_changed", "Proposal policy no longer matches this chat", status=409)
                 operation, approval = ai_authority.authorize_and_claim(
                     proposal_id, session_id, proposal_record["policyBinding"]["policyRevision"], body.get("confirmation"),
@@ -652,33 +686,48 @@ def make_handler(
             action = proposal_record["action"]
             attempt_id = operation.pop("attemptId")
             claim_token = operation.pop("claimToken")
+            if ai_maintenance is not None:
+                ai_maintenance.track(operation["id"], attempt_id, claim_token)
+
+            def finish_claim(state, *, result=None, error=None):
+                try:
+                    if ai_maintenance is not None:
+                        ai_maintenance.assert_owned(attempt_id)
+                    return ai_authority.finish_operation(attempt_id, claim_token, state, result=result, error=error), False
+                except OperationLeaseLost:
+                    return ai_authority.operation(operation["id"], session_id), True
+                except MetadataStoreError as failure:
+                    if failure.code not in {"invalid_claim", "operation_not_running", "operation_lease_expired"}:
+                        raise
+                    return ai_authority.operation(operation["id"], session_id), True
+                finally:
+                    if ai_maintenance is not None:
+                        ai_maintenance.release(attempt_id)
             try:
                 if proposal_record["schemaConcurrency"] != schema_concurrency or proposal_record["authorizationTarget"] != authorization_target:
                     raise DashboardStoreError(409, "dashboard_changed", "Proposal authority binding changed; request a fresh proposal")
                 result = ai_executor.execute(
                     action, operation["id"], chat=chat, record=record, profile=profile,
                     schema_concurrency=schema_concurrency, authorization_target=authorization_target,
+                    policy_binding=proposal_record["policyBinding"],
                 )
             except (OpenCodeServiceError, DashboardStoreError, PostgresServiceError, MetadataStoreError) as error:
                 payload = error.payload if hasattr(error, "payload") else error.to_dict()
                 uncertain = isinstance(error, DashboardStoreError) and error.status >= 500
-                finished = ai_authority.finish_operation(
-                    attempt_id, claim_token, "uncertain" if uncertain else "failed", error=payload["error"],
-                )
-                return self.send_json(getattr(error, "status", 400), {"operation": finished, "approval": approval})
+                finished, lost = finish_claim("uncertain" if uncertain else "failed", error=payload["error"])
+                return self.send_json(409 if lost else getattr(error, "status", 400), {"operation": finished, "approval": approval})
             except Exception:
-                finished = ai_authority.finish_operation(
-                    attempt_id, claim_token, "uncertain",
+                finished, lost = finish_claim("uncertain",
                     error={"code": "execution_outcome_unknown", "message": "Operation outcome is uncertain; reload authoritative state"},
                 )
-                return self.send_json(500, {"operation": finished, "approval": approval})
-            finished = ai_authority.finish_operation(
-                attempt_id, claim_token, "succeeded", result=result,
-            )
-            return self.send_json(200, {"operation": finished, "approval": approval})
+                return self.send_json(409 if lost else 500, {"operation": finished, "approval": approval})
+            finished, lost = finish_claim("succeeded", result=result)
+            return self.send_json(409 if lost else 200, {"operation": finished, "approval": approval})
 
         def do_PUT(self):
             path = urlparse(self.path).path
+            if ai_router.handle_put(self, path):
+                return
             dashboard_id = self._dashboard_id(path)
             if dashboard_id is not None:
                 if not self._authorize_dashboard():
@@ -723,7 +772,19 @@ def main() -> None:
     if not 1 <= ai_timeout <= 300:
         raise SystemExit("SCHEMER_OPENCODE_TIMEOUT must be from 1 to 300 seconds")
     validate_static_directory(web_dir)
-    service = PostgresService(config_dir, application_name="schemer")
+    postgres_config = postgres_runtime_config(os.environ)
+    service = PostgresService(
+        config_dir, application_name="schemer",
+        plan_ttl_seconds=postgres_config.migration_plan_ttl_seconds,
+        temporal_manifest_ttl_seconds=postgres_config.temporal_manifest_ttl_seconds,
+        console_transaction_maximum=postgres_config.console_transaction_maximum,
+        console_transaction_idle_seconds=postgres_config.console_transaction_idle_seconds,
+        console_transaction_lifetime_seconds=postgres_config.console_transaction_lifetime_seconds,
+        execution_controller=PostgresExecutionController(
+            postgres_config.class_capacities, global_capacity=postgres_config.global_capacity,
+            target_capacity=postgres_config.target_capacity,
+        ),
+    )
     dashboard_store = DashboardStore(dashboard_dir)
     try:
         metadata_config = MetadataConfig.from_env()
@@ -733,6 +794,12 @@ def main() -> None:
         metadata_store.health()
     except (ValueError, MetadataStoreError) as error:
         raise SystemExit(f"Schemer metadata readiness failed: {error}") from error
+    try:
+        maintenance_config = AiOperationMaintenanceConfig.from_env()
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
+    ai_maintenance = AiOperationMaintenance(metadata_store, maintenance_config)
+    service.set_metadata_store(metadata_store)
     retire_legacy_schemer_authority(config_dir)
     try:
         mercury_template = mercury_dashboard_from_service(service)
@@ -765,7 +832,8 @@ def main() -> None:
         dashboard_store,
         secrets.token_urlsafe(32),
         server_id=server_id,
-        ai_authority=SchemerMetadataAuthority(metadata_store, worker_id=f"schemer-{server_id}"),
+        ai_authority=SchemerMetadataAuthority(metadata_store, worker_id=f"schemer-{server_id}", lease_seconds=maintenance_config.lease_seconds),
+        ai_maintenance=ai_maintenance,
         dependency_schema_store=SchemaStore(
             Path(os.environ.get("SCHEMII_SCHEMA_DIR", "~/.local/share/schemii/schemas")).expanduser().resolve(),
             read_only=True,
@@ -773,7 +841,7 @@ def main() -> None:
         ai_service=ai_service,
         behind_loopback_proxy=behind_loopback_proxy,
     )
-    run_server(host, port, handler, "Schemer", server_factory=ThreadingHTTPServer, shutdown_callback=service.close)
+    run_server(host, port, handler, "Schemer", server_factory=ThreadingHTTPServer, shutdown_callback=service.close, lifecycle_services=(ai_maintenance,))
 
 
 if __name__ == "__main__":

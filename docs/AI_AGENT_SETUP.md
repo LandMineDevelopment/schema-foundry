@@ -54,6 +54,10 @@ Do not replace a launcher command with partial direct Compose commands. Launcher
 
 Application container health checks call `/api/readiness`, not the static root. The report keeps required metadata health separate from optional OpenCode and last-observed target health and includes process-local PostgreSQL admission metrics. Schemer depends on metadata migration and its own configured optional services; it does not depend on Schemii health.
 
+Both application processes read the same PostgreSQL runtime controls: global capacity defaults to `12`, exact-target capacity to `4`, and catalog/read/Console/write class capacities to `8`/`8`/`4`/`1`. Override them with `SCHEMII_POSTGRES_GLOBAL_CAPACITY`, `SCHEMII_POSTGRES_TARGET_CAPACITY`, and `SCHEMII_POSTGRES_{CATALOG,READ,CONSOLE,WRITE}_CAPACITY`; target capacity must remain below global capacity. Explicit Console transactions default to maximum `4`, idle expiry `300` seconds, and absolute lifetime `1800` seconds. `SCHEMII_CONSOLE_TRANSACTION_MAXIMUM` is capped at `64`, `SCHEMII_CONSOLE_TRANSACTION_IDLE_SECONDS` at `86400`, and `SCHEMII_CONSOLE_TRANSACTION_LIFETIME_SECONDS` at `604800`; idle must not exceed lifetime. `SCHEMII_MIGRATION_PLAN_TTL_SECONDS` defaults to `900`, while the separate `SCHEMII_TEMPORAL_MANIFEST_TTL_SECONDS` defaults to `300`. All must be positive integers. Current checked-in Compose files do not forward host values for these new names; an advanced operator must add them explicitly to each enabled application's service environment. These are process admission/retention and connection lifecycle controls, not PostgreSQL statement or lock policy and not user-owned Console/AI settings. PostgreSQL's stricter `idle_in_transaction_session_timeout` remains authoritative.
+
+AI operation maintenance uses `SCHEMII_AI_MAINTENANCE_` plus `INTERVAL_SECONDS` (`30`), `HEARTBEAT_SECONDS` (`20`), `LEASE_SECONDS` (`90`), `OPERATION_STALE_SECONDS` (`0`), `RESERVATION_STALE_SECONDS` (`300`), `DELIVERY_STALE_SECONDS` (`120`), `CLEANUP_RETENTION_SECONDS` (`604800`), `RECOVERY_BATCH_SIZE` (`100`), and `CLEANUP_BATCH_SIZE` (`500`). Heartbeat must be less than half the lease. Readiness reports maintenance health; do not declare AI write/recovery behavior healthy while it is degraded.
+
 Rerun the same launcher command to start or update an installation. For Git updates:
 
 ```bash
@@ -151,10 +155,10 @@ HTTP clients are optional host tools. Never print or persist the body from `/api
 
 Launcher-created volumes are scoped under the printed instance:
 
-- `schemii-config`: profiles, stored passwords, migration history, example state
+- `schemii-config`: shared profile credentials and non-authoritative local/example compatibility state
 - `schemii-schemas`: saved designs and user-owned layout
 - `schemii-postgres`: included database data
-- `schemii-metadata-postgres`: application authority and metadata, separate from user target data
+- `schemii-metadata-postgres`: authoritative chats, versioned AI settings/policy snapshots, grants, proposals, operations/leases, Console settings/receipts, migration plans/executions, and bounded result references, separate from user target data
 - `schemii-opencode-data`: provider credentials and chats
 - `schemii-opencode-config` and `schemii-opencode-state`: OpenCode configuration/state
 - `schemii-opencode-cache`: recreatable cache
@@ -195,6 +199,8 @@ Use **Save & test** when possible. Before any introspection, SQL, preview, or ap
 
 Do not preview or apply against an inferred target.
 
+PostgreSQL owns permissions, SQL semantics, and role/database/session `statement_timeout`. The applications retain connection-establishment and external HTTP/provider deadlines, narrow namespace mutation lock waits only when PostgreSQL is looser, and may narrow statement duration only for an explicitly bound AI `operationTimeoutMs`. Treat privilege calculations as advisory and preserve PostgreSQL SQLSTATE, primary message, detail, hint, phase, rollback, and retry/reconciliation diagnostics when troubleshooting.
+
 ## Embedded AI Boundary
 
 Read `docs/AI_ASSISTANT.md` before changing AI behavior. Keep OpenCode pinned, private, and Basic-authenticated. Schemii sessions are restricted to read-only `/workspace` with six Schemii skills; Schemer sessions are restricted to read-only `/workspace-schemer` with four Schemer skills. The applications share provider credentials but retain separate sessions, tools, instructions, and action policies.
@@ -217,4 +223,4 @@ A new launcher instance chooses a free instance-specific UI port unless `SCHEMII
 
 ## Completion Report
 
-Report the selected mode, printed URL, instance name, services started, whether PostgreSQL or a model provider was contacted, persistent volumes in use, verification performed, and uncommitted changes. Never include passwords, provider credentials, or session tokens.
+Report the selected mode, printed URL, instance name, services started, whether PostgreSQL or a model provider was contacted, persistent volumes in use, verification performed, and uncommitted changes. Report suite results separately rather than embedding volatile test counts in durable docs. Verify documentation with any repository documentation/link checks and `git diff --check`; server/API changes still require exact-origin `/`, `/api/session` (body never printed), readiness, and affected-route smoke checks in both enabled products. Never include passwords, provider credentials, or session tokens.

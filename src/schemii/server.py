@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .ai_metadata_authority import SchemiiMetadataAuthority, retire_legacy_schemii_authority
+from .ai_operation_maintenance import AiOperationMaintenance, AiOperationMaintenanceConfig, OperationLeaseLost
 from .schemii_ai_actions import normalize_schemii_action
 from .ai_tool_contracts import effective_schemii_contract
 from .ai_schema_mutations import apply_schema_actions, destructive_impact
@@ -37,7 +38,8 @@ from .postgres_service import PostgresService, PostgresServiceError
 from .postgres_console import ConsolePolicy
 from .schema_store import SchemaStore, SchemaStoreError
 from .schemii_ai_executor import SchemiiAiExecutor
-from .server_runtime import begin_http_shutdown, parse_port, parse_proxy_setting, run_server, validate_static_directory
+from .server_runtime import begin_http_shutdown, parse_port, parse_proxy_setting, postgres_runtime_config, run_server, validate_static_directory
+from .postgres_concurrency import PostgresExecutionController
 from .readiness import readiness_report
 
 
@@ -92,19 +94,45 @@ If an enabled proposal tool does not execute, explain that no proposal was creat
 Use only exact logical IDs from availableProjects when opening existing projects. Do not use shell, filesystem, web, or task tools."""
 
 
-def _normalize_schemii_action_for_record(action, access, record, service=None):
+def _normalize_schemii_action_for_record(action, access, record, service=None, authorization_target=None):
     normalized = normalize_schemii_action(action, access)
     if normalized["type"] == "delete_element":
         try:
             normalized["impact"] = destructive_impact(record, normalized)
         except SchemaStoreError as error:
             raise ValueError("destructive target changed") from error
-    if normalized["type"] in {"open_connection", "migration_preview", "insert_rows_preview", "create_view_preview"}:
+    if normalized["type"] in {"open_connection", "migration_preview", "insert_rows_preview", "create_view_preview", "data_read"}:
         if service is None:
             raise ValueError("PostgreSQL service is unavailable")
         profile = next((item for item in service.list_profiles() if item.get("id") == normalized["profileId"]), None)
         if profile is None:
             raise ValueError("PostgreSQL profile is unavailable")
+        if normalized["type"] == "data_read":
+            target = authorization_target or {}
+            if (
+                normalized["profileId"] != target.get("profileId")
+                or normalized["namespace"] != target.get("namespace")
+                or profile.get("dbname") != target.get("database")
+                or service.profile_context_fingerprint(profile["id"]) != target.get("profileFingerprint")
+            ):
+                raise ValueError("structured data-read target does not match the chat")
+            descriptor = service.inspect_relation(
+                profile["id"], profile["dbname"], normalized["namespace"], normalized["relation"],
+            )
+            if service.profile_context_fingerprint(profile["id"]) != target["profileFingerprint"]:
+                raise ValueError("PostgreSQL profile identity changed during relation inspection")
+            normalized["database"] = profile["dbname"]
+            normalized["profileFingerprint"] = target["profileFingerprint"]
+            normalized["source"] = {
+                "profileId": profile["id"], "database": profile["dbname"],
+                "namespace": normalized["namespace"], "relation": normalized["relation"],
+                "kind": descriptor["kind"], "fingerprint": descriptor["fingerprint"],
+                "columns": [
+                    {key: column[key] for key in ("name", "type", "nullable", "ordinal")}
+                    for column in descriptor["columns"]
+                ],
+            }
+            return normalized
         if normalized["type"] == "open_connection" and (profile.get("name"), profile.get("dbname")) != (normalized["name"], normalized["database"]):
             raise ValueError("PostgreSQL profile identity changed")
         normalized["database"] = profile.get("dbname")
@@ -298,6 +326,7 @@ def make_handler(
     example_installer: ExampleInstaller | None = None,
     dependency_dashboard_store: DashboardStore | None = None,
     behind_loopback_proxy: bool = False,
+    ai_maintenance: AiOperationMaintenance | None = None,
 ):
     migration_coordinator = migration_coordinator or getattr(service, "_migration_coordinator", None)
     base_handler = make_local_app_handler(
@@ -318,10 +347,19 @@ def make_handler(
         lambda handler, current_service, session_id: handler._ai_delete_session(current_service, session_id),
         lambda handler, current_service, session_id, body: handler._ai_policy(current_service, session_id, body),
         proposal_operations=frozenset({"execute", "reconcile"}),
+        settings_handler=lambda handler, body: authority_call(
+            handler, ai_authority.get_settings if body is None else lambda: ai_authority.update_settings(body),
+        ),
     )
+    def bound_ai_policy(chat, action, *, origin="model"):
+        capability, _ = effective_schemii_contract(action)
+        if chat.get("policySnapshot") is not None:
+            return ai_authority.policy_binding(chat, action, capability or "schema", origin=origin)
+        return _ai_policy_binding(chat, action, origin=origin)
+
     ai_executor = SchemiiAiExecutor(
         service, store, ai_authority, mutation_types=AI_SCHEMA_MUTATION_TYPES,
-        has_access=_has_ai_access, policy_binding=_ai_policy_binding,
+        has_access=_has_ai_access, policy_binding=bound_ai_policy,
     )
 
     class SchemiiHandler(PostgresHttpMixin, base_handler):
@@ -333,21 +371,29 @@ def make_handler(
             }),
             read_sql=ReadSqlRoutePolicy(),
         )
-        postgres_console_policy = ConsolePolicy(allow_write=True)
+        postgres_console_policy = ConsolePolicy(allow_write=True, human_write_intent=True)
 
         def _ai_create_session(self, current_ai_service, body):
             def create():
                 base_fields = {"model", "schemaId", "accessLevel"}
-                data_fields = base_fields | {"profileId", "database", "namespace"}
+                target_fields = {"profileId", "database", "namespace"}
                 approval_fields = {"approvals"} if "approvals" in body else set()
                 access = body.get("accessLevel") if isinstance(body, dict) else None
                 has_data_permission = access in AI_ACCESS_LEVELS and any(_has_ai_access(access, permission) for permission in ("structured", "write", "rawread", "rawwrite"))
-                if access not in AI_ACCESS_LEVELS or set(body) != (data_fields if has_data_permission else base_fields) | approval_fields:
+                supplied_target_fields = set(body) & target_fields
+                target_allowed = has_data_permission or access == "schema"
+                if access not in AI_ACCESS_LEVELS or not base_fields <= set(body) or set(body) - (base_fields | target_fields | approval_fields) or (supplied_target_fields and not target_allowed):
                     raise OpenCodeServiceError(400, "validation_error", "AI session context is invalid")
                 schema_id = body.get("schemaId")
                 record = store.get(schema_id)
+                if supplied_target_fields and supplied_target_fields != target_fields:
+                    raise OpenCodeServiceError(400, "ai_target_incomplete", "Select one complete PostgreSQL connection and namespace for this chat")
+                if has_data_permission and supplied_target_fields != target_fields:
+                    local = not isinstance(record.get("schema", {}).get("postgres"), dict)
+                    message = "This local design is not connected to PostgreSQL; data and raw SQL permissions are unavailable" if local else "Data and raw SQL permissions require a selected PostgreSQL connection and namespace"
+                    raise OpenCodeServiceError(400, "ai_target_required", message)
                 target = {}
-                if has_data_permission:
+                if supplied_target_fields == target_fields:
                     profile_id = body.get("profileId")
                     database = PostgresService._validate_database(body.get("database"))
                     namespace = PostgresService._validate_namespace(body.get("namespace"))
@@ -366,7 +412,7 @@ def make_handler(
                 try:
                     created = current_ai_service.create_session(title, body.get("model"))
                     ai_authority.bind_external_session(chat_id, created["id"], created.get("title") or title)
-                    chat = ai_authority.activate_chat(chat_id, target, _ai_capabilities(access), body.get("approvals", _ai_approvals()))
+                    chat = ai_authority.activate_chat(chat_id, target, _ai_capabilities(access), body.get("approvals"))
                 except Exception as error:
                     try:
                         ai_authority.fail_chat(chat_id, "provider_or_activation_failed")
@@ -392,7 +438,9 @@ def make_handler(
                 access_changed = supplied_access is not None and (
                     supplied_access not in AI_ACCESS_LEVELS or set(_ai_capabilities(supplied_access)) != set(chat["capabilities"])
                 )
-                if access_changed or any(key in supplied and supplied[key] != value for key, value in expected.items()):
+                expected_target = {key: chat["target"][key] for key in ("profileId", "database", "namespace") if key in chat["target"]}
+                supplied_target = {key: supplied[key] for key in ("profileId", "database", "namespace") if key in supplied}
+                if access_changed or (supplied_target and supplied_target != expected_target) or any(key in supplied and supplied[key] != value for key, value in expected.items()):
                     raise OpenCodeServiceError(409, "session_context_changed", "The AI conversation belongs to a different schema, capability policy, or data target")
             return chat
 
@@ -476,7 +524,7 @@ def make_handler(
             parsed = urlparse(self.path)
             path = parsed.path
             if path == "/api/readiness":
-                status, report = readiness_report(ai_authority, ai_service, service)
+                status, report = readiness_report(ai_authority, ai_service, service, ai_maintenance)
                 return self.send_json(status, report)
             if self._handle_common_get(path) or self._handle_postgres_get(parsed):
                 return
@@ -568,7 +616,7 @@ def make_handler(
                     return self.send_json(503, {"error": {"code": "durable_migrations_unavailable", "message": "Durable migration metadata is unavailable"}})
                 return self._service_call(lambda: self._run_postgres_write(lambda: migration_coordinator.apply(
                     apply_match.group(2), body["reviewDigest"], body["confirmDestructive"], expected_profile_id=apply_match.group(1),
-                )))
+                ), apply_match.group(1)))
             if view_preview_match:
                 common_fields = {
                     "schemaId", "expectedSchemaRevision", "layoutToken", "database", "namespace",
@@ -593,7 +641,7 @@ def make_handler(
                         },
                     )
 
-                return self._view_mutation_call(preview_view)
+                return self._view_mutation_call(preview_view, view_preview_match.group(1))
             if view_apply_match:
                 if not isinstance(body, dict) or set(body) != {"reviewDigest", "confirmDestructive"}:
                     return self.send_json(400, {"error": {"code": "validation_error", "message": "View apply request fields are invalid"}})
@@ -602,7 +650,7 @@ def make_handler(
                     return self.send_json(503, {"error": {"code": "durable_migrations_unavailable", "message": "Durable migration metadata is unavailable"}})
                 return self._view_mutation_call(lambda: migration_coordinator.apply(
                     view_apply_match.group(2), body["reviewDigest"], body["confirmDestructive"], expected_profile_id=view_apply_match.group(1),
-                ))
+                ), view_apply_match.group(1))
             profile_id, action = profile_match.groups()
             required = {"schemaId", "expectedRevision", "layoutToken", "namespace", "allowDestructive"}
             if not isinstance(body, dict) or set(body) != required:
@@ -611,22 +659,23 @@ def make_handler(
                 return self.send_json(503, {"error": {"code": "durable_migrations_unavailable", "message": "Durable migration metadata is unavailable"}})
             return self._service_call(lambda: self._run_postgres_write(lambda: migration_coordinator.preview_full(
                 profile_id, body["namespace"], body["schemaId"], body["expectedRevision"], body["layoutToken"], body["allowDestructive"],
-            )))
+            ), profile_id))
 
-        def _view_mutation_call(self, callback):
+        def _view_mutation_call(self, callback, profile_id):
             try:
-                self.send_json(200, self._run_postgres_write(callback))
+                self.send_json(200, self._run_postgres_write(callback, profile_id))
             except SchemaStoreError as error:
                 self.send_json(error.status, error.payload)
             except PostgresServiceError as error:
                 self.send_json(error.status, error.to_dict())
 
         @staticmethod
-        def _run_postgres_write(callback):
+        def _run_postgres_write(callback, profile_id=None):
             execution = getattr(service, "execution", None)
             if execution is None:
                 return callback()
-            with execution("write"):
+            target = service.admission_target(profile_id) if profile_id is not None else None
+            with execution("write", target):
                 return callback()
 
         def _ai_message(self, current_ai_service, session_id: str, body: dict):
@@ -704,9 +753,11 @@ def make_handler(
                     ai_authority, response, application="schemii", session_id=session_id,
                     resource=schema_id, access=access_level, authorization_target=authorization_target,
                     schema_concurrency=schema_concurrency,
-                    normalize_action=lambda action, access: _normalize_schemii_action_for_record(action, access, record, service),
+                    normalize_action=lambda action, access: _normalize_schemii_action_for_record(
+                        action, access, record, service, authorization_target,
+                    ),
                     batch_action_types=AI_SCHEMA_MUTATION_TYPES,
-                    policy_binding=lambda action: _ai_policy_binding(chat, action),
+                    policy_binding=lambda action: bound_ai_policy(chat, action),
                     preflight=lambda action: self._preflight_ai_schema_action(action, record, chat, schema_concurrency),
                 )
                 for proposal in issued.get("proposals", []):
@@ -750,14 +801,20 @@ def make_handler(
                 access_level = query.get("accessLevel", [None])[0]
                 schema_id = query.get("schemaId", [None])[0]
                 base_fields = {"schemaId", "accessLevel"}
-                data_fields = base_fields | {"profileId", "database", "namespace"}
+                target_fields = {"profileId", "database", "namespace"}
                 has_data_permission = any(_has_ai_access(access_level, permission) for permission in ("structured", "write", "rawread", "rawwrite"))
-                if access_level not in AI_ACCESS_LEVELS or set(query) != (data_fields if has_data_permission else base_fields):
+                supplied_target_fields = set(query) & target_fields
+                target_allowed = has_data_permission or access_level == "schema"
+                if access_level not in AI_ACCESS_LEVELS or not base_fields <= set(query) or set(query) - (base_fields | target_fields) or (supplied_target_fields and not target_allowed):
                     raise OpenCodeServiceError(400, "validation_error", "AI history context is invalid")
+                if supplied_target_fields and supplied_target_fields != target_fields:
+                    raise OpenCodeServiceError(400, "ai_target_incomplete", "Select one complete PostgreSQL connection and namespace for AI history")
+                if has_data_permission and supplied_target_fields != target_fields:
+                    raise OpenCodeServiceError(400, "ai_target_required", "Data and raw SQL history requires a selected PostgreSQL connection and namespace")
                 supplied = {key: values[0] for key, values in query.items()}
                 if session_id is None:
                     target = {}
-                    if has_data_permission:
+                    if supplied_target_fields == target_fields:
                         profile_id = query["profileId"][0]
                         database = PostgresService._validate_database(query["database"][0])
                         namespace = PostgresService._validate_namespace(query["namespace"][0])
@@ -844,8 +901,13 @@ def make_handler(
             try:
                 proposal_record = ai_authority.proposal(proposal_id, session_id)
                 policy = proposal_record["policyBinding"]
-                expected_policy = _ai_policy_binding(chat, proposal_record["action"], origin=policy.get("origin", "model"))
-                if policy != expected_policy:
+                if chat.get("policySnapshot") is not None and (
+                    proposal_record["schemaConcurrency"] != schema_concurrency or
+                    proposal_record["authorizationTarget"] != authorization_target
+                ):
+                    raise MetadataStoreError("authority_binding_mismatch", "Proposal resource or target binding changed; request a fresh proposal", status=409)
+                expected_policy = bound_ai_policy(chat, proposal_record["action"], origin=policy.get("origin", "model"))
+                if chat.get("policySnapshot") is None and policy != expected_policy:
                     raise MetadataStoreError("chat_policy_changed", "Proposal approval policy no longer matches this chat", status=409)
                 operation, approval = ai_authority.authorize_and_claim(
                     proposal_id, session_id, policy_revision, confirmation,
@@ -858,10 +920,27 @@ def make_handler(
             action = proposal_record["action"]
             attempt_id = operation.pop("attemptId")
             claim_token = operation.pop("claimToken")
+            if ai_maintenance is not None:
+                ai_maintenance.track(operation["id"], attempt_id, claim_token)
+
+            def finish_claim(state, *, result=None, error=None):
+                try:
+                    if ai_maintenance is not None:
+                        ai_maintenance.assert_owned(attempt_id)
+                    return ai_authority.finish_operation(attempt_id, claim_token, state, result=result, error=error), False
+                except OperationLeaseLost:
+                    return ai_authority.operation(operation["id"], session_id), True
+                except MetadataStoreError as failure:
+                    if failure.code not in {"invalid_claim", "operation_not_running", "operation_lease_expired"}:
+                        raise
+                    return ai_authority.operation(operation["id"], session_id), True
+                finally:
+                    if ai_maintenance is not None:
+                        ai_maintenance.release(attempt_id)
             try:
                 result = self._execute_schemii_action(
                     action, session_id, schema_id, record, profile, authorization_target,
-                    schema_concurrency, operation["id"], access,
+                    schema_concurrency, operation["id"], access, policy,
                 )
                 if action.get("type") in {"migration_apply", "postgres_write_apply"} and isinstance(result, dict):
                     durable_state = result.get("state")
@@ -877,14 +956,14 @@ def make_handler(
                 payload = error.payload if hasattr(error, "payload") else error.to_dict()
                 action_type = action.get("type")
                 uncertain = payload["error"].get("code") == "execution_outcome_unknown"
-                finished = ai_authority.finish_operation(attempt_id, claim_token, "uncertain" if uncertain else "failed", error=payload["error"])
-                return getattr(error, "status", 400), {"operation": finished, "approval": approval}
+                finished, lost = finish_claim("uncertain" if uncertain else "failed", error=payload["error"])
+                return (409 if lost else getattr(error, "status", 400)), {"operation": finished, "approval": approval}
             except Exception:
-                finished = ai_authority.finish_operation(attempt_id, claim_token, "uncertain",
+                finished, lost = finish_claim("uncertain",
                     error={"code": "execution_outcome_unknown", "message": "Operation outcome is uncertain; reload authoritative state"})
-                return 500, {"operation": finished, "approval": approval}
-            finished = ai_authority.finish_operation(attempt_id, claim_token, "succeeded", result=result)
-            return 200, {"operation": finished, "approval": approval}
+                return (409 if lost else 500), {"operation": finished, "approval": approval}
+            finished, lost = finish_claim("succeeded", result=result)
+            return (409 if lost else 200), {"operation": finished, "approval": approval}
 
         def _ai_proposal_envelope(self, proposal, session_id, chat):
             envelope = {
@@ -899,12 +978,13 @@ def make_handler(
                 envelope["approval"] = automatic.get("approval")
             return envelope
 
-        def _execute_schemii_action(self, action, session_id, schema_id, record, profile, authorization_target, schema_concurrency, operation_id, access):
+        def _execute_schemii_action(self, action, session_id, schema_id, record, profile, authorization_target, schema_concurrency, operation_id, access, policy_binding=None):
             return ai_executor.execute(
                 action, session_id, schema_id, record, profile, authorization_target,
                 schema_concurrency, operation_id, access,
                 session_binding=self.postgres_session_binding, server_id=self.postgres_server_id,
                 console_policy=self.postgres_console_policy, proposal_envelope=self._ai_proposal_envelope,
+                policy_binding=policy_binding,
             )
 
         def do_PUT(self):
@@ -961,7 +1041,19 @@ def main() -> None:
     if not 1 <= ai_timeout <= 300:
         raise SystemExit("SCHEMII_OPENCODE_TIMEOUT must be from 1 to 300 seconds")
     validate_static_directory(web_dir)
-    service = PostgresService(config_dir, application_name="schemii")
+    postgres_config = postgres_runtime_config(os.environ)
+    service = PostgresService(
+        config_dir, application_name="schemii",
+        plan_ttl_seconds=postgres_config.migration_plan_ttl_seconds,
+        temporal_manifest_ttl_seconds=postgres_config.temporal_manifest_ttl_seconds,
+        console_transaction_maximum=postgres_config.console_transaction_maximum,
+        console_transaction_idle_seconds=postgres_config.console_transaction_idle_seconds,
+        console_transaction_lifetime_seconds=postgres_config.console_transaction_lifetime_seconds,
+        execution_controller=PostgresExecutionController(
+            postgres_config.class_capacities, global_capacity=postgres_config.global_capacity,
+            target_capacity=postgres_config.target_capacity,
+        ),
+    )
     store = SchemaStore(schema_dir)
     try:
         metadata_config = MetadataConfig.from_env()
@@ -971,7 +1063,13 @@ def main() -> None:
         metadata_store.health()
     except (ValueError, MetadataStoreError) as error:
         raise SystemExit(f"Schemii metadata readiness failed: {error}") from error
+    try:
+        maintenance_config = AiOperationMaintenanceConfig.from_env()
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
+    ai_maintenance = AiOperationMaintenance(metadata_store, maintenance_config)
     migration_coordinator = DurableMigrationCoordinator(service, metadata_store, store)
+    service.set_metadata_store(metadata_store)
     service.set_migration_coordinator(migration_coordinator)
     retire_legacy_schemii_authority(config_dir)
     try:
@@ -1000,7 +1098,8 @@ def main() -> None:
         store,
         secrets.token_urlsafe(32),
         server_id=server_id,
-        ai_authority=SchemiiMetadataAuthority(metadata_store, worker_id=f"schemii-{server_id}"),
+        ai_authority=SchemiiMetadataAuthority(metadata_store, worker_id=f"schemii-{server_id}", lease_seconds=maintenance_config.lease_seconds),
+        ai_maintenance=ai_maintenance,
         dependency_dashboard_store=DashboardStore(
             Path(os.environ.get("SCHEMER_DASHBOARD_DIR", "~/.local/share/schemer/dashboards")).expanduser().resolve(),
             read_only=True,
@@ -1010,7 +1109,7 @@ def main() -> None:
         example_installer=example_installer,
         behind_loopback_proxy=behind_loopback_proxy,
     )
-    run_server(host, port, handler, "Schemii", server_factory=ThreadingHTTPServer, shutdown_callback=service.close)
+    run_server(host, port, handler, "Schemii", server_factory=ThreadingHTTPServer, shutdown_callback=service.close, lifecycle_services=(ai_maintenance,))
 
 
 if __name__ == "__main__":

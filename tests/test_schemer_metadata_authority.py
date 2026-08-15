@@ -4,12 +4,14 @@ import uuid
 from pathlib import Path
 
 from schemii.schemer_metadata_authority import SchemerMetadataAuthority, retire_legacy_schemer_authority
+from schemii.ai_policy import default_policy, effective_capabilities, policy_digest
 
 
 class MetadataDouble:
     def __init__(self):
         self.chat_id = str(uuid.uuid4())
         self.calls = []
+        self.current_policy = None
 
     def provision_chat(self, *args):
         self.calls.append(("provision", args))
@@ -17,6 +19,16 @@ class MetadataDouble:
 
     def activate_chat(self, *args, **kwargs):
         self.calls.append(("activate", args, kwargs))
+        self.current_policy = kwargs["policy"]
+
+    def get_agent_settings(self, application, agent):
+        policy = default_policy(application)
+        policy["capabilities"] = {name: "every_action" for name in policy["capabilities"]}
+        return {
+            "application": application, "agentId": agent, "revision": 1, "schemaVersion": 1,
+            "policyRevisionId": str(uuid.UUID(int=2)), "policyDigest": policy_digest(policy),
+            "capabilities": effective_capabilities(application, policy), "effectiveBounds": dict(policy["bounds"]),
+        }
 
     def get_chat(self, chat_id):
         return {
@@ -27,7 +39,8 @@ class MetadataDouble:
     def get_current_policy(self, chat_id):
         return {
             "revision": 1,
-            "policy": {"accessLevel": "dashboard", "capabilities": ["dashboard", "metadata"]},
+            "policy": self.current_policy or {"accessLevel": "dashboard", "capabilities": ["dashboard", "metadata"]},
+            "agentPolicyRevisionId": str(uuid.UUID(int=2)) if self.current_policy else None,
         }
 
 
@@ -42,8 +55,9 @@ class SchemerMetadataAuthorityTests(unittest.TestCase):
         self.assertEqual(metadata.calls[0], ("provision", ("schemer", "dashboard", "dashboard_one")))
         activation = metadata.calls[1]
         self.assertIsNone(activation[1][1])
-        self.assertEqual(activation[2]["policy"]["accessLevel"], "dashboard")
-        self.assertEqual(activation[2]["capabilities"], {"metadata": "approval", "dashboard": "approval", "data": "deny"})
+        self.assertEqual(activation[2]["policy"]["disclosureClass"], "dashboard")
+        self.assertEqual(activation[2]["capabilities"], {"structured_read": "deny", "dashboard_read": "approval", "dashboard_write": "approval"})
+        self.assertEqual(activation[2]["agent_policy_binding"]["schemaVersion"], 1)
         self.assertEqual(chat["id"], metadata.chat_id)
 
     def test_data_target_uses_server_fingerprint_and_connected_binding(self):

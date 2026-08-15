@@ -44,6 +44,30 @@ class ConflictError(PostgresServiceError):
         super().__init__(409, code, message)
 
 
+def _bounded_diagnostic_text(value: Any, limit: int = 1000) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = " ".join(value[:4000].split())
+    # PostgreSQL frequently quotes rejected input values in primary/detail text.
+    value = re.sub(r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"", "[redacted]", value)
+    value = re.sub(r"Key \([^)]*\)=\([^)]*\)", "Key ([redacted])=([redacted])", value, flags=re.I)
+    value = re.sub(r"Failing row contains \([^)]*\)", "Failing row contains ([redacted])", value, flags=re.I)[:limit]
+    return value or None
+
+
+def _safe_postgres_context(value: Any) -> str | None:
+    """Keep location-only PostgreSQL context, never embedded SQL statements or values."""
+    text = _bounded_diagnostic_text(value, 500)
+    if not text or any(marker in text.lower() for marker in ("sql statement", "query:", "parameters:")):
+        return None
+    safe_lines = []
+    for line in str(value).splitlines()[:8]:
+        line = " ".join(line.split())
+        if re.fullmatch(r'(?:PL/pgSQL|SQL) function [A-Za-z0-9_."() ,]+ line [0-9]+(?: at (?:assignment|RETURN|PERFORM|RAISE|IF|CALL))?', line):
+            safe_lines.append(line[:250])
+    return "; ".join(safe_lines) or None
+
+
 def postgres_error_diagnostic(exc: Exception) -> dict[str, Any]:
     """Return a bounded PostgreSQL diagnostic safe for an HTTP response."""
     diagnostic = getattr(exc, "diag", None)
@@ -52,17 +76,56 @@ def postgres_error_diagnostic(exc: Exception) -> dict[str, Any]:
     if isinstance(sqlstate, str) and re.fullmatch(r"[0-9A-Z]{5}", sqlstate):
         result["sqlstate"] = sqlstate
     for source, target in (("message_primary", "message"), ("message_detail", "detail"), ("message_hint", "hint")):
-        value = getattr(diagnostic, source, None)
-        if isinstance(value, str):
-            value = " ".join(value[:4000].split())[:1000]
-            if value:
-                result[target] = value
+        value = _bounded_diagnostic_text(getattr(diagnostic, source, None))
+        if value:
+            result[target] = value
     position = getattr(diagnostic, "statement_position", None)
     if isinstance(position, str) and position.isdigit():
         position = int(position)
     if isinstance(position, int) and not isinstance(position, bool) and 1 <= position <= 100_000:
         result["position"] = position
+    context = _safe_postgres_context(getattr(diagnostic, "context", None))
+    if context:
+        result["context"] = context
     return result
+
+
+def _bounded_evidence(value: Any, *, depth: int = 0) -> Any:
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        return max(-1_000_000_000, min(1_000_000_000, value))
+    if isinstance(value, str):
+        return _bounded_diagnostic_text(value, 200)
+    if isinstance(value, dict) and depth < 2:
+        result = {}
+        for key, item in list(value.items())[:12]:
+            if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9]{0,31}", key):
+                continue
+            if any(secret in key.lower() for secret in ("password", "credential", "secret", "token", "sql", "query", "definition", "value")):
+                continue
+            bounded = _bounded_evidence(item, depth=depth + 1)
+            if bounded is not None:
+                result[key] = bounded
+        return result
+    return None
+
+
+def postgres_error_details(
+    exc: Exception,
+    *,
+    phase: str | None = None,
+    operation: str | None = None,
+    rollback: dict[str, Any] | None = None,
+    retry: dict[str, Any] | bool | None = None,
+) -> dict[str, Any]:
+    """Build the one safe HTTP details envelope for a PostgreSQL exception."""
+    details: dict[str, Any] = {"postgres": postgres_error_diagnostic(exc)}
+    for key, value in (("phase", phase), ("operation", operation), ("rollback", rollback), ("retry", retry)):
+        bounded = _bounded_evidence(value)
+        if bounded not in (None, {}, ""):
+            details[key] = bounded
+    return details
 
 
 def quote_identifier(value: str) -> str:
@@ -70,6 +133,21 @@ def quote_identifier(value: str) -> str:
     if not isinstance(value, str) or not value or "\x00" in value:
         raise ValidationError("SQL identifier must be a non-empty string")
     return '"' + value.replace('"', '""') + '"'
+
+
+def narrow_statement_timeout(cursor: Any, timeout_ms: int | None, *, local: bool = True) -> None:
+    """Install an application timeout only when it narrows PostgreSQL's effective policy."""
+    if timeout_ms is None:
+        return
+    if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or timeout_ms < 1:
+        raise ValueError("timeout_ms must be a positive integer or None")
+    cursor.execute(
+        """SELECT pg_catalog.set_config('statement_timeout',
+               CASE WHEN pg_catalog.current_setting('statement_timeout') = '0'
+                      OR pg_catalog.current_setting('statement_timeout')::interval > (%s || ' milliseconds')::interval
+                    THEN %s || 'ms' ELSE pg_catalog.current_setting('statement_timeout') END, %s)""",
+        (timeout_ms, timeout_ms, local),
+    )
 
 
 def _canonical_value(value: Any) -> Any:

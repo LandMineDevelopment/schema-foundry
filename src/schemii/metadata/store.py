@@ -10,6 +10,7 @@ from typing import Any, Callable, Iterator
 
 from .errors import MetadataStoreError
 from .migrator import MetadataMigrator, validate_applied_migrations
+from ..migration_contract import has_full_schema_completeness_proof
 from .validation import bounded_json, identity
 
 
@@ -52,6 +53,348 @@ class MetadataStore:
                 details={"currentVersion": version, "expectedVersion": expected},
             )
         return {"ok": True, "version": version, "expectedVersion": expected}
+
+    def create_agent_settings(self, application_id: str, agent_id: str, policy: Any) -> dict[str, Any]:
+        from ..ai_policy import effective_capabilities, policy_digest, validate_policy
+
+        application = identity(application_id, "application_id")
+        agent = identity(agent_id, "agent_id")
+        document = validate_policy(application, policy)
+        capabilities = effective_capabilities(application, document)
+        revision_id = uuid.uuid4()
+        with self._transaction() as cursor:
+            cursor.execute(
+                """INSERT INTO metadata_agent_settings (application_id, agent_id, current_revision)
+                   VALUES (%s, %s, 1) ON CONFLICT (application_id, agent_id) DO NOTHING""",
+                (application, agent),
+            )
+            if cursor.rowcount:
+                self._insert_agent_policy_revision(
+                    cursor, revision_id, application, agent, 1, document, capabilities, policy_digest(document),
+                )
+            return self._get_agent_settings(cursor, application, agent)
+
+    def get_agent_settings(self, application_id: str, agent_id: str) -> dict[str, Any]:
+        from ..ai_policy import default_policy
+
+        application = identity(application_id, "application_id")
+        agent = identity(agent_id, "agent_id")
+        with self._transaction() as cursor:
+            cursor.execute(
+                "SELECT 1 FROM metadata_agent_settings WHERE application_id = %s AND agent_id = %s",
+                (application, agent),
+            )
+            if cursor.fetchone() is None:
+                document = default_policy(application)
+                from ..ai_policy import effective_capabilities, policy_digest
+                revision_id = uuid.uuid4()
+                cursor.execute(
+                    """INSERT INTO metadata_agent_settings (application_id, agent_id, current_revision)
+                       VALUES (%s, %s, 1) ON CONFLICT (application_id, agent_id) DO NOTHING""",
+                    (application, agent),
+                )
+                if cursor.rowcount:
+                    self._insert_agent_policy_revision(
+                        cursor, revision_id, application, agent, 1, document,
+                        effective_capabilities(application, document), policy_digest(document),
+                    )
+            return self._get_agent_settings(cursor, application, agent)
+
+    def update_agent_settings(
+        self, application_id: str, agent_id: str, expected_revision: Any, policy: Any,
+    ) -> dict[str, Any]:
+        from ..ai_policy import effective_capabilities, policy_digest, validate_policy
+
+        application = identity(application_id, "application_id")
+        agent = identity(agent_id, "agent_id")
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 1:
+            raise MetadataStoreError("invalid_metadata", "expectedRevision is invalid", status=400)
+        document = validate_policy(application, policy)
+        capabilities = effective_capabilities(application, document)
+        digest = policy_digest(document)
+        revision_id = uuid.uuid4()
+        with self._transaction() as cursor:
+            cursor.execute(
+                """SELECT current_revision FROM metadata_agent_settings
+                   WHERE application_id = %s AND agent_id = %s FOR UPDATE""",
+                (application, agent),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise MetadataStoreError("agent_settings_not_found", "AI agent settings were not found", status=404)
+            current = int(_row_value(row, "current_revision", 0))
+            if current != expected_revision:
+                raise MetadataStoreError(
+                    "policy_changed", "AI agent policy changed; refresh before saving", status=409,
+                    details={"currentRevision": current},
+                )
+            revision = current + 1
+            self._insert_agent_policy_revision(
+                cursor, revision_id, application, agent, revision, document, capabilities, digest,
+            )
+            cursor.execute(
+                """UPDATE metadata_agent_settings SET current_revision = %s, updated_at = clock_timestamp()
+                   WHERE application_id = %s AND agent_id = %s""",
+                (revision, application, agent),
+            )
+            grant_compatible_capabilities = [
+                name for name, item in capabilities.items()
+                if item["effectiveMode"] in {"once_per_chat", "automatic"}
+            ]
+            cursor.execute(
+                """UPDATE metadata_grants g SET state = 'revoked', revoked_at = clock_timestamp()
+                   FROM metadata_policy_versions v, metadata_agent_policy_revisions r, metadata_chats c
+                   WHERE g.chat_id = v.chat_id AND g.policy_revision = v.revision
+                     AND v.agent_policy_revision_id = r.agent_policy_revision_id AND c.chat_id = g.chat_id
+                     AND r.application_id = %s AND r.agent_id = %s AND c.application_id = %s
+                     AND g.state = 'active' AND NOT (g.capability = ANY(%s::text[]))""",
+                (application, agent, application, grant_compatible_capabilities),
+            )
+            evidence = {"agentId": agent, "agentPolicyRevision": revision, "policyDigest": digest}
+            cursor.execute(
+                """UPDATE metadata_proposals p
+                   SET state = 'revoked', revoked_at = clock_timestamp(),
+                       revocation_reason = 'agent_policy_changed', revocation_evidence = %s::jsonb
+                   FROM metadata_policy_versions v, metadata_agent_policy_revisions r, metadata_chats c
+                   WHERE p.chat_id = v.chat_id AND p.policy_revision = v.revision
+                     AND v.agent_policy_revision_id = r.agent_policy_revision_id AND c.chat_id = p.chat_id
+                      AND r.application_id = %s AND r.agent_id = %s AND c.application_id = %s
+                      AND p.state = 'ready'""",
+                (_json(evidence), application, agent, application),
+            )
+            cursor.execute(
+                """UPDATE metadata_query_result_references q
+                   SET state = 'revoked', revoked_at = clock_timestamp(), revocation_reason = 'agent_policy_changed'
+                   FROM metadata_policy_versions v, metadata_agent_policy_revisions r, metadata_chats c
+                   WHERE q.chat_id = v.chat_id
+                     AND (q.binding -> 'policyBinding' ->> 'policyRevision') ~ '^[0-9]+$'
+                     AND (q.binding -> 'policyBinding' ->> 'policyRevision')::bigint = v.revision
+                     AND v.agent_policy_revision_id = r.agent_policy_revision_id AND c.chat_id = q.chat_id
+                      AND r.application_id = %s AND r.agent_id = %s AND c.application_id = %s
+                      AND q.state = 'ready'""",
+                (application, agent, application),
+            )
+            cursor.execute(
+                """UPDATE metadata_query_result_payloads p SET payload = '{}'::jsonb, byte_count = 2,
+                       scrubbed_at = clock_timestamp()
+                   FROM metadata_query_result_references q
+                   WHERE q.result_ref_id = p.result_ref_id AND q.state = 'revoked'
+                     AND q.revocation_reason = 'agent_policy_changed' AND q.revoked_at >= transaction_timestamp()"""
+            )
+            return self._get_agent_settings(cursor, application, agent)
+
+    def _insert_agent_policy_revision(
+        self, cursor: Any, revision_id: uuid.UUID, application: str, agent: str, revision: int,
+        policy: dict[str, Any], capabilities: dict[str, dict[str, str]], digest: str,
+    ) -> None:
+        cursor.execute(
+            """INSERT INTO metadata_agent_policy_revisions
+               (agent_policy_revision_id, application_id, agent_id, revision, schema_version, policy, policy_digest)
+               VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s)""",
+            (revision_id, application, agent, revision, policy["schemaVersion"], _json(policy), digest),
+        )
+        for capability, modes in capabilities.items():
+            cursor.execute(
+                """INSERT INTO metadata_agent_policy_capabilities
+                   (agent_policy_revision_id, capability, configured_mode, effective_mode, safety_floor)
+                   VALUES (%s, %s, %s, %s, %s)""",
+                (revision_id, capability, modes["configuredMode"], modes["effectiveMode"], modes["safetyFloor"]),
+            )
+        bounds = policy["bounds"]
+        cursor.execute(
+            """INSERT INTO metadata_agent_policy_bounds
+               (agent_policy_revision_id, rows_disclosed, rows_written, pages_inspected,
+                raw_statements, operation_timeout_ms, agent_concurrency)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+            (revision_id, bounds["rowsDisclosed"], bounds["rowsWritten"], bounds["pagesInspected"],
+             bounds["rawStatements"], bounds["operationTimeoutMs"], bounds["agentConcurrency"]),
+        )
+
+    def _get_agent_settings(self, cursor: Any, application: str, agent: str) -> dict[str, Any]:
+        cursor.execute(
+            """SELECT r.agent_policy_revision_id, r.revision, r.schema_version, r.policy, r.policy_digest,
+                      r.created_at, s.updated_at
+               FROM metadata_agent_settings s JOIN metadata_agent_policy_revisions r
+                 ON r.application_id = s.application_id AND r.agent_id = s.agent_id
+                AND r.revision = s.current_revision
+               WHERE s.application_id = %s AND s.agent_id = %s""",
+            (application, agent),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise MetadataStoreError("agent_settings_not_found", "AI agent settings were not found", status=404)
+        revision_id = _row_value(row, "agent_policy_revision_id", 0)
+        cursor.execute(
+            """SELECT capability, configured_mode, effective_mode, safety_floor
+               FROM metadata_agent_policy_capabilities
+               WHERE agent_policy_revision_id = %s ORDER BY capability""",
+            (revision_id,),
+        )
+        capabilities = {
+            _row_value(item, "capability", 0): {
+                "configuredMode": _row_value(item, "configured_mode", 1),
+                "effectiveMode": _row_value(item, "effective_mode", 2),
+                "safetyFloor": _row_value(item, "safety_floor", 3),
+            }
+            for item in cursor.fetchall()
+        }
+        from ..ai_policy import effective_bounds
+        policy = _json_value(_row_value(row, "policy", 3))
+        return {
+            "application": application, "agentId": agent,
+            "revision": int(_row_value(row, "revision", 1)),
+            "schemaVersion": int(_row_value(row, "schema_version", 2)),
+            "policyRevisionId": str(revision_id), "policyDigest": _row_value(row, "policy_digest", 4),
+            "policy": policy, "capabilities": capabilities, "bounds": dict(policy["bounds"]),
+            "effectiveBounds": effective_bounds(policy),
+            "createdAt": _iso_datetime(_row_value(row, "created_at", 5)),
+            "updatedAt": _iso_datetime(_row_value(row, "updated_at", 6)),
+        }
+
+    def get_console_settings(self, application_id: str) -> dict[str, Any]:
+        application = identity(application_id, "application_id")
+        with self._transaction() as cursor:
+            cursor.execute(
+                """INSERT INTO metadata_console_settings
+                   (application_id, revision, write_intent, default_mode, statement_limit, row_page_size)
+                   VALUES (%s, 1, 'disabled', 'managed_read', 20, 100)
+                   ON CONFLICT (application_id) DO NOTHING""",
+                (application,),
+            )
+            cursor.execute(
+                """SELECT application_id, revision, write_intent, default_mode, statement_limit,
+                          row_page_size, created_at, updated_at
+                   FROM metadata_console_settings WHERE application_id = %s""",
+                (application,),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise MetadataStoreError("console_settings_not_found", "Console settings were not found", status=404)
+        return _console_settings_record(row)
+
+    def update_console_settings(self, application_id: str, expected_revision: Any, settings: Any) -> dict[str, Any]:
+        application = identity(application_id, "application_id")
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 1:
+            raise MetadataStoreError("invalid_metadata", "expectedRevision is invalid", status=400)
+        fields = {"writeIntent", "defaultMode", "statementLimit", "rowPageSize"}
+        if not isinstance(settings, dict) or set(settings) != fields:
+            raise MetadataStoreError("invalid_metadata", "Console settings fields are invalid", status=400)
+        write_intent, default_mode = settings["writeIntent"], settings["defaultMode"]
+        statement_limit, row_page_size = settings["statementLimit"], settings["rowPageSize"]
+        if write_intent not in {"disabled", "enabled"} or default_mode not in {"managed_read", "managed", "explicit", "autocommit"}:
+            raise MetadataStoreError("invalid_metadata", "Console settings values are invalid", status=400)
+        invalid_limits = (
+            isinstance(statement_limit, bool) or not isinstance(statement_limit, int) or not 1 <= statement_limit <= 20
+            or isinstance(row_page_size, bool) or not isinstance(row_page_size, int) or not 1 <= row_page_size <= 500
+        )
+        if invalid_limits:
+            raise MetadataStoreError("invalid_metadata", "Console settings limits exceed operator safety maxima", status=400)
+        with self._transaction() as cursor:
+            cursor.execute(
+                """UPDATE metadata_console_settings
+                   SET revision = revision + 1, write_intent = %s, default_mode = %s,
+                       statement_limit = %s, row_page_size = %s, updated_at = clock_timestamp()
+                   WHERE application_id = %s AND revision = %s
+                   RETURNING application_id, revision, write_intent, default_mode, statement_limit,
+                             row_page_size, created_at, updated_at""",
+                (write_intent, default_mode, statement_limit, row_page_size, application, expected_revision),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute("SELECT revision FROM metadata_console_settings WHERE application_id = %s", (application,))
+                current = cursor.fetchone()
+                if current is None:
+                    raise MetadataStoreError("console_settings_not_found", "Console settings were not found", status=404)
+                raise MetadataStoreError(
+                    "console_settings_conflict", "Console settings changed; refresh before saving", status=409,
+                    details={"currentRevision": int(_row_value(current, "revision", 0))},
+                )
+        return _console_settings_record(row)
+
+    def put_console_execution_receipt(self, receipt: dict[str, Any]) -> dict[str, Any]:
+        fields = {"executionId", "applicationId", "sessionBinding", "serverId", "profileId", "profileFingerprint",
+                  "database", "namespace", "consoleId", "mode", "settingsRevision", "state", "outcome", "completedStatementIndexes",
+                  "errorCode", "postgresEvidence", "reconciliationEvidence"}
+        if not isinstance(receipt, dict) or set(receipt) != fields:
+            raise MetadataStoreError("invalid_metadata", "Console execution receipt fields are invalid", status=400)
+        execution, console = _uuid(receipt["executionId"], "execution_id"), _uuid(receipt["consoleId"], "console_id")
+        application = identity(receipt["applicationId"], "application_id")
+        binding_hash = hashlib.sha256(_bounded_text(receipt["sessionBinding"], "session_binding", 4096).encode()).hexdigest()
+        server = _bounded_text(receipt["serverId"], "server_id", 256)
+        profile = _bounded_text(receipt["profileId"], "profile_id", 256)
+        fingerprint = _digest(receipt["profileFingerprint"], "profile_fingerprint")
+        database, namespace = _bounded_text(receipt["database"], "database", 63), _bounded_text(receipt["namespace"], "namespace", 63)
+        mode, state, outcome = receipt["mode"], receipt["state"], receipt["outcome"]
+        settings_revision = receipt["settingsRevision"]
+        if settings_revision is not None and (isinstance(settings_revision, bool) or not isinstance(settings_revision, int) or settings_revision < 1):
+            raise MetadataStoreError("invalid_metadata", "Console settings revision is invalid", status=400)
+        valid = (mode in {"managed_read", "managed", "explicit", "autocommit"}
+                  and state in {"reserved", "running", "succeeded", "failed", "cancelled", "uncertain"}
+                 and outcome in {"rolled_back", "committed", "partial_committed", "transaction_open", "not_started", "uncertain"})
+        indexes = receipt["completedStatementIndexes"]
+        if not valid or not isinstance(indexes, list) or any(isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in indexes):
+            raise MetadataStoreError("invalid_metadata", "Console execution receipt state is invalid", status=400)
+        error_code = None if receipt["errorCode"] is None else identity(receipt["errorCode"], "error_code")
+        postgres = None if receipt["postgresEvidence"] is None else bounded_json(receipt["postgresEvidence"], "postgres_evidence", 16384)
+        reconciliation = None if receipt["reconciliationEvidence"] is None else bounded_json(receipt["reconciliationEvidence"], "reconciliation_evidence", 16384)
+        params = (execution, application, binding_hash, server, profile, fingerprint, database, namespace, console,
+                  mode, settings_revision, state, outcome, indexes, error_code, None if postgres is None else _json(postgres),
+                  None if reconciliation is None else _json(reconciliation))
+        with self._transaction() as cursor:
+            if state == "reserved":
+                cursor.execute("""INSERT INTO metadata_console_execution_receipts
+                    (execution_id, application_id, session_binding_hash, server_id, profile_id, profile_fingerprint,
+                     database_name, namespace_name, console_id, mode, settings_revision, state, outcome,
+                     completed_statement_indexes, error_code, postgres_evidence, reconciliation_evidence)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb)
+                    ON CONFLICT (execution_id) DO NOTHING""", params)
+                if cursor.rowcount == 0:
+                    raise MetadataStoreError(
+                        "execution_conflict", "Execution ID is already reserved", status=409,
+                    )
+            else:
+                cursor.execute("""UPDATE metadata_console_execution_receipts
+                    SET state = %s, outcome = %s, completed_statement_indexes = %s, error_code = %s,
+                        postgres_evidence = %s::jsonb, reconciliation_evidence = %s::jsonb,
+                        updated_at = clock_timestamp()
+                    WHERE execution_id = %s AND application_id = %s AND session_binding_hash = %s
+                      AND server_id = %s AND profile_id = %s AND profile_fingerprint = %s
+                      AND database_name = %s AND namespace_name = %s AND console_id = %s
+                      AND mode = %s AND settings_revision IS NOT DISTINCT FROM %s
+                      AND state IN ('reserved', 'running')""",
+                    (state, outcome, indexes, error_code, None if postgres is None else _json(postgres),
+                     None if reconciliation is None else _json(reconciliation), execution, *params[1:11]),
+                )
+                if cursor.rowcount == 0:
+                    raise MetadataStoreError(
+                        "execution_conflict", "Execution ID cannot be transitioned", status=409,
+                    )
+        return self.get_console_execution_receipt(str(execution), application, receipt["sessionBinding"], server,
+                                                  profile, fingerprint, database, namespace, str(console))
+
+    def get_console_execution_receipt(self, execution_id: str, application_id: str, session_binding: str,
+                                      server_id: str, profile_id: str, profile_fingerprint: str,
+                                      database: str, namespace: str, console_id: str) -> dict[str, Any]:
+        execution = _uuid(execution_id, "execution_id")
+        owner = (identity(application_id, "application_id"), hashlib.sha256(_bounded_text(session_binding, "session_binding", 4096).encode()).hexdigest(),
+                 _bounded_text(server_id, "server_id", 256), _bounded_text(profile_id, "profile_id", 256),
+                 _digest(profile_fingerprint, "profile_fingerprint"), _bounded_text(database, "database", 63),
+                 _bounded_text(namespace, "namespace", 63), _uuid(console_id, "console_id"))
+        with self._transaction(write=False) as cursor:
+            cursor.execute("""SELECT application_id, session_binding_hash, server_id, profile_id, profile_fingerprint,
+                database_name, namespace_name, console_id, mode, settings_revision, state, outcome, completed_statement_indexes,
+                error_code, postgres_evidence, reconciliation_evidence, created_at, updated_at
+                FROM metadata_console_execution_receipts WHERE execution_id = %s""", (execution,))
+            row = cursor.fetchone()
+        owner_names = ("application_id", "session_binding_hash", "server_id", "profile_id", "profile_fingerprint", "database_name", "namespace_name", "console_id")
+        if row is None or tuple(_row_value(row, name, index) for index, name in enumerate(owner_names)) != owner:
+            raise MetadataStoreError("execution_not_found", "Console execution status was not found", status=404)
+        return {"executionId": str(execution), "mode": _row_value(row, "mode", 8),
+                "settingsRevision": _row_value(row, "settings_revision", 9), "state": _row_value(row, "state", 10),
+                "outcome": _row_value(row, "outcome", 11), "completedStatementIndexes": list(_row_value(row, "completed_statement_indexes", 12)),
+                "errorCode": _row_value(row, "error_code", 13), "postgresEvidence": _json_value(_row_value(row, "postgres_evidence", 14)),
+                "reconciliationEvidence": _json_value(_row_value(row, "reconciliation_evidence", 15)),
+                "createdAt": _iso_datetime(_row_value(row, "created_at", 16)), "updatedAt": _iso_datetime(_row_value(row, "updated_at", 17))}
 
     def provision_chat(
         self,
@@ -119,6 +462,7 @@ class MetadataStore:
         *,
         policy: dict[str, Any] | None = None,
         capabilities: dict[str, str] | None = None,
+        agent_policy_binding: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         chat = _uuid(chat_id, "chat_id")
         safe = None if target is None else _target(target)
@@ -126,6 +470,9 @@ class MetadataStore:
         modes = None if capabilities is None else {identity(name, "capability"): mode for name, mode in capabilities.items()}
         if (document is None) != (modes is None):
             raise MetadataStoreError("invalid_metadata", "Initial policy and capabilities must be supplied together", status=400)
+        agent_binding = _agent_policy_binding(agent_policy_binding)
+        if agent_binding is not None and document is None:
+            raise MetadataStoreError("invalid_metadata", "Agent policy binding requires a chat policy snapshot", status=400)
         if modes is not None and any(mode not in {"deny", "approval", "once_per_chat", "automatic"} for mode in modes.values()):
             raise MetadataStoreError("invalid_metadata", "capability grant mode is invalid", status=400)
         with self._transaction() as cursor:
@@ -166,10 +513,16 @@ class MetadataStore:
                      safe["profileFingerprint"], safe["connectedTargetFingerprint"]),
                 )
             if document is not None:
+                if agent_binding is not None:
+                    self._validate_agent_policy_link(cursor, _row_value(row, "application_id", 0), agent_binding)
                 policy_id = uuid.uuid4()
                 cursor.execute(
-                    "INSERT INTO metadata_policy_versions (policy_version_id, chat_id, revision, policy) VALUES (%s, %s, 1, %s::jsonb)",
-                    (policy_id, chat, _json(document)),
+                    """INSERT INTO metadata_policy_versions
+                       (policy_version_id, chat_id, revision, policy, agent_policy_revision_id, agent_policy_schema_version)
+                       VALUES (%s, %s, 1, %s::jsonb, %s, %s)""",
+                    (policy_id, chat, _json(document),
+                     None if agent_binding is None else agent_binding["policyRevisionId"],
+                     None if agent_binding is None else agent_binding["schemaVersion"]),
                 )
                 for capability, mode in sorted(modes.items()):
                     cursor.execute(
@@ -225,8 +578,8 @@ class MetadataStore:
                           t.target_id, t.profile_id, t.database_name, t.namespace_name,
                           t.profile_fingerprint, t.connected_target_fingerprint, c.display_title
                    FROM metadata_chats c LEFT JOIN metadata_targets t USING (chat_id)
-                   WHERE (%s IS NULL OR c.resource_kind = %s)
-                     AND (%s IS NULL OR c.resource_id = %s)
+                   WHERE (%s::text IS NULL OR c.resource_kind = %s::text)
+                      AND (%s::text IS NULL OR c.resource_id = %s::text)
                      AND (cardinality(%s::text[]) = 0 OR c.state = ANY(%s::text[]))
                    ORDER BY c.created_at DESC, c.chat_id DESC LIMIT %s""",
                 (kind, kind, resource, resource, allowed_states, allowed_states, count),
@@ -238,7 +591,8 @@ class MetadataStore:
         chat = _uuid(chat_id, "chat_id")
         with self._transaction(write=False) as cursor:
             cursor.execute(
-                """SELECT v.policy_version_id, v.revision, v.policy, v.created_at
+                """SELECT v.policy_version_id, v.revision, v.policy, v.created_at,
+                          v.agent_policy_revision_id, v.agent_policy_schema_version
                    FROM metadata_policy_versions v WHERE v.chat_id = %s
                    ORDER BY v.revision DESC LIMIT 1""",
                 (chat,),
@@ -253,8 +607,10 @@ class MetadataStore:
             )
             capabilities = {_row_value(item, "capability", 0): _row_value(item, "grant_mode", 1) for item in cursor.fetchall()}
         return {"policyVersionId": str(policy_id), "revision": int(_row_value(row, "revision", 1)),
-                "policy": _json_value(_row_value(row, "policy", 2)), "capabilities": capabilities,
-                "createdAt": _iso_datetime(_row_value(row, "created_at", 3))}
+                 "policy": _json_value(_row_value(row, "policy", 2)), "capabilities": capabilities,
+                 "createdAt": _iso_datetime(_row_value(row, "created_at", 3)),
+                 "agentPolicyRevisionId": None if _row_optional(row, "agent_policy_revision_id", 4) is None else str(_row_optional(row, "agent_policy_revision_id", 4)),
+                 "agentPolicySchemaVersion": _row_optional(row, "agent_policy_schema_version", 5)}
 
     def list_grants(self, chat_id: str, *, active_only: bool = False) -> list[dict[str, Any]]:
         chat = _uuid(chat_id, "chat_id")
@@ -280,6 +636,7 @@ class MetadataStore:
         expected_revision: int,
         policy: dict[str, Any],
         capabilities: dict[str, str],
+        agent_policy_binding: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         chat = _uuid(chat_id, "chat_id")
         if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 0:
@@ -291,9 +648,10 @@ class MetadataStore:
         if any(mode not in {"deny", "approval", "once_per_chat", "automatic"} for mode in modes.values()):
             raise MetadataStoreError("invalid_metadata", "capability grant mode is invalid", status=400)
         policy_id = uuid.uuid4()
+        agent_binding = _agent_policy_binding(agent_policy_binding)
         revision = expected_revision + 1
         with self._transaction() as cursor:
-            cursor.execute("SELECT state FROM metadata_chats WHERE chat_id = %s FOR UPDATE", (chat,))
+            cursor.execute("SELECT state, application_id FROM metadata_chats WHERE chat_id = %s FOR UPDATE", (chat,))
             row = cursor.fetchone()
             if row is None:
                 raise MetadataStoreError("chat_not_found", "Chat was not found", status=404)
@@ -303,9 +661,15 @@ class MetadataStore:
             current = int(_row_value(cursor.fetchone(), "revision", 0))
             if current != expected_revision:
                 raise MetadataStoreError("policy_changed", "Chat policy changed; refresh required", status=409, details={"currentRevision": current})
+            if agent_binding is not None:
+                self._validate_agent_policy_link(cursor, _row_value(row, "application_id", 1), agent_binding)
             cursor.execute(
-                "INSERT INTO metadata_policy_versions (policy_version_id, chat_id, revision, policy) VALUES (%s, %s, %s, %s::jsonb)",
-                (policy_id, chat, revision, _json(document)),
+                """INSERT INTO metadata_policy_versions
+                   (policy_version_id, chat_id, revision, policy, agent_policy_revision_id, agent_policy_schema_version)
+                   VALUES (%s, %s, %s, %s::jsonb, %s, %s)""",
+                (policy_id, chat, revision, _json(document),
+                 None if agent_binding is None else agent_binding["policyRevisionId"],
+                 None if agent_binding is None else agent_binding["schemaVersion"]),
             )
             for capability, mode in sorted(modes.items()):
                 cursor.execute(
@@ -350,6 +714,8 @@ class MetadataStore:
             )
             if cursor.fetchone() is None:
                 raise MetadataStoreError("policy_changed", "Proposal must bind the current policy capability", status=409)
+            if safe_binding.get("policyBinding", {}).get("snapshot", {}).get("version") == 2:
+                self._validate_effective_proposal_binding(cursor, chat, capability_name, revision, safe_binding)
             cursor.execute(
                 """INSERT INTO metadata_proposals
                    (proposal_id, chat_id, capability, policy_revision, binding, action, expires_at)
@@ -365,7 +731,7 @@ class MetadataStore:
         with self._transaction(write=False) as cursor:
             cursor.execute(
                 """SELECT proposal_id, chat_id, capability, policy_revision, binding, action,
-                          state, created_at, expires_at
+                          state, created_at, expires_at, revoked_at, revocation_reason, revocation_evidence
                    FROM metadata_proposals WHERE proposal_id = %s""",
                 (proposal,),
             )
@@ -381,7 +747,7 @@ class MetadataStore:
         with self._transaction(write=False) as cursor:
             cursor.execute(
                 """SELECT proposal_id, chat_id, capability, policy_revision, binding, action,
-                          state, created_at, expires_at
+                          state, created_at, expires_at, revoked_at, revocation_reason, revocation_evidence
                    FROM metadata_proposals WHERE chat_id = %s
                      AND (cardinality(%s::text[]) = 0 OR state = ANY(%s::text[]))
                    ORDER BY created_at DESC, proposal_id DESC LIMIT %s""",
@@ -456,6 +822,30 @@ class MetadataStore:
             mode = _row_value(authority, "grant_mode", 0)
             grant_id = _row_value(authority, "grant_id", 2)
             binding = _json_value(_row_value(row, "binding", 4))
+            if binding.get("policyBinding", {}).get("snapshot", {}).get("version") == 2:
+                self._validate_effective_proposal_binding(cursor, chat_id, capability, revision, binding)
+                snapshot = binding["policyBinding"]["snapshot"]
+                concurrency = snapshot["bounds"]["agentConcurrency"] or 16
+                cursor.execute(
+                    "SELECT current_revision FROM metadata_agent_settings WHERE application_id = %s AND agent_id = %s FOR UPDATE",
+                    (snapshot["application"], snapshot["agentId"]),
+                )
+                settings_row = cursor.fetchone()
+                if settings_row is None or int(_row_value(settings_row, "current_revision", 0)) != snapshot["agentPolicyRevision"]:
+                    raise MetadataStoreError("agent_policy_changed", "AI agent settings changed; request a fresh proposal", status=409)
+                cursor.execute(
+                    """SELECT count(*) AS active_count FROM metadata_operations o
+                       JOIN metadata_proposals p ON p.proposal_id = o.proposal_id
+                       WHERE o.state = 'running'
+                         AND p.binding -> 'policyBinding' ->> 'application' = %s
+                         AND p.binding -> 'policyBinding' ->> 'agentId' = %s""",
+                    (snapshot["application"], snapshot["agentId"]),
+                )
+                if int(_row_value(cursor.fetchone(), "active_count", 0)) >= concurrency:
+                    raise MetadataStoreError(
+                        "agent_concurrency_exhausted", "AI agent concurrency bound is exhausted", status=409,
+                        details={"agentId": snapshot["agentId"], "maximum": concurrency},
+                    )
             effective = binding.get("policyBinding", {}).get("effectiveMode") if isinstance(binding, dict) else None
             if effective not in {"every_action", "once_per_chat", "automatic"}:
                 raise MetadataStoreError("policy_changed", "Proposal approval policy binding is invalid", status=409)
@@ -513,6 +903,50 @@ class MetadataStore:
         if row is None:
             raise MetadataStoreError("operation_not_found", "Operation was not found", status=404)
         return _operation_record(row)
+
+    def consume_operation_bound(self, operation_id: str, bound_name: str, amount: int, evidence: Any) -> dict[str, Any]:
+        operation = _uuid(operation_id, "operation_id")
+        if bound_name not in {"rowsDisclosed", "rowsWritten", "pagesInspected"}:
+            raise MetadataStoreError("invalid_metadata", "AI operation bound name is invalid", status=400)
+        if isinstance(amount, bool) or not isinstance(amount, int) or amount < 0:
+            raise MetadataStoreError("invalid_metadata", "AI operation bound amount is invalid", status=400)
+        safe_evidence = bounded_json(evidence, "evidence", 8192)
+        with self._transaction() as cursor:
+            cursor.execute(
+                """SELECT o.state, p.binding -> 'policyBinding' -> 'snapshot' -> 'bounds' ->> %s AS maximum
+                   FROM metadata_operations o JOIN metadata_proposals p USING (proposal_id)
+                   WHERE o.operation_id = %s FOR UPDATE OF o""",
+                (bound_name, operation),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise MetadataStoreError("operation_not_found", "Operation was not found", status=404)
+            if _row_value(row, "state", 0) != "running":
+                raise MetadataStoreError("operation_not_running", "AI operation is not running", status=409)
+            raw_maximum = _row_value(row, "maximum", 1)
+            maximum = None if raw_maximum is None else int(raw_maximum)
+            cursor.execute(
+                "SELECT used, evidence FROM metadata_ai_operation_usage WHERE operation_id = %s AND bound_name = %s FOR UPDATE",
+                (operation, bound_name),
+            )
+            usage = cursor.fetchone()
+            used = 0 if usage is None else int(_row_value(usage, "used", 0))
+            updated = used + amount
+            if maximum is not None and updated > maximum:
+                raise MetadataStoreError(
+                    "policy_bound_exceeded", f"AI operation exceeds the {bound_name} bound", status=422,
+                    details={"bound": bound_name, "maximum": maximum, "used": used, "requested": amount},
+                )
+            history = [] if usage is None else _json_value(_row_value(usage, "evidence", 1))
+            history.append(safe_evidence)
+            cursor.execute(
+                """INSERT INTO metadata_ai_operation_usage (operation_id, bound_name, used, evidence)
+                   VALUES (%s, %s, %s, %s::jsonb)
+                   ON CONFLICT (operation_id, bound_name) DO UPDATE
+                   SET used = EXCLUDED.used, evidence = EXCLUDED.evidence, updated_at = clock_timestamp()""",
+                (operation, bound_name, updated, _json(history)),
+            )
+        return {"operationId": str(operation), "bound": bound_name, "used": updated, "maximum": maximum}
 
     def list_operations(self, chat_id: str, *, states: list[str] | None = None, limit: int = 100) -> list[dict[str, Any]]:
         chat = _uuid(chat_id, "chat_id")
@@ -605,6 +1039,33 @@ class MetadataStore:
                 self._audit(cursor, self._application_for_chat(cursor, _row_value(row, "chat_id", 2)), "operation", operation, "running", "uncertain", "lease_abandoned_reconcile_only")
         return [str(_row_value(row, "operation_id", 1)) for row in rows]
 
+    def abandon_operation_attempt(self, attempt_id: str, claim_token: str) -> dict[str, Any]:
+        """Make an exact formerly-owned attempt uncertain without making it claimable again."""
+        attempt = _uuid(attempt_id, "attempt_id")
+        error = {"code": "lease_lost", "message": "Execution lease was lost; reconcile without replay"}
+        with self._transaction() as cursor:
+            cursor.execute(
+                "SELECT operation_id, state, claim_token_hash FROM metadata_operation_attempts WHERE attempt_id = %s FOR UPDATE",
+                (attempt,),
+            )
+            row = cursor.fetchone()
+            if row is None or not secrets.compare_digest(str(_row_value(row, "claim_token_hash", 2)), _token_hash(claim_token)):
+                raise MetadataStoreError("invalid_claim", "Execution claim is invalid", status=409)
+            operation = _row_value(row, "operation_id", 0)
+            if _row_value(row, "state", 1) != "running":
+                cursor.execute("SELECT state FROM metadata_operations WHERE operation_id = %s", (operation,))
+                return {"operationId": str(operation), "state": _row_value(cursor.fetchone(), "state", 0), "resolutionOwner": False}
+            cursor.execute("UPDATE metadata_operation_attempts SET state = 'abandoned', finished_at = clock_timestamp() WHERE attempt_id = %s", (attempt,))
+            cursor.execute(
+                "INSERT INTO metadata_operation_outcomes (outcome_id, operation_id, state, error) VALUES (%s, %s, 'uncertain', %s::jsonb) ON CONFLICT (operation_id) DO NOTHING",
+                (uuid.uuid4(), operation, _json(error)),
+            )
+            cursor.execute("UPDATE metadata_operations SET state = 'uncertain', updated_at = clock_timestamp() WHERE operation_id = %s AND state = 'running'", (operation,))
+            cursor.execute("SELECT chat_id FROM metadata_operations WHERE operation_id = %s", (operation,))
+            chat_id = _row_value(cursor.fetchone(), "chat_id", 0)
+            self._audit(cursor, self._application_for_chat(cursor, chat_id), "operation", operation, "running", "uncertain", "lease_lost_reconcile_only")
+        return {"operationId": str(operation), "state": "uncertain", "resolutionOwner": True}
+
     def resolve_uncertain_operation(
         self,
         operation_id: str,
@@ -686,7 +1147,11 @@ class MetadataStore:
             row = cursor.fetchone()
             if row is None:
                 raise MetadataStoreError("result_not_found", "Query result was not found", status=404)
-            if str(_row_value(row, "chat_id", 0)) != str(chat) or _json_value(_row_value(row, "binding", 1)) != safe_binding:
+            stored_binding = _json_value(_row_value(row, "binding", 1))
+            comparable_binding = stored_binding
+            if isinstance(stored_binding, dict) and "policyBinding" in stored_binding and "policyBinding" not in safe_binding:
+                comparable_binding = {key: value for key, value in stored_binding.items() if key != "policyBinding"}
+            if str(_row_value(row, "chat_id", 0)) != str(chat) or comparable_binding != safe_binding:
                 raise MetadataStoreError("result_binding_mismatch", "Query result binding does not match", status=403)
             if _row_value(row, "state", 2) != "ready" or not _row_value(row, "current", 3):
                 raise MetadataStoreError("result_unavailable", "Query result is not available", status=409)
@@ -787,6 +1252,8 @@ class MetadataStore:
             raise MetadataStoreError("review_digest_mismatch", "Review digest does not match the canonical review payload", status=400)
         if type(destructive) is not bool:
             raise MetadataStoreError("invalid_metadata", "destructive must be a boolean", status=400)
+        if adapter == "full_schema" and not has_full_schema_completeness_proof(private, review, live, desired):
+            raise MetadataStoreError("migration_plan_incomplete", "Durable full-schema plans require explicit completeness proof", status=409)
         ttl = _seconds(ttl_seconds, "ttl_seconds", maximum=86400)
         retention = _seconds(retention_seconds, "retention_seconds", maximum=365 * 86400)
         plan = uuid.uuid4()
@@ -883,7 +1350,8 @@ class MetadataStore:
         with self._transaction() as cursor:
             cursor.execute(
                 """SELECT review_payload, review_digest, destructive, state,
-                          expires_at > clock_timestamp() AS current
+                          expires_at > clock_timestamp() AS current, adapter_kind,
+                          private_payload, live_fingerprint, desired_fingerprint
                    FROM metadata_migration_plans WHERE plan_id = %s FOR UPDATE""",
                 (plan,),
             )
@@ -894,6 +1362,12 @@ class MetadataStore:
             canonical = canonical_review_digest(_json_value(_row_value(row, "review_payload", 0)))
             if not secrets.compare_digest(stored_digest, canonical) or not secrets.compare_digest(digest, stored_digest):
                 raise MetadataStoreError("review_digest_mismatch", "Confirmed review does not match the durable plan", status=409)
+            if _row_value(row, "adapter_kind", 5) == "full_schema" and not has_full_schema_completeness_proof(
+                _json_value(_row_value(row, "private_payload", 6)),
+                _json_value(_row_value(row, "review_payload", 0)),
+                _row_value(row, "live_fingerprint", 7), _row_value(row, "desired_fingerprint", 8),
+            ):
+                raise MetadataStoreError("migration_plan_incomplete", "Full-schema migration plan lacks explicit completeness proof", status=409)
             if _row_value(row, "destructive", 2) and not destructive_confirmed:
                 raise MetadataStoreError("destructive_confirmation_required", "Destructive plan requires explicit confirmation", status=403)
             cursor.execute("SELECT execution_id, state FROM metadata_migration_executions WHERE plan_id = %s", (plan,))
@@ -1168,18 +1642,20 @@ class MetadataStore:
             cursor.execute(
                 """UPDATE metadata_migration_plans p
                    SET private_payload = '{}'::jsonb, private_payload_redacted_at = clock_timestamp()
-                   FROM metadata_migration_executions e
-                   WHERE e.plan_id = p.plan_id
-                     AND (e.state = 'failed' OR (e.state = 'succeeded' AND EXISTS (
-                         SELECT 1 FROM metadata_migration_syncs s
-                         WHERE s.execution_id = e.execution_id AND s.state IN ('succeeded', 'conflict', 'failed')
-                     )))
-                     AND p.private_payload_redacted_at IS NULL AND p.retain_until < %s""",
-                (cutoff,),
+                   WHERE p.plan_id IN (
+                     SELECT p2.plan_id FROM metadata_migration_plans p2
+                     JOIN metadata_migration_executions e ON e.plan_id = p2.plan_id
+                     WHERE (e.state = 'failed' OR (e.state = 'succeeded' AND EXISTS (
+                          SELECT 1 FROM metadata_migration_syncs s
+                          WHERE s.execution_id = e.execution_id AND s.state IN ('succeeded', 'conflict', 'failed')
+                       ))) AND p2.private_payload_redacted_at IS NULL AND p2.retain_until < %s
+                     ORDER BY p2.retain_until LIMIT %s FOR UPDATE OF p2 SKIP LOCKED
+                   )""",
+                (cutoff, count),
             )
             deleted["planPayloadsRedacted"] = max(0, int(cursor.rowcount))
             for name, sql in (
-                ("results", "DELETE FROM metadata_query_result_references WHERE result_ref_id IN (SELECT result_ref_id FROM metadata_query_result_references WHERE state IN ('consumed', 'uncertain', 'expired') AND expires_at < %s ORDER BY expires_at LIMIT %s FOR UPDATE SKIP LOCKED)"),
+                ("results", "DELETE FROM metadata_query_result_references WHERE result_ref_id IN (SELECT result_ref_id FROM metadata_query_result_references WHERE state IN ('consumed', 'uncertain', 'expired', 'revoked') AND expires_at < %s ORDER BY expires_at LIMIT %s FOR UPDATE SKIP LOCKED)"),
                 ("plans", "DELETE FROM metadata_migration_plans WHERE plan_id IN (SELECT p.plan_id FROM metadata_migration_plans p LEFT JOIN metadata_migration_executions e USING (plan_id) WHERE e.execution_id IS NULL AND p.expires_at < %s ORDER BY p.expires_at LIMIT %s FOR UPDATE OF p SKIP LOCKED)"),
                 ("chats", "DELETE FROM metadata_chats WHERE chat_id IN (SELECT chat_id FROM metadata_chats WHERE state = 'deleted' AND deleted_at < %s ORDER BY deleted_at LIMIT %s FOR UPDATE SKIP LOCKED)"),
             ):
@@ -1219,6 +1695,72 @@ class MetadataStore:
         if row is None:
             raise MetadataStoreError("metadata_invariant", "Authority aggregate has no chat")
         return str(_row_value(row, "application_id", 0))
+
+    def _validate_agent_policy_link(self, cursor: Any, application: str, binding: dict[str, Any] | None) -> None:
+        if binding is None:
+            return
+        cursor.execute(
+            """SELECT 1 FROM metadata_agent_policy_revisions
+               WHERE agent_policy_revision_id = %s AND application_id = %s AND schema_version = %s""",
+            (binding["policyRevisionId"], application, binding["schemaVersion"]),
+        )
+        if cursor.fetchone() is None:
+            raise MetadataStoreError("agent_policy_changed", "Chat policy must link an application-owned agent policy revision", status=409)
+
+    def _validate_effective_proposal_binding(
+        self, cursor: Any, chat_id: Any, capability: str, revision: int, binding: dict[str, Any],
+    ) -> None:
+        policy_binding = binding.get("policyBinding")
+        if not isinstance(policy_binding, dict):
+            raise MetadataStoreError("authority_binding_mismatch", "Proposal policy binding is incomplete", status=409)
+        cursor.execute(
+            """SELECT c.application_id, c.resource_kind, c.resource_id, v.policy,
+                      v.agent_policy_revision_id, v.agent_policy_schema_version,
+                      t.profile_id, t.database_name, t.namespace_name, t.profile_fingerprint
+               FROM metadata_chats c JOIN metadata_policy_versions v ON v.chat_id = c.chat_id
+               LEFT JOIN metadata_targets t ON t.chat_id = c.chat_id
+               WHERE c.chat_id = %s AND v.revision = %s""",
+            (chat_id, revision),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise MetadataStoreError("policy_changed", "Proposal chat policy no longer exists", status=409)
+        snapshot = _json_value(_row_value(row, "policy", 3))
+        resource = policy_binding.get("resource")
+        target = policy_binding.get("target")
+        durable_target = {} if _row_optional(row, "profile_id", 6) is None else {
+            "profileId": _row_optional(row, "profile_id", 6), "database": _row_optional(row, "database_name", 7),
+            "namespace": _row_optional(row, "namespace_name", 8), "profileFingerprint": _row_optional(row, "profile_fingerprint", 9),
+        }
+        authority = snapshot.get("capabilities", {}).get(capability)
+        expected = {
+            "application": _row_value(row, "application_id", 0), "agentId": snapshot.get("agentId"),
+            "agentPolicyRevision": snapshot.get("agentPolicyRevision"),
+            "agentPolicyRevisionId": str(_row_value(row, "agent_policy_revision_id", 4)),
+            "agentPolicySchemaVersion": _row_value(row, "agent_policy_schema_version", 5),
+            "chatPolicyRevision": revision, "policyRevision": revision,
+            "canonicalCapability": capability, "capability": capability,
+            "configuredMode": None if authority is None else authority.get("configuredMode"),
+            "effectiveMode": None if authority is None else authority.get("effectiveMode"),
+            "safetyFloorReason": None if authority is None else authority.get("safetyFloorReason"),
+            "snapshot": snapshot, "disclosureClass": snapshot.get("disclosureClass"),
+        }
+        allowed_fields = set(expected) | {"origin", "resource", "target"}
+        if set(policy_binding) != allowed_fields or any(policy_binding.get(key) != value for key, value in expected.items()):
+            raise MetadataStoreError("authority_binding_mismatch", "Proposal policy binding does not match durable authority", status=409)
+        if not isinstance(resource, dict) or resource.get("kind") != _row_value(row, "resource_kind", 1) or resource.get("id") != _row_value(row, "resource_id", 2):
+            raise MetadataStoreError("authority_binding_mismatch", "Proposal resource binding does not match durable authority", status=409)
+        if target != durable_target or binding.get("authorizationTarget") != durable_target:
+            raise MetadataStoreError("authority_binding_mismatch", "Proposal target binding does not match durable authority", status=409)
+        if resource.get("revision") != binding.get("schemaConcurrency", {}).get("revision") or resource.get("layoutToken") != binding.get("schemaConcurrency", {}).get("layoutToken"):
+            raise MetadataStoreError("authority_binding_mismatch", "Proposal resource revision binding is inconsistent", status=409)
+        cursor.execute(
+            "SELECT current_revision FROM metadata_agent_settings WHERE application_id = %s AND agent_id = %s",
+            (snapshot.get("application"), snapshot.get("agentId")),
+        )
+        current = cursor.fetchone()
+        if current is None or int(_row_value(current, "current_revision", 0)) != snapshot.get("agentPolicyRevision"):
+            raise MetadataStoreError("agent_policy_changed", "AI agent settings changed; start a new chat", status=409)
 
     def _audit(self, cursor: Any, application_id: str, kind: str, aggregate_id: Any, from_state: str | None, to_state: str, reason: str) -> None:
         cursor.execute(
@@ -1361,6 +1903,32 @@ def _uuid(value: Any, field: str) -> uuid.UUID:
         raise MetadataStoreError("invalid_metadata", f"{field} is invalid", status=400) from exc
 
 
+def _agent_policy_binding(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {"policyRevisionId", "schemaVersion"}:
+        raise MetadataStoreError("invalid_metadata", "agent policy binding fields are invalid", status=400)
+    schema_version = value["schemaVersion"]
+    if isinstance(schema_version, bool) or not isinstance(schema_version, int) or schema_version < 1:
+        raise MetadataStoreError("invalid_metadata", "agent policy schemaVersion is invalid", status=400)
+    return {"policyRevisionId": _uuid(value["policyRevisionId"], "policy_revision_id"), "schemaVersion": schema_version}
+
+
+def _console_settings_record(row: Any) -> dict[str, Any]:
+    return {
+        "application": _row_value(row, "application_id", 0),
+        "revision": int(_row_value(row, "revision", 1)),
+        "writeIntent": _row_value(row, "write_intent", 2),
+        "defaultMode": _row_value(row, "default_mode", 3),
+        "statementLimit": int(_row_value(row, "statement_limit", 4)),
+        "rowPageSize": int(_row_value(row, "row_page_size", 5)),
+        "inheritance": "none",
+        "maxima": {"statementLimit": 20, "rowPageSize": 500},
+        "createdAt": _iso_datetime(_row_value(row, "created_at", 6)),
+        "updatedAt": _iso_datetime(_row_value(row, "updated_at", 7)),
+    }
+
+
 def canonical_review_digest(review_payload: dict[str, Any]) -> str:
     """Return the digest of the single canonical JSON representation used for review."""
     if not isinstance(review_payload, dict):
@@ -1373,6 +1941,17 @@ def _bounded_text(value: Any, field: str, maximum: int) -> str:
     if not isinstance(value, str) or not 1 <= len(value) <= maximum:
         raise MetadataStoreError("invalid_metadata", f"{field} is invalid", status=400)
     return value
+
+
+def _console_receipt_values(row: Any) -> tuple[Any, ...]:
+    names = (
+        "application_id", "session_binding_hash", "server_id", "profile_id", "profile_fingerprint",
+        "database_name", "namespace_name", "console_id", "mode", "settings_revision", "state", "outcome",
+        "completed_statement_indexes", "error_code", "postgres_evidence", "reconciliation_evidence",
+    )
+    values = tuple(_row_value(row, name, index) for index, name in enumerate(names))
+    return (*values[:14], None if values[14] is None else _json(_json_value(values[14])),
+            None if values[15] is None else _json(_json_value(values[15])))
 
 
 def _digest(value: Any, field: str) -> str:
@@ -1447,7 +2026,10 @@ def _proposal_record(row: Any) -> dict[str, Any]:
             "capability": _row_value(row, "capability", 2), "policyRevision": int(_row_value(row, "policy_revision", 3)),
             "binding": _json_value(_row_value(row, "binding", 4)), "action": _json_value(_row_value(row, "action", 5)),
             "state": _row_value(row, "state", 6), "createdAt": _iso_datetime(_row_value(row, "created_at", 7)),
-            "expiresAt": _iso_datetime(_row_value(row, "expires_at", 8))}
+            "expiresAt": _iso_datetime(_row_value(row, "expires_at", 8)),
+            "revokedAt": _iso_datetime(_row_optional(row, "revoked_at", 9)),
+            "revocationReason": _row_optional(row, "revocation_reason", 10),
+            "revocationEvidence": _json_value(_row_optional(row, "revocation_evidence", 11))}
 
 
 def _operation_record(row: Any) -> dict[str, Any]:
@@ -1526,6 +2108,12 @@ def _iso_datetime(value: Any) -> Any:
 
 def _row_value(row: Any, name: str, index: int) -> Any:
     return row[name] if isinstance(row, dict) else row[index]
+
+
+def _row_optional(row: Any, name: str, index: int) -> Any:
+    if isinstance(row, dict):
+        return row.get(name)
+    return row[index] if index < len(row) else None
 
 
 def _database_error(exc: Exception) -> MetadataStoreError:
