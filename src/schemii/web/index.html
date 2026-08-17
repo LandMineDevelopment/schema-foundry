@@ -119,6 +119,9 @@
           <button class="rail-button" id="sql-run-all-button" type="button" data-rail-workspace="sql" data-tooltip="Run all statements" aria-label="Run all statements" hidden>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 5 8 7-8 7zM14 5l6 7-6 7z"/></svg>
           </button>
+          <button class="rail-button" id="postgres-console-button" type="button" data-rail-workspace="sql" data-tooltip="Transaction Console" aria-label="Open transactional PostgreSQL Console" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="m7 10 3 2-3 2M12 15h5"/></svg>
+          </button>
           <button class="rail-button rail-stop" id="sql-stop-button" type="button" data-rail-workspace="sql" data-tooltip="Stop query" aria-label="Stop query" disabled hidden>
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1"/></svg>
           </button>
@@ -279,7 +282,7 @@
           <div class="inspector-content" id="inspector-content" hidden></div>
         </aside>
 
-        <aside class="ai-panel" id="ai-panel" role="dialog" aria-modal="true" aria-labelledby="ai-panel-title" aria-hidden="true" inert>
+        <aside class="ai-panel" id="ai-panel" role="complementary" aria-labelledby="ai-panel-title" aria-hidden="true" inert>
           <header class="ai-panel-head">
             <div>
               <span class="eyebrow">Schemii copilot</span>

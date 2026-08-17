@@ -16,10 +16,15 @@ const preserveStart = source.indexOf("function preserveTableLayout(importedSchem
 const preserveEnd = source.indexOf("async function importPostgresSchema()", preserveStart);
 const initializationStart = source.indexOf("async function initializeSchemaLibrary()");
 const initializationEnd = source.indexOf("function uid(prefix)", initializationStart);
-for (const [name, marker] of Object.entries({ storageStart, storageEnd, migrationStart, migrationEnd, preserveStart, preserveEnd, initializationStart, initializationEnd })) {
+const openSchemaStart = source.indexOf("async function openSchema(");
+const openSchemaEnd = source.indexOf("async function deleteSavedSchema(", openSchemaStart);
+for (const [name, marker] of Object.entries({ storageStart, storageEnd, migrationStart, migrationEnd, preserveStart, preserveEnd, initializationStart, initializationEnd, openSchemaStart, openSchemaEnd })) {
   assert.notEqual(marker, -1, `${name} marker is missing`);
 }
 assert.doesNotMatch(source.slice(initializationStart, initializationEnd), /fitDiagram\s*\(/, "startup must preserve the saved viewport");
+const openSchemaSource = source.slice(openSchemaStart, openSchemaEnd);
+assert.match(openSchemaSource, /\{ fit = false \}/, "opening a saved schema must preserve its viewport by default");
+assert.match(openSchemaSource, /view = clone\(schema\.layout\.layers\.tables\.viewport\)/, "opening a saved schema must restore its viewport");
 
 const context = vm.createContext({ JSON });
 vm.runInContext(`

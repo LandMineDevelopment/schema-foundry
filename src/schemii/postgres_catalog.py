@@ -51,10 +51,10 @@ class PostgresCatalogMixin:
             fingerprint_row = self._execute_rows(connection, f"""
                 /* relation_catalog_fingerprint */
                 SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(
-                    c.relkind || pg_catalog.length(c.relname)::text || ':' || c.relname, '' ORDER BY c.relname, c.relkind
+                    c.relkind::text || pg_catalog.length(c.relname)::text || ':' || c.relname, '' ORDER BY c.relname, c.relkind
                 ), '')) AS first_hash,
                 pg_catalog.md5('relation:' || COALESCE(pg_catalog.string_agg(
-                    c.relkind || pg_catalog.length(c.relname)::text || ':' || c.relname, '' ORDER BY c.relname, c.relkind
+                    c.relkind::text || pg_catalog.length(c.relname)::text || ':' || c.relname, '' ORDER BY c.relname, c.relkind
                 ), '')) AS second_hash
                 FROM pg_catalog.pg_class c
                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace

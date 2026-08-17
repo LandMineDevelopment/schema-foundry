@@ -210,12 +210,15 @@ assert.doesNotMatch(messageRenderer, /innerHTML/, "chat text must not render as 
 assert.match(html, /id="ai-provider[^" ]*"|id="ai-providers"/, "provider settings UI is missing");
 assert.doesNotMatch(html, /id="ai[^\n]+value="[^\n]*(?:key|token|secret)/i, "provider secrets must not be embedded in HTML");
 const panelState = source.slice(source.indexOf("const aiAssistant ="), source.indexOf("elements.tablesLayer.addEventListener"));
-assert.match(panelState, /mainLayout\.classList\.toggle\("ai-open", open\)/, "AI chat must replace the left tool rail");
-assert.match(panelState, /\[elements\.toolRail, open\][\s\S]*\[elements\.workspace, open \|\| standaloneSqlState\.open \|\| viewsOpen\][\s\S]*\[elements\.inspector, open \|\| standaloneSqlState\.open \|\| viewsOpen\][\s\S]*\[elements\.standaloneSqlWorkspace, open \|\| !standaloneSqlState\.open\][\s\S]*\[elements\.viewsPrototypeWorkspace, open \|\| !viewsOpen\][\s\S]*background\.inert = inactive/, "AI and alternate workspaces must keep every inactive background surface out of keyboard navigation");
+assert.match(panelState, /panelModal: false[\s\S]*mainLayout\.classList\.toggle\("ai-open", open\)/, "Schemii AI chat must be a non-modal workspace companion");
+assert.doesNotMatch(panelState, /backgroundStates|background\.inert|background\.setAttribute\("aria-hidden"/, "opening AI must not disable the active workspace or inspector");
 assert.doesNotMatch(panelState, /mobile-open|inspector-dismissed/, "AI chat must not open, dismiss, or resize the right inspector");
 assert.match(sharedStyles, /\.ai-panel \{[^}]*left: 0;[^}]*translate3d\(-100%/, "AI chat must dock from the left");
 assert.match(styles, /\.schema-library-connection/, "saved schema cards must display connection ownership");
-assert.match(styles, /\.main-layout\.ai-open \.tool-rail/, "AI chat must visually replace the left tool rail");
+assert.doesNotMatch(styles, /\.main-layout\.ai-open \.tool-rail \{[^}]*visibility: hidden/, "AI chat must preserve workspace navigation and actions");
+assert.match(styles, /@media \(min-width: 701px\)[\s\S]*\.main-layout\.ai-open \.workspace \{ left: calc\(var\(--schemii-ai-edge\) \+ 8px\)[\s\S]*\.views-prototype-workspace[\s\S]*\.standalone-sql-workspace/, "Tables, Views, and SQL must share the desktop AI dock boundary");
+assert.match(styles, /\.main-layout\.ai-open \.table-data-panel \{ left: 8px; \}/, "table data and its embedded SQL console must use the docked table workspace");
+assert.match(styles, /@media \(max-width: 700px\)[\s\S]*\.main-layout > \.ai-panel[\s\S]*top: calc\(50vh \+ 4px\)[\s\S]*\.main-layout\.ai-open \.workspace[\s\S]*bottom: calc\(50vh \+ 6px\)/, "narrow screens must split the workspace and AI panel instead of leaving a workspace sliver");
 assert.match(sharedStyles, /\.ai-query-result-scroll \{[^}]*overflow: auto/, "wide or long query results must scroll inside the chat panel");
 assert.match(sharedStyles, /\.ai-query-result-table th \{[^}]*position: sticky/, "query result column headings must remain visible while scrolling");
 assert.match(sharedStyles, /\.ai-context-bar \.ai-permissions, \.ai-context-bar \.ai-policy-summary \{[^}]*align-self: end/, "the policy summary must align with the model selector");

@@ -4,6 +4,7 @@ const MAX_ZOOM = 1.7;
 const SAVE_DELAY_MS = 180;
 const LAYOUT_SAVE_DELAY_MS = 750;
 const WHEEL_ZOOM_IDLE_MS = 140;
+const POINTER_MOVE_THRESHOLD_PX = 3;
 
 function clampZoom(value, maximum = MAX_ZOOM) {
   return Math.min(maximum, Math.max(MIN_ZOOM, value));
@@ -180,6 +181,7 @@ const elements = {
   runSqlConsole: document.querySelector("#run-sql-console"),
   clearSqlConsole: document.querySelector("#clear-sql-console"),
   standaloneSqlButton: document.querySelector("#sql-workspace-button"),
+  postgresConsoleButton: document.querySelector("#postgres-console-button"),
   standaloneSqlWorkspace: document.querySelector("#standalone-sql-workspace"),
   standaloneSqlProfile: document.querySelector("#standalone-sql-profile"),
   standaloneSqlDatabase: document.querySelector("#standalone-sql-database"),
@@ -2428,7 +2430,7 @@ const sharedSessionClient = window.SchemiiShared.createSessionClient({
 const sharedPostgresClient = window.SchemiiShared.createPostgresClient({ sessionClient: sharedSessionClient });
 const postgresProfileRepository = window.SchemiiShared.createProfileRepository({ postgresClient: sharedPostgresClient });
 const sharedConsole = window.SchemiiShared.createPostgresConsole({
-  button: elements.standaloneSqlButton,
+  button: elements.postgresConsoleButton,
   postgresClient: sharedPostgresClient,
   getTarget: () => {
     const target = standaloneSqlTarget();
@@ -3283,7 +3285,7 @@ async function createSchemaProject(projectName) {
   return true;
 }
 
-async function openSchema(schemaId, { fit = true } = {}) {
+async function openSchema(schemaId, { fit = false } = {}) {
   if (schemaId === activeSchemaId) {
     if (elements.schemaDialog.open) elements.schemaDialog.close();
     return true;
@@ -4764,6 +4766,7 @@ function setZoom(nextZoom, centerX, centerY, transient = false) {
   const cursorY = centerY ?? rect.height / 2;
   const oldZoom = view.zoom;
   const newZoom = clampZoom(nextZoom);
+  if (newZoom === oldZoom) return false;
   view.x = cursorX - (cursorX - view.x) * (newZoom / oldZoom);
   view.y = cursorY - (cursorY - view.y) * (newZoom / oldZoom);
   view.zoom = newZoom;
@@ -4776,6 +4779,7 @@ function setZoom(nextZoom, centerX, centerY, transient = false) {
     applyView();
     if (activeSchemaId) saveSchema(LAYOUT_SAVE_DELAY_MS);
   }
+  return true;
 }
 
 function finishWheelZoom() {
@@ -6516,20 +6520,9 @@ const aiAssistant = window.SchemiiShared.createAiAssistant({
   toolLabels: AI_TOOL_LABELS,
   skillLabels: AI_SKILL_LABELS,
   labels: { trigger: "AI schema assistant", prompt: "Ask about this schema...", newChatCopy: "Proposals will use the currently active design." },
+  panelModal: false,
   onOpenChange: open => {
     elements.mainLayout.classList.toggle("ai-open", open);
-    const viewsOpen = viewsPrototypeState.layer === "views";
-    const backgroundStates = new Map([
-      [elements.toolRail, open],
-      [elements.workspace, open || standaloneSqlState.open || viewsOpen],
-      [elements.inspector, open || standaloneSqlState.open || viewsOpen],
-      [elements.standaloneSqlWorkspace, open || !standaloneSqlState.open],
-      [elements.viewsPrototypeWorkspace, open || !viewsOpen],
-    ]);
-    for (const [background, inactive] of backgroundStates) {
-      background.inert = inactive;
-      background.setAttribute("aria-hidden", String(inactive));
-    }
   },
   onAccessChange: updateAiAccessDisclosure,
   onPolicyChange: syncSchemiiAiPolicy,
@@ -6612,11 +6605,11 @@ elements.connections.addEventListener("contextmenu", event => {
 });
 
 elements.tablesLayer.addEventListener("pointermove", event => {
-  if (tablePressState?.pointerId === event.pointerId && Math.hypot(event.clientX - tablePressState.startX, event.clientY - tablePressState.startY) > 3) {
+  if (tablePressState?.pointerId === event.pointerId && Math.hypot(event.clientX - tablePressState.startX, event.clientY - tablePressState.startY) > POINTER_MOVE_THRESHOLD_PX) {
     tablePressState.moved = true;
   }
   if (!dragState || dragState.pointerId !== event.pointerId) return;
-  if (!dragState.historyRecorded && (event.clientX !== dragState.startX || event.clientY !== dragState.startY)) {
+  if (!dragState.historyRecorded && Math.hypot(event.clientX - dragState.startX, event.clientY - dragState.startY) > POINTER_MOVE_THRESHOLD_PX) {
     checkpointHistory();
     dragState.historyRecorded = true;
     elements.workspace.classList.add("table-dragging");
@@ -6691,7 +6684,7 @@ elements.workspace.addEventListener("pointerdown", event => {
   if (wheelZoomTimer !== null) finishWheelZoom();
   if (event.button === 1) {
     event.preventDefault();
-    panState = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, viewX: view.x, viewY: view.y };
+    panState = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, viewX: view.x, viewY: view.y, moved: false };
     elements.workspace.setPointerCapture(event.pointerId);
     elements.workspace.classList.add("panning");
     middlePanPanelSnapshot = collapseWorkspacePanelsForMiddlePan();
@@ -6699,7 +6692,7 @@ elements.workspace.addEventListener("pointerdown", event => {
   }
   if (event.target.closest(".table-card") || event.target.closest(".connection-hit") || event.target.closest(".relationship-banner") || event.target.closest(".database-drift-banner") || event.target.closest(".table-data-panel")) return;
   if (spacePressed || event.pointerType === "touch") {
-    panState = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, viewX: view.x, viewY: view.y };
+    panState = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, viewX: view.x, viewY: view.y, moved: false };
     elements.workspace.setPointerCapture(event.pointerId);
     elements.workspace.classList.add("panning");
   } else if (event.button === 0) {
@@ -6720,7 +6713,7 @@ elements.workspace.addEventListener("pointerdown", event => {
 
 elements.workspace.addEventListener("pointermove", event => {
   if (marqueeState?.pointerId === event.pointerId) {
-    if (!marqueeState.moved && Math.hypot(event.clientX - marqueeState.startX, event.clientY - marqueeState.startY) <= 3) return;
+    if (!marqueeState.moved && Math.hypot(event.clientX - marqueeState.startX, event.clientY - marqueeState.startY) <= POINTER_MOVE_THRESHOLD_PX) return;
     if (!marqueeState.moved) {
       marqueeState.moved = true;
       setTableDataPanelExpanded(false);
@@ -6734,6 +6727,8 @@ elements.workspace.addEventListener("pointermove", event => {
     return;
   }
   if (!panState || panState.pointerId !== event.pointerId) return;
+  if (!panState.moved && Math.hypot(event.clientX - panState.startX, event.clientY - panState.startY) <= POINTER_MOVE_THRESHOLD_PX) return;
+  panState.moved = true;
   view.x = panState.viewX + event.clientX - panState.startX;
   view.y = panState.viewY + event.clientY - panState.startY;
   applyStageTransform();
@@ -6747,7 +6742,7 @@ elements.workspace.addEventListener("pointerup", event => {
     return;
   }
   if (panState?.pointerId !== event.pointerId) return;
-  const moved = event.clientX !== panState.startX || event.clientY !== panState.startY;
+  const moved = panState.moved;
   panState = null;
   elements.workspace.classList.remove("panning");
   applyView();
@@ -6766,6 +6761,8 @@ elements.workspace.addEventListener("pointercancel", event => {
     return;
   }
   if (panState?.pointerId !== event.pointerId) return;
+  view.x = panState.viewX;
+  view.y = panState.viewY;
   panState = null;
   elements.workspace.classList.remove("panning");
   applyView();
@@ -6776,8 +6773,9 @@ elements.workspace.addEventListener("wheel", event => {
   if (event.target.closest(".table-data-panel")) return;
   event.preventDefault();
   const rect = elements.workspace.getBoundingClientRect();
+  const changed = setZoom(view.zoom * (event.deltaY > 0 ? .9 : 1.1), event.clientX - rect.left, event.clientY - rect.top, true);
+  if (!changed) return;
   elements.workspace.classList.add("zooming");
-  setZoom(view.zoom * (event.deltaY > 0 ? .9 : 1.1), event.clientX - rect.left, event.clientY - rect.top, true);
   clearTimeout(wheelZoomTimer);
   wheelZoomTimer = setTimeout(finishWheelZoom, WHEEL_ZOOM_IDLE_MS);
 }, { passive: false });

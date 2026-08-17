@@ -52,10 +52,13 @@ for (const html of [schemiiHtml, schemerHtml]) {
 }
 assert.match(shared, /settingsDialog\.addEventListener\("cancel"[\s\S]*closeSettings/, "Escape must close settings through focus restoration");
 assert.match(shared, /settingsReturnFocus[\s\S]*target\?\.isConnected[\s\S]*target\.focus/, "settings must restore keyboard focus");
-assert.match(shared, /function setNestedDialogOpen[\s\S]*root\.inert = open[\s\S]*root\.setAttribute\("aria-hidden"/, "a nested AI dialog must own focus and hide the outer modal from assistive technology");
+assert.match(shared, /function setNestedDialogOpen[\s\S]*root\.inert = open[\s\S]*root\.setAttribute\("aria-hidden"/, "a nested AI dialog must own focus and hide the outer assistant from assistive technology");
 assert.match(shared, /function trapPanelFocus[\s\S]*event\.key !== "Tab"[\s\S]*first[\s\S]*last/, "the AI panel must trap keyboard focus while it owns the modal layer");
-assert.match(shared, /document\.addEventListener\("keydown"[\s\S]*event\.key === "Escape"[\s\S]*!settingsDialog\.open && !historyDialog\.open && !state\.busy/, "Escape must not steal nested-dialog or in-flight operation focus ownership");
-for (const html of [schemiiHtml, schemerHtml]) assert.match(html, /class="ai-panel"[^>]*role="dialog"[^>]*aria-modal="true"[^>]*aria-labelledby=/, "each AI panel needs modal semantics and an accessible name");
+assert.match(shared, /if \(panelModal\) root\.addEventListener\("keydown", trapPanelFocus\)/, "only modal AI panels may trap keyboard focus");
+assert.match(shared, /event\.key !== "Escape"[\s\S]*settingsDialog\.open \|\| historyDialog\.open \|\| state\.busy[\s\S]*!panelModal && !root\.contains\(document\.activeElement\)[\s\S]*stopPropagation/, "Escape from a non-modal workspace must not close both AI and an underlying surface");
+assert.match(schemiiHtml, /class="ai-panel"[^>]*role="complementary"[^>]*aria-labelledby=/, "Schemii AI must be an accessible non-modal companion");
+assert.doesNotMatch(schemiiHtml.match(/<aside class="ai-panel"[^>]*>/)?.[0] || "", /aria-modal/, "Schemii AI must not claim false modal semantics");
+assert.match(schemerHtml, /class="ai-panel"[^>]*role="dialog"[^>]*aria-modal="true"[^>]*aria-labelledby=/, "Schemer may retain modal drawer semantics");
 assert.match(shared, /aria-describedby/, "bound inputs must reference their descriptions");
 assert.match(styles, /@media \(max-width: 540px\)[\s\S]*\.ai-policy-capability, \.ai-policy-limits label \{ grid-template-columns: 1fr/, "policy settings must remain usable on mobile");
 assert.match(styles, /#ai-settings-dialog \{[^}]*overflow: hidden[\s\S]*\.ai-settings-body \{[^}]*overflow-y: auto/, "AI settings must have one body scroller instead of nested dialog scrollbars");

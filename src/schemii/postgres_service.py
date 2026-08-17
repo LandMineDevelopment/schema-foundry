@@ -3278,6 +3278,10 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                     warnings.append({"code": "unsupported", "message": f"Type change for {table_name}.{desired_name} has dependent objects and requires a manual migration"})
                     type_change_blocked = True
                 else:
+                    warnings.append({
+                        "code": "data_movement",
+                        "message": f"Type change for {table_name}.{desired_name} requires an ACCESS EXCLUSIVE table lock and may convert or rewrite every existing row; any conversion failure rolls back the migration",
+                    })
                     raw_type = self._raw(dc, "type", f"column {table_name}.{desired_name}")
                     if lc.get("default") not in (None, ""):
                         add(self._step(

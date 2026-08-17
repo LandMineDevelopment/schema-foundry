@@ -14,6 +14,9 @@ assert.equal(contracts.validateCatalogResponse({ ...identity, scope: "user", ent
 const relation = { profileId: "local", database: "demo", namespace: "public", relation: "orders", name: "orders", kind: "foreign_table" };
 assert.equal(contracts.validateCatalogResponse({ ...identity, namespace: "public", entries: [relation], relations: [relation] }, "relations").relations[0].name, "orders");
 assert.equal(contracts.validatePlanResponse({ id: "plan", steps: [], warnings: [], destructive: false }).id, "plan");
+const blockedPreview = { id: null, previewOnly: true, applyCapable: false, complete: false, steps: [], warnings: [], destructive: false, blockingDifferences: [{ code: "destructive_omitted", message: "Omitted type change", nextAction: "Enable destructive changes." }] };
+assert.equal(contracts.validatePlanResponse(blockedPreview).blockingDifferences[0].code, "destructive_omitted");
+assert.equal(contracts.validatePlanResponse({ ...blockedPreview, applyCapable: true, applyPlanId: "plan" }).applyPlanId, "plan");
 assert.equal(contracts.validateOperationResponse({ operation: { id: "operation", state: "running" } }).operation.state, "running");
 assert.equal(contracts.validateResourceSummariesResponse({ resources: [{ id: "schema" }] }).resources.length, 1);
 assert.equal(contracts.validateResourceSummariesResponse({ summaries: [{ id: "dashboard" }] }).summaries.length, 1);
@@ -26,6 +29,8 @@ for (const [validator, payload] of [
   [contracts.validateProfilesResponse, { profiles: null }],
   [value => contracts.validateCatalogResponse(value, "relations"), { relations: [{ kind: "table" }] }],
   [contracts.validatePlanResponse, { id: "plan", steps: [] }],
+  [contracts.validatePlanResponse, { ...blockedPreview, previewOnly: false }],
+  [contracts.validatePlanResponse, { ...blockedPreview, applyCapable: true }],
   [contracts.validateOperationResponse, { operation: { id: "operation" } }],
   [contracts.validateResourceSummariesResponse, { resources: [{}] }],
   [contracts.validateDeleteResponse, { deleted: "" }],

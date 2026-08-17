@@ -72,7 +72,10 @@
   function validatePlanResponse(payload) {
     requireObject(payload, "plan");
     const plan = isObject(payload.plan) ? payload.plan : payload;
-    if (!nonEmptyString(plan.id) || !Array.isArray(plan.steps) || !Array.isArray(plan.warnings) || typeof plan.destructive !== "boolean") {
+    const durablePlan = nonEmptyString(plan.id);
+    const boundedPreview = plan.id === null && plan.previewOnly === true && plan.applyCapable === false;
+    const authorizedAiPreview = plan.id === null && plan.previewOnly === true && plan.applyCapable === true && nonEmptyString(plan.applyPlanId);
+    if ((!durablePlan && !boundedPreview && !authorizedAiPreview) || !Array.isArray(plan.steps) || !Array.isArray(plan.warnings) || typeof plan.destructive !== "boolean") {
       throw new ApiContractError("The plan response is invalid", { contract: "plan", payload });
     }
     return payload;

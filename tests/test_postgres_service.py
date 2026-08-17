@@ -384,7 +384,9 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertEqual(result["namespace"], "public")
         self.assertEqual([item["kind"] for item in result["relations"]], ["table", "view", "materialized_view", "foreign_table"])
         catalog_query = next(sql for sql, _ in connection.executed if "c.relname AS relation_name" in sql)
+        fingerprint_query = next(sql for sql, _ in connection.executed if "relation_catalog_fingerprint" in sql)
         self.assertIn("c.relkind IN ('r', 'p', 'v', 'm', 'f')", catalog_query)
+        self.assertIn("c.relkind::text ||", fingerprint_query)
         self.assertEqual(connection.executed[0][0], "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         self.assertEqual(connection.rollbacks, 1)
         self.assertTrue(connection.closed)
@@ -1483,6 +1485,27 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertTrue(preview["applyCapable"])
         self.assertEqual(preview["blockingDifferences"], [])
         self.assertEqual(preview["warnings"][0]["code"], "data_movement")
+
+    def test_column_type_change_discloses_lock_and_possible_table_rewrite(self):
+        live = empty_schema()
+        live["tables"] = [{
+            "id": "t", "name": "personnel_dim",
+            "columns": [{"id": "c", "name": "certification_list", "type": "character varying", "nullable": True}],
+            "uniqueConstraints": [], "checks": [], "indexes": [], "triggers": [],
+        }]
+        desired = copy.deepcopy(live)
+        desired["tables"][0]["columns"][0]["type"] = "uuid[]"
+        self.service.introspect = lambda profile_id, namespace: copy.deepcopy(live)
+        self.service._migration_safety_assessment = lambda *args, **kwargs: migration_assessment("personnel_dim")
+
+        preview = self.service.preview("local", "public", desired, True, persist=False)
+
+        self.assertTrue(preview["complete"])
+        self.assertTrue(preview["applyCapable"])
+        self.assertEqual(preview["blockingDifferences"], [])
+        self.assertEqual(preview["warnings"][0]["code"], "data_movement")
+        self.assertIn("ACCESS EXCLUSIVE", preview["warnings"][0]["message"])
+        self.assertIn("rewrite every existing row", preview["warnings"][0]["message"])
 
     def test_partition_blocking_is_scoped_to_concrete_touches_and_dependencies(self):
         partition = {

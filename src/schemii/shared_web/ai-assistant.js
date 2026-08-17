@@ -83,7 +83,7 @@
       buildMessagePayload, buildSessionPayload, contextKey = () => null, parseSession = session => ({ title: session.title || "Untitled chat", key: null }),
       buildProposalClaimPayload, buildProposalExecutionPayload, buildHistoryQuery, renderAction, validateAction, handleOperationResult, toolLabels = {}, skillLabels = {}, labels = {},
       onOpenChange = () => {}, onAccessChange = () => {}, onNewChat = () => {}, onPolicyChange = () => {}, state: suppliedState,
-      canViewSession = () => true, extraBusyControls = [],
+      canViewSession = () => true, extraBusyControls = [], panelModal = true,
     } = options;
     if (!sessionClient || !root || !trigger || !settingsDialog || !historyDialog || typeof getContext !== "function") throw new TypeError("AI assistant dependencies are required");
     const find = name => root.querySelector(`[data-ai="${name}"]`);
@@ -903,8 +903,14 @@
     });
     elements.form.addEventListener("submit", event => { event.preventDefault(); const text = elements.prompt.value.trim(); if (!text) return; elements.prompt.value = ""; sendMessage(text); });
     elements.prompt.addEventListener("keydown", event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); elements.form.requestSubmit(); } });
-    root.addEventListener("keydown", trapPanelFocus);
-    document.addEventListener("keydown", event => { if (event.key === "Escape" && root.classList.contains("open") && !settingsDialog.open && !historyDialog.open && !state.busy) setOpen(false); });
+    if (panelModal) root.addEventListener("keydown", trapPanelFocus);
+    document.addEventListener("keydown", event => {
+      if (event.key !== "Escape" || !root.classList.contains("open") || settingsDialog.open || historyDialog.open || state.busy) return;
+      if (!panelModal && !root.contains(document.activeElement)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen(false);
+    });
     root.inert = true;
     return Object.freeze({ ...api, open: () => setOpen(true), close: () => setOpen(false), refresh: loadStatus, refreshPolicy: loadPolicy, reset: resetConversation, normalizeStoredModel });
   }
