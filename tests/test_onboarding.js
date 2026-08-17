@@ -58,7 +58,7 @@ assert.match(html, /use maximize to temporarily cover the inspector, use minimiz
 assert.doesNotMatch(html, /tour-(?:table-tag|visual-tag)|<b>[123]<\/b>/, "the animated demonstration must not retain its obsolete numbered cues");
 assert.match(html, /tour-demo-playback[\s\S]+onboarding-screenshot inspector-tour-shot/, "playback annotations must sit above the animated window");
 assert.match(html, /id="tour-demo-toggle"[^>]*>Pause demo<\/button>/, "the animated demonstration needs a pause control");
-assert.match(html, /tour-sql-editor[^>]*>[\s\S]*SELECT \*[\s\S]*FROM "public"\."orders"[\s\S]*LIMIT 100;[\s\S]*tour-sql-actions[\s\S]*Run query/, "the SQL console must mirror the real editor and action layout");
+assert.match(html, /tour-sql-editor[^>]*>[\s\S]*SELECT \*[\s\S]*FROM "public"\."orders"[\s\S]*LIMIT 100;[\s\S]*tour-sql-actions[\s\S]*Run/, "the table SQL console must mirror its single selection-or-cursor Run action");
 const tourDataMarkup = html.slice(html.indexOf('<div class="tour-data-row">'), html.indexOf('</section>', html.indexOf('<div class="tour-data-row">')));
 assert.equal((tourDataMarkup.match(/<th>/g) || []).length, 5, "the Table data preview must show several columns");
 assert.equal((tourDataMarkup.match(/<tr>/g) || []).length, 9, "the Table data preview must show several PostgreSQL rows plus its header");

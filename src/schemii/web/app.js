@@ -166,10 +166,12 @@ const elements = {
   deleteDatabaseObject: document.querySelector("#delete-database-object"),
   tableDataPanel: document.querySelector("#table-data-panel"),
   tableDataPanelTitle: document.querySelector("#table-data-panel-title"),
+  tableDataPanelEyebrow: document.querySelector("#table-data-panel-eyebrow"),
   tableDataPanelHead: document.querySelector("#table-data-panel-head"),
   tableDataCount: document.querySelector("#table-data-count"),
   tableDataWarning: document.querySelector("#table-data-warning"),
   tableDataScroll: document.querySelector("#table-data-scroll"),
+  refreshTableData: document.querySelector("#refresh-table-data"),
   maximizeTableData: document.querySelector("#maximize-table-data"),
   minimizeTableData: document.querySelector("#minimize-table-data"),
   tableDataPaneContent: document.querySelector("#table-data-pane-content"),
@@ -179,7 +181,9 @@ const elements = {
   sqlConsoleInput: document.querySelector("#sql-console-input"),
   sqlConsoleStatus: document.querySelector("#sql-console-status"),
   runSqlConsole: document.querySelector("#run-sql-console"),
+  cancelSqlConsole: document.querySelector("#cancel-sql-console"),
   clearSqlConsole: document.querySelector("#clear-sql-console"),
+  inspectorSqlResultTabs: document.querySelector("#inspector-sql-result-tabs"),
   standaloneSqlButton: document.querySelector("#sql-workspace-button"),
   postgresConsoleButton: document.querySelector("#postgres-console-button"),
   standaloneSqlWorkspace: document.querySelector("#standalone-sql-workspace"),
@@ -353,9 +357,13 @@ let tableDataState = {
 };
 let sqlConsoleState = {
   key: null,
-  columns: [],
-  rows: [],
-  truncated: false,
+  consoleId: null,
+  resultTabs: [],
+  activeResultTabId: null,
+  lastSql: null,
+  executionId: null,
+  executionProfileId: null,
+  phase: "idle",
   loading: false,
   error: null,
   requestId: 0
@@ -1260,9 +1268,29 @@ function setStandaloneSqlWriteMode() {
   elements.standaloneSqlWriteTarget.textContent = standaloneSqlTargetLabel();
 }
 
+function loadConsoleSettings() {
+  return postgresRequest("/api/postgres/console/settings");
+}
+
 async function loadStandaloneSqlSettings() {
-  standaloneSqlState.settings = await postgresRequest("/api/postgres/console/settings");
+  standaloneSqlState.settings = await loadConsoleSettings();
   return standaloneSqlState.settings;
+}
+
+function executeConsoleTransaction(target, { executionId, consoleId, sql, mode, settingsRevision }) {
+  return postgresRequest(`/api/postgres/profiles/${encodeURIComponent(target.profileId)}/console/executions`, {
+    method: "POST",
+    body: JSON.stringify({
+      executionId,
+      consoleId,
+      database: target.database,
+      namespace: target.namespace,
+      sql,
+      mode,
+      settingsRevision,
+      profileFingerprint: target.profileFingerprint,
+    }),
+  });
 }
 
 function clearAllStandaloneSqlWriteModes() {
@@ -1285,7 +1313,7 @@ async function syncStandaloneSqlTarget(resetWriteMode = false) {
   if (targetChanged && standaloneSqlState.open) {
     if (standaloneSqlState.targetSyncKey === targetKey) return;
     standaloneSqlState.targetSyncKey = targetKey;
-    await Promise.all(standaloneSqlState.views.map(viewState => closeStandaloneSqlResultResources(viewState.resultTabs)));
+    await Promise.all(standaloneSqlState.views.map(viewState => closeConsoleResultResources(viewState.resultTabs)));
     clearAllStandaloneSqlWriteModes();
     standaloneSqlState.targetSyncKey = null;
     if (standaloneSqlTargetKey() !== targetKey) return syncStandaloneSqlTarget(resetWriteMode);
@@ -1494,7 +1522,7 @@ async function removeStandaloneSqlView(viewId = standaloneSqlState.activeViewId)
   const removed = standaloneSqlState.views.find(viewState => viewState.id === viewId);
   if (!removed) return;
   if ((removed.sql.trim() || removed.resultTabs?.length) && !confirm(`Remove ${removed.name} and its browser-local SQL and results?`)) return;
-  await closeStandaloneSqlResultResources(removed.resultTabs);
+  await closeConsoleResultResources(removed.resultTabs);
   clearStandaloneSqlWriteMode(removed);
   const index = standaloneSqlState.views.findIndex(viewState => viewState.id === removed.id);
   standaloneSqlState.views.splice(index, 1);
@@ -1530,7 +1558,7 @@ function switchStandaloneSqlView(viewId) {
   }, 240);
 }
 
-function standaloneSqlCell(value) {
+function consoleSqlCell(value) {
   if (value === null) return '<span class="null">NULL</span>';
   return escapeHtml(typeof value === "object" ? JSON.stringify(value) : String(value));
 }
@@ -1599,7 +1627,7 @@ function standaloneSqlForRun(sql, selectionStart, selectionEnd, runAll = false) 
   return (preceding ?? ranges.find(range => range.start >= selectionStart))?.sql ?? "";
 }
 
-function standaloneSqlTabContent(tab) {
+function consoleResultTabContent(tab) {
   if (tab.kind === "loading") return `<div class="standalone-sql-loading"><i></i><span>${escapeHtml(tab.message)}</span></div>`;
   if (tab.kind === "error") return standaloneSqlEmpty(tab.message, tab.detail, true);
   const statement = tab.statement;
@@ -1607,10 +1635,10 @@ function standaloneSqlTabContent(tab) {
   const transactionState = tab.committed ? "committed" : statement.transactionRetention && statement.hasMore ? "snapshot retained" : "rolled back";
   const state = statement.truncationEvents?.length ? "Display/export truncated by an application limit" : statement.hasMore ? `${statement.rows.length} rows loaded · more rows retained` : `${statement.rows.length} rows returned`;
   const actions = statement.hasMore ? `<div class="standalone-sql-result-actions"><button type="button" data-load-result-page="${escapeHtml(tab.id)}">Load more</button><button type="button" data-export-result="${escapeHtml(tab.id)}">Export JSON</button><button type="button" data-close-result-resource="${escapeHtml(tab.id)}">Close result</button></div>` : "";
-  return `<table class="standalone-sql-table"><thead><tr>${statement.columns.map(column => `<th>${escapeHtml(column.name)}</th>`).join("")}</tr></thead><tbody>${statement.rows.map(row => `<tr>${row.map(value => `<td>${standaloneSqlCell(value)}</td>`).join("")}</tr>`).join("")}</tbody><caption>${state} · ${transactionState}</caption></table>${actions}`;
+  return `<table class="standalone-sql-table"><thead><tr>${statement.columns.map(column => `<th>${escapeHtml(column.name)}</th>`).join("")}</tr></thead><tbody>${statement.rows.map(row => `<tr>${row.map(value => `<td>${consoleSqlCell(value)}</td>`).join("")}</tr>`).join("")}</tbody><caption>${state} · ${transactionState}</caption></table>${actions}`;
 }
 
-function standaloneSqlResultUrl(tab, includeCursor = false) {
+function consoleResultUrl(tab, includeCursor = false) {
   const statement = tab.statement;
   const query = new URLSearchParams({
     consoleId: tab.consoleId, database: tab.target.database, namespace: tab.target.namespace,
@@ -1620,28 +1648,27 @@ function standaloneSqlResultUrl(tab, includeCursor = false) {
   return `/api/postgres/profiles/${encodeURIComponent(tab.target.profileId)}/console/executions/${encodeURIComponent(statement.executionId)}/results/${encodeURIComponent(statement.resultId)}?${query}`;
 }
 
-async function closeStandaloneSqlResultResource(tab) {
+async function closeConsoleResultResource(tab) {
   if (tab?.kind !== "result" || !tab.statement?.hasMore) return;
-  await postgresRequest(standaloneSqlResultUrl(tab), { method: "DELETE" });
+  await postgresRequest(consoleResultUrl(tab), { method: "DELETE" });
   Object.assign(tab.statement, { hasMore: false, nextCursor: null, resourceState: "closed", closureEvents: ["closed"] });
 }
 
-async function closeStandaloneSqlResultResources(tabs) {
-  await Promise.allSettled((tabs || []).filter(tab => tab.kind === "result" && tab.statement?.hasMore).map(closeStandaloneSqlResultResource));
+async function closeConsoleResultResources(tabs) {
+  await Promise.allSettled((tabs || []).filter(tab => tab.kind === "result" && tab.statement?.hasMore).map(closeConsoleResultResource));
 }
 
-async function loadStandaloneSqlResultPage(tab) {
+async function loadConsoleResultPage(tab) {
   if (tab?.kind !== "result" || !tab.statement?.hasMore || !tab.statement.nextCursor) return;
   const rows = tab.statement.rows;
-  const page = await postgresRequest(standaloneSqlResultUrl(tab, true));
+  const page = await postgresRequest(consoleResultUrl(tab, true));
   rows.push(...page.rows);
   Object.assign(tab.statement, page, { rows });
   tab.meta = `${tab.statement.command} · ${rows.length}${page.hasMore ? "+" : ""} rows · ${tab.committed ? "committed" : "rolled back"}`;
-  renderStandaloneSqlResultTabs();
 }
 
-async function exportStandaloneSqlResult(tab) {
-  while (tab?.statement?.hasMore) await loadStandaloneSqlResultPage(tab);
+async function exportConsoleResult(tab) {
+  while (tab?.statement?.hasMore) await loadConsoleResultPage(tab);
   if (!tab?.statement) return;
   const blob = new Blob([JSON.stringify({
     columns: tab.statement.columns, rows: tab.statement.rows,
@@ -1696,7 +1723,7 @@ function renderStandaloneSqlResultTabs() {
     const actions = tab.kind === "loading" ? "" : `<button type="button" data-rename-result-tab="${escapeHtml(tab.id)}" aria-label="Rename ${escapeHtml(tab.label)}" data-tooltip="Rename result">Edit</button><button type="button" data-pin-result-tab="${escapeHtml(tab.id)}" aria-label="${tab.pinned ? "Unpin" : "Pin"} ${escapeHtml(tab.label)}" data-tooltip="${tab.pinned ? "Unpin result" : "Pin result"}">${tab.pinned ? "◆" : "◇"}</button><button type="button" data-close-result-tab="${escapeHtml(tab.id)}" aria-label="Close ${escapeHtml(tab.label)}">×</button>`;
     return `<div class="standalone-sql-result-tab ${tab.id === active.id ? "active" : ""} ${tab.pinned ? "pinned" : ""} ${editing ? "renaming" : ""}" role="presentation">${label}${actions}</div>`;
   }).join("");
-  elements.standaloneSqlResultBody.innerHTML = standaloneSqlTabContent(active);
+  elements.standaloneSqlResultBody.innerHTML = consoleResultTabContent(active);
   setStandaloneSqlResultStatus(active.kind === "loading" ? "Running" : active.kind === "error" ? "Error" : active.meta, active.kind === "loading" ? "loading" : active.kind === "error" ? "error" : "ready");
   if (viewState.renamingResultTabId) {
     const input = elements.standaloneSqlResultTabs.querySelector("[data-result-tab-name]");
@@ -1706,7 +1733,7 @@ function renderStandaloneSqlResultTabs() {
 }
 
 function replaceStandaloneSqlUnpinnedTabs(newTabs, viewState = currentStandaloneSqlView()) {
-  void closeStandaloneSqlResultResources(viewState.resultTabs.filter(tab => !tab.pinned));
+  void closeConsoleResultResources(viewState.resultTabs.filter(tab => !tab.pinned));
   viewState.resultTabs = [...viewState.resultTabs.filter(tab => tab.pinned), ...newTabs];
   viewState.activeResultTabId = newTabs[0]?.id ?? viewState.resultTabs.at(-1)?.id ?? null;
   if (viewState.id === standaloneSqlState.activeViewId) renderStandaloneSqlResultTabs();
@@ -1743,7 +1770,7 @@ async function runStandaloneSql(runAll = false) {
   let settings;
   try {
     settings = await loadStandaloneSqlSettings();
-    await closeStandaloneSqlResultResources(viewState.resultTabs.filter(tab => !tab.pinned));
+    await closeConsoleResultResources(viewState.resultTabs.filter(tab => !tab.pinned));
   } catch (error) {
     replaceStandaloneSqlUnpinnedTabs([{ id: crypto.randomUUID(), label: "Settings unavailable", meta: "Not run", kind: "error", pinned: false, message: error.message, detail: "Console settings must be available before execution." }], viewState);
     setStandaloneSqlActivePane("result");
@@ -1762,18 +1789,10 @@ async function runStandaloneSql(runAll = false) {
   replaceStandaloneSqlUnpinnedTabs([{ id: `running-${executionId}`, label: runAll ? "Run all" : "Run", meta: "Running", kind: "loading", pinned: false, message: `Executing a ${writeMode ? "write" : "read-only"} PostgreSQL transaction...` }], viewState);
   setStandaloneSqlActivePane("result");
   try {
-    const result = await postgresRequest(`/api/postgres/profiles/${encodeURIComponent(target.profileId)}/console/executions`, {
-      method: "POST",
-      body: JSON.stringify({
-        executionId,
-        consoleId: viewState.consoleId,
-        database: target.database,
-        namespace: target.namespace,
-        sql,
-        mode: writeMode ? "managed" : "managed_read",
-        settingsRevision: settings.revision,
-        profileFingerprint: target.profileFingerprint,
-      }),
+    const result = await executeConsoleTransaction(target, {
+      executionId, consoleId: viewState.consoleId, sql,
+      mode: writeMode ? "managed" : "managed_read",
+      settingsRevision: settings.revision,
     });
     if (standaloneSqlState.executionId !== executionId) return;
     const totalRows = result.statements.reduce((count, statement) => count + statement.rowCount, 0);
@@ -1878,7 +1897,7 @@ async function closeStandaloneSqlWorkspace({ restoreLayer = true } = {}) {
   if (standaloneSqlState.closing) return;
   standaloneSqlState.closing = true;
   abandonStandaloneSqlRun();
-  await Promise.all(standaloneSqlState.views.map(viewState => closeStandaloneSqlResultResources(viewState.resultTabs)));
+  await Promise.all(standaloneSqlState.views.map(viewState => closeConsoleResultResources(viewState.resultTabs)));
   clearAllStandaloneSqlWriteModes();
   setStandaloneSqlWriteMode();
   standaloneSqlState.open = false;
@@ -3689,9 +3708,11 @@ function tableDataTarget(table) {
   const profileId = schema.postgres?.sourceProfileId;
   const namespace = table.namespace ?? schema.postgres?.namespace;
   if (!profileId || !namespace || table.postgres?.liveOid == null) return null;
+  const profile = postgresState.profiles.find(item => item.id === profileId);
   return {
-    key: `${profileId}:${schema.postgres?.database}:${namespace}:${table.postgres.liveOid}:${table.name}`,
+    key: `${profileId}:${profile?.contextFingerprint ?? ""}:${schema.postgres?.database}:${namespace}:${table.postgres.liveOid}:${table.name}`,
     profileId,
+    profileFingerprint: profile?.contextFingerprint ?? null,
     database: schema.postgres?.database,
     namespace,
     tableName: table.name
@@ -3727,12 +3748,17 @@ function quoteSqlIdentifier(value) {
 
 function initializeSqlConsole(target) {
   if (sqlConsoleState.key === target.key) return;
+  void disposeInspectorSqlConsole(sqlConsoleState).catch(error => showToast(error.message));
   const requestId = ++sqlConsoleRequestId;
   sqlConsoleState = {
     key: target.key,
-    columns: [],
-    rows: [],
-    truncated: false,
+    consoleId: crypto.randomUUID(),
+    resultTabs: [],
+    activeResultTabId: null,
+    lastSql: null,
+    executionId: null,
+    executionProfileId: null,
+    phase: "idle",
     loading: false,
     error: null,
     requestId
@@ -3748,6 +3774,12 @@ function tableDataValue(value) {
 }
 
 function renderTableDataContent() {
+  if (tableDataState.mode === "results") {
+    const active = sqlConsoleState.resultTabs.find(tab => tab.id === sqlConsoleState.activeResultTabId) ?? sqlConsoleState.resultTabs.at(-1);
+    return active
+      ? consoleResultTabContent(active)
+      : standaloneSqlEmpty("Run a statement to inspect its result", "The table Console runs the selection or statement under the cursor in a read-only transaction.");
+  }
   if (tableDataState.error) {
     return `<div class="table-data-message error"><span>${escapeHtml(tableDataState.error)}</span><button data-action="refresh-table-data" type="button">Retry</button></div>`;
   }
@@ -3767,16 +3799,12 @@ function renderTableDataContent() {
     return `${table}<div class="table-data-message empty-table">Refreshing rows...</div>`;
   }
   if (!tableDataState.rows.length) {
-    const emptyMessage = tableDataState.mode === "query" ? "Query returned no rows." : "This table has no rows.";
-    return `${table}<div class="table-data-message empty-table">${emptyMessage}</div>`;
+    return `${table}<div class="table-data-message empty-table">This table has no rows.</div>`;
   }
-  const endMessage = tableDataState.mode === "query"
-    ? (tableDataState.truncated ? "Result limited to 500 rows" : "End of result")
-    : "End of table";
   return `
     ${table}
     ${tableDataState.loading ? '<div class="table-data-loading">Loading 50 more rows...</div>' : ""}
-    ${!tableDataState.hasMore && !tableDataState.loading ? `<div class="table-data-end">${endMessage}</div>` : ""}
+    ${!tableDataState.hasMore && !tableDataState.loading ? '<div class="table-data-end">End of table</div>' : ""}
   `;
 }
 
@@ -3784,10 +3812,12 @@ function setTableDataPanelVisible(visible) {
   clearTimeout(tableDataPanelTransitionTimer);
   if (visible) {
     elements.tableDataPanel.hidden = false;
+    elements.tableDataPanel.inert = false;
     void elements.tableDataPanel.offsetWidth;
     elements.tableDataPanel.classList.add("open");
     return;
   }
+  elements.tableDataPanel.inert = true;
   elements.tableDataPanel.classList.remove("open");
   tableDataPanelTransitionTimer = setTimeout(() => {
     if (!elements.tableDataPanel.classList.contains("open")) elements.tableDataPanel.hidden = true;
@@ -3797,6 +3827,10 @@ function setTableDataPanelVisible(visible) {
 function renderTableDataPanel(table) {
   const availableTarget = table && tableDataTarget(table);
   if (!availableTarget || !tableDataPanelExpanded) {
+    if (!availableTarget && tableDataPanelExpanded) {
+      tableDataPanelExpanded = false;
+      deactivateInspectorSqlConsole();
+    }
     setTableDataPanelVisible(false);
     return;
   }
@@ -3821,10 +3855,18 @@ function updateTableDataPanel() {
   scroll.innerHTML = renderTableDataContent();
   scroll.scrollTop = scrollTop;
   scroll.scrollLeft = scrollLeft;
-  const queryResult = tableDataState.mode === "query";
-  elements.tableDataPanelTitle.textContent = queryResult ? "Query result" : tableDataState.target.tableName;
-  elements.tableDataCount.textContent = `${tableDataState.rows.length}${tableDataState.hasMore ? "+" : ""} rows`;
-  elements.tableDataWarning.hidden = queryResult || tableDataState.stableOrder;
+  const showingResults = tableDataState.mode === "results";
+  const active = sqlConsoleState.resultTabs.find(tab => tab.id === sqlConsoleState.activeResultTabId) ?? sqlConsoleState.resultTabs.at(-1);
+  elements.tableDataPanelEyebrow.textContent = showingResults ? "PostgreSQL transaction response" : "Live PostgreSQL rows";
+  elements.tableDataPanelTitle.textContent = showingResults ? "Results" : tableDataState.target.tableName;
+  elements.tableDataCount.textContent = showingResults
+    ? (active?.kind === "loading" ? "Running" : active?.kind === "error" ? "Error" : active?.meta ?? "Not run")
+    : `${tableDataState.rows.length}${tableDataState.hasMore ? "+" : ""} rows`;
+  elements.tableDataWarning.hidden = showingResults || tableDataState.stableOrder;
+  elements.inspectorSqlResultTabs.hidden = !showingResults || !sqlConsoleState.resultTabs.length;
+  elements.inspectorSqlResultTabs.innerHTML = showingResults ? sqlConsoleState.resultTabs.map(tab => `<div class="standalone-sql-result-tab ${tab.id === active?.id ? "active" : ""}" role="presentation"><button type="button" role="tab" aria-selected="${tab.id === active?.id}" data-inspector-result-tab="${escapeHtml(tab.id)}"><span>${escapeHtml(tab.label)}</span><small>${escapeHtml(tab.meta)}</small></button>${tab.kind === "loading" ? "" : `<button type="button" data-close-inspector-result="${escapeHtml(tab.id)}" aria-label="Close ${escapeHtml(tab.label)}">×</button>`}</div>`).join("") : "";
+  updateTooltip(elements.refreshTableData, showingResults ? "Run query again" : "Refresh rows");
+  elements.refreshTableData.setAttribute("aria-label", showingResults ? "Run query again" : "Refresh table rows");
 }
 
 async function fetchTableDataPage(offset, requestId = tableDataState.requestId) {
@@ -3844,7 +3886,6 @@ async function fetchTableDataPage(offset, requestId = tableDataState.requestId) 
     tableDataState.nextOffset = result.nextOffset;
     tableDataState.hasMore = result.hasMore;
     tableDataState.stableOrder = result.stableOrder;
-    tableDataState.mode = "table";
     tableDataState.truncated = false;
     tableDataState.error = null;
   } catch (error) {
@@ -3862,8 +3903,8 @@ async function fetchTableDataPage(offset, requestId = tableDataState.requestId) 
 function refreshTableData() {
   const table = getTable(selectedTableId);
   if (!table || !tableDataTarget(table)) return;
-  if (tableDataState.mode === "query") {
-    executeSqlConsole();
+  if (tableDataState.mode === "results" && sqlConsoleState.lastSql) {
+    void executeSqlConsole(sqlConsoleState.lastSql);
     return;
   }
   reloadTableData();
@@ -3872,7 +3913,10 @@ function refreshTableData() {
 function setTableDataPanelExpanded(expanded) {
   const table = getTable(selectedTableId);
   tableDataPanelExpanded = Boolean(expanded && table && tableDataTarget(table));
-  if (!tableDataPanelExpanded) setTableDataPanelMaximized(false);
+  if (!tableDataPanelExpanded) {
+    setTableDataPanelMaximized(false);
+    deactivateInspectorSqlConsole();
+  }
   renderTableDataPanel(table);
   const toggle = elements.inspectorContent.querySelector('[data-action="toggle-table-data"]');
   if (toggle) {
@@ -3901,10 +3945,10 @@ function reloadTableData() {
   const requestId = ++tableDataRequestId;
   tableDataState = {
     ...tableDataState,
+    mode: "table",
     rows: [],
     nextOffset: 0,
     hasMore: false,
-    mode: "table",
     truncated: false,
     loading: true,
     error: null,
@@ -3956,68 +4000,215 @@ function toggleTablePanelActivePane(pane) {
 }
 
 function updateSqlConsolePanel() {
-  elements.sqlConsoleStatus.textContent = sqlConsoleState.loading
+  const active = sqlConsoleState.resultTabs.find(tab => tab.id === sqlConsoleState.activeResultTabId) ?? sqlConsoleState.resultTabs.at(-1);
+  const controls = inspectorSqlPhaseControls(sqlConsoleState.phase);
+  elements.sqlConsoleStatus.textContent = controls.busy
     ? "Running..."
     : sqlConsoleState.error
       ? "Query failed"
-      : sqlConsoleState.columns.length
-        ? `${sqlConsoleState.rows.length}${sqlConsoleState.truncated ? "+" : ""} rows`
+      : active?.kind === "result"
+        ? active.meta
         : "SELECT · WITH · VALUES · TABLE · EXPLAIN";
-  elements.runSqlConsole.disabled = sqlConsoleState.loading;
-  elements.runSqlConsole.textContent = sqlConsoleState.loading ? "Running..." : "Run query";
+  elements.runSqlConsole.disabled = controls.busy;
+  elements.cancelSqlConsole.hidden = !controls.showCancel;
+  elements.cancelSqlConsole.disabled = controls.cancelDisabled;
+  elements.runSqlConsole.textContent = controls.busy ? "Running..." : "Run";
+  if (tableDataState.mode === "results") updateTableDataPanel();
 }
 
-async function executeSqlConsole() {
-  const target = tableDataState.target;
-  const statement = elements.sqlConsoleInput.value;
-  if (!target || !statement.trim() || sqlConsoleState.loading) return;
+async function disposeInspectorSqlConsole(state) {
+  const work = (state?.resultTabs || []).filter(tab => tab.kind === "result" && tab.statement?.hasMore).map(closeConsoleResultResource);
+  if (state?.executionId && state.executionProfileId) {
+    work.push(postgresRequest(`/api/postgres/profiles/${encodeURIComponent(state.executionProfileId)}/console/executions/${encodeURIComponent(state.executionId)}`, { method: "DELETE" }).catch(error => {
+      if (error.code !== "execution_not_found") throw error;
+    }));
+  }
+  const settled = await Promise.allSettled(work);
+  const failures = settled.filter(item => item.status === "rejected").map(item => item.reason);
+  if (failures.length) throw new AggregateError(failures, "Some PostgreSQL Console resources could not be released; they will expire automatically");
+}
+
+function deactivateInspectorSqlConsole() {
+  if (!sqlConsoleState.key || (sqlConsoleState.phase === "idle" && !sqlConsoleState.resultTabs.some(tab => tab.statement?.hasMore))) return;
+  const previous = sqlConsoleState;
   const requestId = ++sqlConsoleRequestId;
-  sqlConsoleState = { ...sqlConsoleState, columns: [], rows: [], truncated: false, loading: true, error: null, requestId };
+  const interrupted = sqlConsoleState.phase !== "idle";
+  const resultTabs = sqlConsoleState.resultTabs.map(tab => tab.kind === "loading"
+    ? inspectorSqlErrorTab("Cancelled", "The table Console was closed", "The read-only execution was cancelled and its result was not retained.", "Rolled back")
+    : tab);
+  sqlConsoleState = {
+    ...sqlConsoleState,
+    resultTabs,
+    activeResultTabId: interrupted ? resultTabs[0]?.id ?? null : sqlConsoleState.activeResultTabId,
+    executionId: null, executionProfileId: null,
+    phase: "idle", loading: false, error: interrupted ? "The table Console was closed" : sqlConsoleState.error, requestId,
+  };
   updateSqlConsolePanel();
+  void disposeInspectorSqlConsole(previous).then(() => updateSqlConsolePanel()).catch(error => showToast(error.message));
+}
+
+function inspectorSqlErrorTab(label, message, detail, meta = "Not run") {
+  return { id: crypto.randomUUID(), label, meta, kind: "error", message, detail };
+}
+
+function showInspectorSqlError(label, message, detail) {
+  const errorTab = inspectorSqlErrorTab(label, message, detail);
+  sqlConsoleState.resultTabs = [errorTab, ...sqlConsoleState.resultTabs.filter(tab => tab.kind !== "error")];
+  sqlConsoleState.activeResultTabId = errorTab.id;
+  sqlConsoleState.error = message;
+  tableDataState.mode = "results";
+  updateSqlConsolePanel();
+  setTablePanelActivePane("data");
+}
+
+function inspectorSqlTargetIsCurrent(panelExpanded, target, tableDataKey, consoleKey) {
+  return Boolean(panelExpanded && target && target.key === tableDataKey && target.key === consoleKey
+    && target.profileId && target.profileFingerprint && target.database && target.namespace);
+}
+
+function inspectorSqlPhaseControls(phase) {
+  const busy = phase !== "idle";
+  return { busy, showCancel: phase === "running" || phase === "cancelling", cancelDisabled: phase !== "running" };
+}
+
+async function executeSqlConsole(sqlOverride = null) {
+  const currentTable = getTable(selectedTableId);
+  const target = currentTable && tableDataTarget(currentTable);
+  const editorSql = elements.sqlConsoleInput.value;
+  const sql = sqlOverride ?? standaloneSqlForRun(editorSql, elements.sqlConsoleInput.selectionStart, elements.sqlConsoleInput.selectionEnd, false);
+  if (sqlConsoleState.phase !== "idle") return;
+  if (!inspectorSqlTargetIsCurrent(tableDataPanelExpanded, target, tableDataState.key, sqlConsoleState.key)) return showInspectorSqlError("Target required", "The exact PostgreSQL target is unavailable", "Refresh the linked saved schema and connection profile before running SQL.");
+  if (!sql) {
+    return showInspectorSqlError("Empty query", "Nothing to run", "Select text or place the cursor inside a PostgreSQL statement.");
+  }
+  const requestId = ++sqlConsoleRequestId;
+  const previousTabs = sqlConsoleState.resultTabs;
+  const preparingId = `preparing-${requestId}`;
+  sqlConsoleState = {
+    ...sqlConsoleState,
+    resultTabs: [{ id: preparingId, label: "Result", meta: "Preparing", kind: "loading", message: "Preparing the exact read-only PostgreSQL target..." }],
+    activeResultTabId: preparingId,
+    lastSql: sql,
+    phase: "preparing",
+    loading: true,
+    error: null,
+    requestId,
+  };
+  tableDataState.mode = "results";
+  updateSqlConsolePanel();
+  setTablePanelActivePane("data");
   try {
-    const result = await postgresRequest(`/api/postgres/profiles/${encodeURIComponent(target.profileId)}/sql`, {
-      method: "POST",
-      body: JSON.stringify({ namespace: target.namespace, sql: statement })
-    });
-    if (sqlConsoleState.requestId !== requestId || sqlConsoleState.key !== target.key) return;
-    sqlConsoleState.columns = result.columns;
-    sqlConsoleState.rows = result.rows;
-    sqlConsoleState.truncated = result.truncated;
-    const dataRequestId = ++tableDataRequestId;
-    const columns = result.columns.map(column => ({ name: column.name, type: "query result", primary: false }));
-    tableDataState = {
-      key: target.key,
-      target,
-      columns,
-      rows: result.rows,
-      nextOffset: 0,
-      hasMore: false,
-      stableOrder: true,
-      mode: "query",
-      truncated: result.truncated,
-      loading: false,
-      error: null,
-      requestId: dataRequestId
-    };
-    updateTableDataPanel();
-    setTablePanelActivePane("data");
+    await Promise.all(previousTabs.filter(tab => tab.kind === "result" && tab.statement?.hasMore).map(closeConsoleResultResource));
   } catch (error) {
     if (sqlConsoleState.requestId !== requestId) return;
+    const cleanupError = inspectorSqlErrorTab("Cleanup required", "Previous Console results could not be released", "Use Close result on retained results, then run the query again.");
+    sqlConsoleState.resultTabs = [cleanupError, ...previousTabs];
+    sqlConsoleState.activeResultTabId = cleanupError.id;
+    sqlConsoleState.phase = "idle";
+    sqlConsoleState.loading = false;
     sqlConsoleState.error = error.message;
-    showToast(error.message);
+    updateSqlConsolePanel();
+    showToast("Previous Console results could not be released. Close them and try again.");
+    return;
+  }
+  if (sqlConsoleState.requestId !== requestId || sqlConsoleState.key !== target.key) return;
+  let settings;
+  try {
+    settings = await loadConsoleSettings();
+  } catch (error) {
+    if (sqlConsoleState.requestId !== requestId || sqlConsoleState.key !== target.key) return;
+    sqlConsoleState.resultTabs = [inspectorSqlErrorTab("Settings unavailable", error.message, "Console settings must be available before execution.")];
+    sqlConsoleState.activeResultTabId = sqlConsoleState.resultTabs[0].id;
+    sqlConsoleState.phase = "idle";
+    sqlConsoleState.loading = false;
+    sqlConsoleState.error = error.message;
+    updateSqlConsolePanel();
+    return;
+  }
+  if (sqlConsoleState.requestId !== requestId || sqlConsoleState.key !== target.key) return;
+  const executionId = crypto.randomUUID();
+  const consoleId = sqlConsoleState.consoleId;
+  sqlConsoleState = {
+    ...sqlConsoleState,
+    resultTabs: [{ id: `running-${executionId}`, label: "Result", meta: "Running", kind: "loading", message: "Executing a read-only PostgreSQL transaction..." }],
+    activeResultTabId: `running-${executionId}`,
+    executionId,
+    executionProfileId: target.profileId,
+    phase: "running",
+    loading: true,
+    error: null,
+    requestId,
+  };
+  updateSqlConsolePanel();
+  try {
+    const result = await executeConsoleTransaction(target, {
+      executionId, consoleId, sql,
+      mode: "managed_read", settingsRevision: settings.revision,
+    });
+    const resultTabs = result.statements.map((statement, index) => ({
+      id: crypto.randomUUID(), label: `Result ${index + 1}`,
+      meta: `${statement.command} · ${statement.rowCount}${statement.hasMore ? "+" : ""} rows · rolled back`,
+      kind: "result", statement, committed: false, target, consoleId,
+    }));
+    if (sqlConsoleState.requestId !== requestId || sqlConsoleState.executionId !== executionId || sqlConsoleState.key !== target.key) {
+      await Promise.allSettled(resultTabs.filter(tab => tab.statement?.hasMore).map(closeConsoleResultResource));
+      return;
+    }
+    sqlConsoleState.resultTabs = resultTabs;
+    sqlConsoleState.activeResultTabId = sqlConsoleState.resultTabs[0]?.id ?? null;
+  } catch (error) {
+    if (sqlConsoleState.requestId !== requestId || sqlConsoleState.executionId !== executionId) return;
+    const details = error.payload?.error?.details;
+    const suffix = [details?.sqlstate, Number.isInteger(details?.statementIndex) ? `statement ${details.statementIndex + 1}` : ""].filter(Boolean).join(" · ");
+    const diagnostic = postgresDiagnosticText(error);
+    sqlConsoleState.resultTabs = [inspectorSqlErrorTab(error.code === "execution_cancelled" ? "Cancelled" : "Error", diagnostic, suffix ? `${suffix}\nThe read-only transaction was rolled back.` : "The read-only transaction was rolled back.", `${suffix ? `${suffix} · ` : ""}Rolled back`)];
+    sqlConsoleState.activeResultTabId = sqlConsoleState.resultTabs[0].id;
+    sqlConsoleState.error = error.message;
   } finally {
-    if (sqlConsoleState.requestId === requestId) {
+    if (sqlConsoleState.requestId === requestId && sqlConsoleState.executionId === executionId) {
       sqlConsoleState.loading = false;
+      sqlConsoleState.executionId = null;
+      sqlConsoleState.executionProfileId = null;
+      sqlConsoleState.phase = "idle";
       updateSqlConsolePanel();
     }
   }
 }
 
-function clearSqlConsole() {
-  const requestId = ++sqlConsoleRequestId;
-  sqlConsoleState = { ...sqlConsoleState, columns: [], rows: [], truncated: false, loading: false, error: null, requestId };
-  elements.sqlConsoleInput.value = "";
+async function cancelSqlConsole() {
+  if (sqlConsoleState.phase !== "running" || !sqlConsoleState.executionId || !sqlConsoleState.executionProfileId) return;
+  const executionId = sqlConsoleState.executionId;
+  sqlConsoleState.phase = "cancelling";
+  const active = sqlConsoleState.resultTabs.find(tab => tab.id === sqlConsoleState.activeResultTabId);
+  if (active?.kind === "loading") active.message = "Requesting PostgreSQL cancellation and waiting for rollback...";
   updateSqlConsolePanel();
+  try {
+    await postgresRequest(`/api/postgres/profiles/${encodeURIComponent(sqlConsoleState.executionProfileId)}/console/executions/${encodeURIComponent(executionId)}`, { method: "DELETE" });
+  } catch (error) {
+    if (sqlConsoleState.executionId === executionId && error.code !== "execution_not_found") {
+      sqlConsoleState.phase = "running";
+      updateSqlConsolePanel();
+      showToast(error.message);
+    }
+  }
+}
+
+async function clearSqlConsole() {
+  const previous = sqlConsoleState;
+  const requestId = ++sqlConsoleRequestId;
+  sqlConsoleState = {
+    ...sqlConsoleState,
+    consoleId: crypto.randomUUID(),
+    resultTabs: [], activeResultTabId: null, lastSql: null,
+    executionId: null, executionProfileId: null,
+    phase: "idle",
+    loading: false, error: null, requestId,
+  };
+  void disposeInspectorSqlConsole(previous).catch(error => showToast(error.message));
+  elements.sqlConsoleInput.value = "";
+  tableDataState.mode = "table";
+  updateSqlConsolePanel();
+  updateTableDataPanel();
   elements.sqlConsoleInput.focus();
 }
 
@@ -7072,15 +7263,51 @@ elements.showSqlConsolePane.addEventListener("contextmenu", event => {
   event.preventDefault();
   setTableDataPanelMaximized(!tableDataPanelMaximized);
 });
-elements.runSqlConsole.addEventListener("click", executeSqlConsole);
-elements.clearSqlConsole.addEventListener("click", clearSqlConsole);
+elements.runSqlConsole.addEventListener("click", () => { void executeSqlConsole(); });
+elements.cancelSqlConsole.addEventListener("click", () => { void cancelSqlConsole(); });
+elements.clearSqlConsole.addEventListener("click", () => { void clearSqlConsole(); });
 elements.sqlConsoleInput.addEventListener("keydown", event => {
   if (event.key !== "Enter" || (!event.ctrlKey && !event.metaKey)) return;
   event.preventDefault();
-  executeSqlConsole();
+  void executeSqlConsole();
+});
+elements.inspectorSqlResultTabs.addEventListener("click", async event => {
+  const button = event.target.closest("[data-inspector-result-tab]");
+  const closeButton = event.target.closest("[data-close-inspector-result]");
+  if (button) sqlConsoleState.activeResultTabId = button.dataset.inspectorResultTab;
+  if (closeButton) {
+    const index = sqlConsoleState.resultTabs.findIndex(tab => tab.id === closeButton.dataset.closeInspectorResult);
+    if (index !== -1) {
+      const tab = sqlConsoleState.resultTabs[index];
+      try {
+        await closeConsoleResultResource(tab);
+      } catch (error) {
+        showToast(error.message);
+        return;
+      }
+      sqlConsoleState.resultTabs.splice(index, 1);
+      if (sqlConsoleState.activeResultTabId === tab.id) sqlConsoleState.activeResultTabId = sqlConsoleState.resultTabs[Math.min(index, sqlConsoleState.resultTabs.length - 1)]?.id ?? null;
+    }
+  }
+  if (button || closeButton) updateTableDataPanel();
+});
+elements.tableDataScroll.addEventListener("click", async event => {
+  const load = event.target.closest("[data-load-result-page]");
+  const exportButton = event.target.closest("[data-export-result]");
+  const close = event.target.closest("[data-close-result-resource]");
+  if (!load && !exportButton && !close) return;
+  const tab = sqlConsoleState.resultTabs.find(item => item.id === sqlConsoleState.activeResultTabId);
+  try {
+    if (load) await loadConsoleResultPage(tab);
+    if (exportButton) await exportConsoleResult(tab);
+    if (close) await closeConsoleResultResource(tab);
+    updateSqlConsolePanel();
+  } catch (error) {
+    showToast(error.message);
+  }
 });
 elements.tableDataScroll.addEventListener("scroll", () => {
-  if (elements.tableDataScroll.scrollHeight - elements.tableDataScroll.scrollTop - elements.tableDataScroll.clientHeight < 60) loadMoreTableData();
+  if (tableDataState.mode === "table" && elements.tableDataScroll.scrollHeight - elements.tableDataScroll.scrollTop - elements.tableDataScroll.clientHeight < 60) loadMoreTableData();
 });
 
 elements.inspectorContent.addEventListener("change", event => {
@@ -7573,7 +7800,7 @@ elements.standaloneSqlResultTabs.addEventListener("click", event => {
     const index = viewState.resultTabs.findIndex(item => item.id === closeButton.dataset.closeResultTab);
     if (index !== -1) {
       const [removed] = viewState.resultTabs.splice(index, 1);
-      void closeStandaloneSqlResultResource(removed);
+      void closeConsoleResultResource(removed);
       if (viewState.activeResultTabId === removed.id) viewState.activeResultTabId = viewState.resultTabs[Math.min(index, viewState.resultTabs.length - 1)]?.id ?? null;
     }
   }
@@ -7583,23 +7810,34 @@ elements.standaloneSqlResultBody.addEventListener("click", async event => {
   const viewState = currentStandaloneSqlView();
   const tab = viewState.resultTabs.find(item => item.id === viewState.activeResultTabId);
   try {
-    if (event.target.closest("[data-load-result-page]")) await loadStandaloneSqlResultPage(tab);
-    if (event.target.closest("[data-export-result]")) await exportStandaloneSqlResult(tab);
+    if (event.target.closest("[data-load-result-page]")) await loadConsoleResultPage(tab);
+    if (event.target.closest("[data-export-result]")) await exportConsoleResult(tab);
     if (event.target.closest("[data-close-result-resource]")) {
-      await closeStandaloneSqlResultResource(tab);
-      renderStandaloneSqlResultTabs();
+      await closeConsoleResultResource(tab);
     }
+    renderStandaloneSqlResultTabs();
   } catch (error) {
     showToast(error.message);
   }
 });
 window.addEventListener("beforeunload", () => {
+  if (sqlConsoleState.executionId && sqlConsoleState.executionProfileId) {
+    void postgresRequest(`/api/postgres/profiles/${encodeURIComponent(sqlConsoleState.executionProfileId)}/console/executions/${encodeURIComponent(sqlConsoleState.executionId)}`, { method: "DELETE", keepalive: true }).catch(() => {});
+  }
+  for (const tab of sqlConsoleState.resultTabs || []) {
+    if (tab.kind === "result" && tab.statement?.hasMore) {
+      void postgresRequest(consoleResultUrl(tab), { method: "DELETE", keepalive: true }).catch(() => {});
+    }
+  }
   for (const viewState of standaloneSqlState.views) {
     for (const tab of viewState.resultTabs || []) {
       if (tab.kind === "result" && tab.statement?.hasMore) {
-        void postgresRequest(standaloneSqlResultUrl(tab), { method: "DELETE", keepalive: true }).catch(() => {});
+        void postgresRequest(consoleResultUrl(tab), { method: "DELETE", keepalive: true }).catch(() => {});
       }
     }
+  }
+  if (standaloneSqlState.executionId && standaloneSqlState.executionProfileId) {
+    void postgresRequest(`/api/postgres/profiles/${encodeURIComponent(standaloneSqlState.executionProfileId)}/console/executions/${encodeURIComponent(standaloneSqlState.executionId)}`, { method: "DELETE", keepalive: true }).catch(() => {});
   }
 });
 function finishStandaloneSqlTabRename(input, cancel = false) {

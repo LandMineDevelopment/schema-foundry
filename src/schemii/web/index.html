@@ -178,7 +178,7 @@
             <section class="table-data-pane" id="table-data-pane">
               <header class="table-data-panel-head" id="table-data-panel-head">
                 <button class="table-pane-heading" id="show-table-data-pane" type="button" aria-expanded="true">
-                  <span class="eyebrow">Live PostgreSQL rows</span>
+                  <span class="eyebrow" id="table-data-panel-eyebrow">Live PostgreSQL rows</span>
                   <strong id="table-data-panel-title">Table data</strong>
                 </button>
                 <div class="table-data-panel-actions">
@@ -197,6 +197,7 @@
               </header>
               <div class="table-data-pane-content" id="table-data-pane-content">
                 <div class="table-data-warning" id="table-data-warning" hidden>No primary key; page order may change.</div>
+                <nav class="standalone-sql-result-tabs table-sql-result-tabs" id="inspector-sql-result-tabs" aria-label="SQL result tabs" role="tablist" hidden></nav>
                 <div class="table-data-scroll" id="table-data-scroll" tabindex="0"></div>
               </div>
             </section>
@@ -211,7 +212,8 @@
                   <div class="sql-console-actions">
                     <span>Run selection or cursor statement with <kbd>Ctrl</kbd> + <kbd>Enter</kbd></span>
                     <button id="clear-sql-console" type="button">Clear</button>
-                    <button class="button button-primary" id="run-sql-console" type="button">Run query</button>
+                    <button class="button button-danger" id="cancel-sql-console" type="button" hidden disabled>Stop</button>
+                    <button class="button button-primary" id="run-sql-console" type="button">Run</button>
                   </div>
                 </div>
               </div>
@@ -403,7 +405,7 @@
                 </section>
                 <section class="tour-sql-pane">
                   <div class="tour-sql-console" data-demo-target="sql-header"><span>READ-ONLY WORKSPACE</span><strong>SQL console</strong><i>›</i></div>
-                  <div class="tour-sql-editor"><code>SELECT *<br>FROM "public"."orders"<br>LIMIT 100;</code><div class="tour-sql-actions"><span>Ctrl + Enter</span><b>Run query</b></div></div>
+                  <div class="tour-sql-editor"><code>SELECT *<br>FROM "public"."orders"<br>LIMIT 100;</code><div class="tour-sql-actions"><span>Ctrl + Enter</span><b>Run</b></div></div>
                 </section>
               </div>
               <div class="tour-inspector">

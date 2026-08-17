@@ -12,7 +12,7 @@ const sharedConsole = fs.readFileSync(path.join(root, "src/schemii/shared_web/po
 assert.match(sharedConsole, /crypto\.randomUUID\(\)[\s\S]*console\/executions[\s\S]*settingsRevision:[\s\S]*profileFingerprint:/, "runs must use caller-owned execution IDs and revision-bound exact targets");
 assert.match(source, /console\/executions\/\$\{encodeURIComponent\(executionId\)\}[\s\S]*method: "DELETE"/, "Cancel must request server-side PostgreSQL cancellation");
 assert.match(source, /result\.statements\.map\(\(statement, index\) => \(\{[\s\S]*kind: "result"/, "each ordered statement response must become a result tab");
-assert.match(source, /function standaloneSqlTabContent[\s\S]*statement\.columns[\s\S]*statement\.rows/, "result tabs must render server-returned columns and rows");
+assert.match(source, /function consoleResultTabContent[\s\S]*statement\.columns[\s\S]*statement\.rows/, "shared result tabs must render server-returned columns and rows");
 assert.match(source, /profileId: selected\.id[\s\S]*database: selected\.dbname[\s\S]*namespace: postgresState\.namespace/, "execution must retain the exact selected target identity");
 assert.match(html, /id="standalone-sql-write-toggle"[^>]*disabled/, "write mode must be unavailable until an exact target is selected");
 assert.match(html, /id="sql-run-button"[\s\S]*id="sql-run-all-button"[\s\S]*id="sql-stop-button"/, "the tool rail must expose distinct Run, Run all, and Stop actions");
@@ -58,12 +58,12 @@ assert.doesNotMatch(source, /Preparing a synthetic PostgreSQL response|finishSta
 assert.match(sharedConsole, /\/api\/postgres\/console\/settings[\s\S]*expectedRevision[\s\S]*writeIntent/, "write intent must use optimistic durable settings");
 assert.doesNotMatch(sharedConsole, /write-grants|writeGrantId|expiresAt/, "normal Console workflow must not use grants or expiry");
 assert.match(source, /function loadStandaloneSqlSettings[\s\S]*\/api\/postgres\/console\/settings[\s\S]*expectedRevision:[\s\S]*writeIntent: "enabled"/, "standalone writes must enable durable application write intent through the settings boundary");
-assert.match(source, /mode: writeMode \? "managed" : "managed_read"[\s\S]*settingsRevision: settings\.revision[\s\S]*profileFingerprint: target\.profileFingerprint/, "standalone execution must submit revision-bound exact targets");
+assert.match(source, /function executeConsoleTransaction[\s\S]*settingsRevision[\s\S]*profileFingerprint: target\.profileFingerprint[\s\S]*mode: writeMode \? "managed" : "managed_read"[\s\S]*settingsRevision: settings\.revision/, "standalone execution must submit revision-bound exact targets through the shared execution boundary");
 assert.doesNotMatch(source, /write-grants|writeGrantId|writeGrantExpiresAt/, "standalone Console must not depend on retired grants");
-assert.match(source, /function standaloneSqlResultUrl[\s\S]*statementIndex[\s\S]*resultIndex[\s\S]*nextCursor/, "standalone result paging must use exact opaque resource identity");
+assert.match(source, /function consoleResultUrl[\s\S]*statementIndex[\s\S]*resultIndex[\s\S]*nextCursor/, "Console result paging must use exact opaque resource identity");
 assert.match(source, /data-load-result-page[\s\S]*data-export-result[\s\S]*data-close-result-resource/, "standalone incomplete results must expose paging, export, and close controls");
-assert.match(source, /while \(tab\?\.statement\?\.hasMore\) await loadStandaloneSqlResultPage/, "standalone export must drain retained pages without replay");
-assert.match(source, /closeStandaloneSqlResultResources[\s\S]*closeStandaloneSqlWorkspace[\s\S]*beforeunload/, "standalone query and page shutdown must clean up retained results");
+assert.match(source, /while \(tab\?\.statement\?\.hasMore\) await loadConsoleResultPage/, "Console export must drain retained pages without replay");
+assert.match(source, /closeConsoleResultResources[\s\S]*closeStandaloneSqlWorkspace[\s\S]*beforeunload/, "standalone query and page shutdown must clean up retained results");
 assert.match(sharedConsole, /activeTransaction[\s\S]*guardTargetChange[\s\S]*Commit or roll back/, "active explicit transactions must guard target changes and close");
 assert.match(source, /function openStandaloneSqlWorkspace[\s\S]*viewsPrototypeState\.layer === "views"[\s\S]*viewsPrototypeWorkspace\.classList\.remove\("open"\)[\s\S]*viewsPrototypeWorkspace\.hidden = true/, "opening SQL from Views must retract and hide the Views pane");
 assert.match(source, /if \(restoreLayer && viewsPrototypeState\.layer === "views"\)[\s\S]*viewsPrototypeWorkspace\.hidden = false[\s\S]*requestAnimationFrame\(\(\) => elements\.viewsPrototypeWorkspace\.classList\.add\("open"\)\)/, "closing SQL without direct tab navigation must animate the prior Views pane back in");
@@ -74,7 +74,7 @@ assert.match(html, /Successful scripts commit transactionally[\s\S]*external or 
 assert.doesNotMatch(html, /Phase 1 remains|visual prototype and executes nothing|future write-enabled/, "prototype write-mode copy must not remain");
 
 const scannerStart = source.indexOf("function standaloneSqlStatementRanges");
-const scannerEnd = source.indexOf("function standaloneSqlTabContent", scannerStart);
+const scannerEnd = source.indexOf("function consoleResultTabContent", scannerStart);
 assert.notEqual(scannerStart, -1, "Console statement scanner is missing");
 assert.notEqual(scannerEnd, -1, "Console statement scanner end marker is missing");
 const context = vm.createContext({});
