@@ -102,6 +102,8 @@
     });
     let settingsReturnFocus = null;
     let historyReturnFocus = null;
+    const proposalActivities = new Set();
+    let proposalActivityTimer = null;
     const allowPath = path => typeof path === "string" && path.startsWith("/api/ai/");
     const request = (path, requestOptions = {}) => sessionClient.json(path, requestOptions, { allowPath, defaultMessage: "The AI service request failed" });
     const fetchActivity = (path, requestOptions = {}) => sessionClient.fetch(path, requestOptions, { allowPath, defaultMessage: "Agent activity is unavailable" });
@@ -544,6 +546,42 @@
 
     function scrollToEnd() { elements.messages.scrollTop = elements.messages.scrollHeight; }
 
+    function tickProposalActivities() {
+      for (const activity of [...proposalActivities]) {
+        if (!activity.elapsed.isConnected) { proposalActivities.delete(activity); continue; }
+        activity.elapsed.textContent = formatDuration(performance.now() - activity.startedAt);
+      }
+      if (!proposalActivities.size && proposalActivityTimer !== null) {
+        clearInterval(proposalActivityTimer); proposalActivityTimer = null;
+      }
+    }
+
+    function beginProposalOperation(card, labels = {}) {
+      if (!(card instanceof HTMLElement)) throw new TypeError("A proposal card is required");
+      card.querySelector(".ai-action-progress")?.remove();
+      const startedAt = performance.now();
+      const progress = document.createElement("div"); progress.className = "ai-action-progress running";
+      const indicator = document.createElement("span"); indicator.className = "ai-action-progress-indicator"; indicator.setAttribute("aria-hidden", "true");
+      const status = document.createElement("span"); status.className = "ai-action-progress-status"; status.setAttribute("role", "status"); status.setAttribute("aria-live", "polite"); status.setAttribute("aria-atomic", "true"); status.textContent = labels.runningLabel || "Running proposal";
+      const elapsed = document.createElement("time"); elapsed.className = "ai-action-progress-time"; elapsed.setAttribute("aria-hidden", "true"); elapsed.textContent = "0.0s";
+      progress.append(indicator, status, elapsed); card.append(progress); card.classList.add("running"); card.setAttribute("aria-busy", "true"); scrollToEnd();
+      const activity = { elapsed, startedAt }; proposalActivities.add(activity);
+      if (proposalActivityTimer === null) proposalActivityTimer = setInterval(tickProposalActivities, 100);
+      let finished = false;
+      return {
+        finish(outcome = "completed") {
+          if (finished) return; finished = true;
+          elapsed.textContent = formatDuration(performance.now() - startedAt); proposalActivities.delete(activity); tickProposalActivities();
+          const failed = outcome === "failed"; const warning = outcome === "warning";
+          progress.className = `ai-action-progress ${failed ? "failed" : warning ? "warning" : "completed"}`;
+          const terminalLabel = failed ? (labels.failedLabel || "Proposal failed") : warning ? (labels.warningLabel || "Proposal completed; refresh failed") : (labels.completedLabel || "Proposal completed");
+          status.textContent = `${terminalLabel} in ${elapsed.textContent}`;
+          card.classList.remove("running"); card.removeAttribute("aria-busy");
+          elapsed.setAttribute("datetime", `PT${Math.max(0, (performance.now() - startedAt) / 1000).toFixed(3)}S`);
+        }
+      };
+    }
+
     function beginActivity(modelName) {
       removeEmptyState();
       const startedAt = performance.now();
@@ -642,11 +680,15 @@
       });
     }
 
-    async function executeProposal(proposal, capture) {
+    function proposalContextIsCurrent(capture) {
       const currentAccess = elements.access.value;
       const currentCapture = getContext(currentAccess);
       const capturedAccess = capture?.accessLevel ?? currentAccess;
-      if (!currentCapture || contextKey(capture, capturedAccess) !== contextKey(currentCapture, currentAccess)) {
+      return Boolean(currentCapture && contextKey(capture, capturedAccess) === contextKey(currentCapture, currentAccess));
+    }
+
+    async function executeProposal(proposal, capture) {
+      if (!proposalContextIsCurrent(capture)) {
         throw new Error("The application context changed. Start a new conversation before confirming this action.");
       }
       const context = buildProposalClaimPayload ? buildProposalClaimPayload(capture, elements.access.value) : {};
@@ -701,15 +743,22 @@
       button.addEventListener("click", async () => {
         const consequence = normalized.destructive ? "\n\nThis action is destructive and cannot be undone." : "";
         if (!confirm(`${normalized.summary}${consequence}\n\nConfirm this reviewed action?`)) return;
-        card.querySelectorAll(".ai-action-error").forEach(error => error.remove()); button.disabled = true;
+        card.querySelectorAll(".ai-action-error").forEach(error => error.remove()); button.disabled = true; button.textContent = "Running...";
+        const activity = beginProposalOperation(card);
+        let operationSucceeded = false;
         try {
           const response = await executeProposal(proposal, capture);
           const operation = response.operation;
           if (operation?.state !== "succeeded") throw operationError(operation);
+          operationSucceeded = true;
+          if (!proposalContextIsCurrent(capture)) { activity.finish("completed"); button.textContent = "Completed"; return; }
           const appliedLabel = await handleOperationResult?.(operation.result, capture);
+          activity.finish("completed");
           button.textContent = appliedLabel || normalized.appliedLabel || "Applied"; card.classList.add("applied");
         } catch (error) {
-          button.disabled = false;
+          activity.finish(operationSucceeded ? "warning" : "failed");
+          button.disabled = operationSucceeded;
+          button.textContent = operationSucceeded ? "Completed" : normalized.buttonLabel || (normalized.destructive ? "Review deletion" : "Review & confirm");
           if (!renderStructuredError(error)) { const detail = document.createElement("p"); detail.className = "ai-action-error"; detail.textContent = error.message; card.append(detail); }
         }
       });
@@ -780,6 +829,7 @@
 
     function resetConversation(copy = labels.newChatCopy || "Proposals will use the current application context.") {
       if (state.busy) return;
+      proposalActivities.clear(); tickProposalActivities();
       state.requestGeneration += 1; state.sessionId = null; state.contextKey = null; elements.messages.replaceChildren(); onNewChat();
       const empty = document.createElement("div"); empty.className = "ai-empty-state";
       const title = document.createElement("strong"); title.textContent = "New conversation";
@@ -788,6 +838,7 @@
     }
 
     function invalidateContext(copy = "Application context changed. The next message starts a new isolated conversation.") {
+      proposalActivities.clear(); tickProposalActivities();
       state.requestGeneration += 1; state.sessionId = null; state.contextKey = null; setBusy(false); elements.messages.replaceChildren(); onNewChat();
       const empty = document.createElement("div"); empty.className = "ai-empty-state";
       const title = document.createElement("strong"); title.textContent = "New conversation";
@@ -805,6 +856,7 @@
         const currentKey = contextKey(getContext(elements.access.value), elements.access.value);
         if (currentKey !== historyKey || !canViewSession(binding, currentKey, elements.access.value)) throw new Error("The application context changed; reopen history before continuing");
         const history = await request(`/api/ai/sessions/${encodeURIComponent(session.id)}/messages?${historyQuery}`, { method: "GET" });
+        proposalActivities.clear(); tickProposalActivities();
         state.requestGeneration += 1; elements.messages.replaceChildren();
         for (const message of history.messages ?? []) {
           if (message.role === "user") appendMessage("user", message.text);
@@ -854,7 +906,7 @@
 
     const api = Object.freeze({
       appendMessage, appendQueryResult, renderResponse, sendMessage, scrollToEnd, invalidateContext,
-      executeProposal, openSettings, operationError, renderError: renderStructuredError,
+      executeProposal, beginProposalOperation, proposalContextIsCurrent, openSettings, operationError, renderError: renderStructuredError,
       get accessLevel() { return elements.access.value; }, get state() { return state; }, get settings() { return state.settings; },
     });
 

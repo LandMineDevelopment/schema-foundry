@@ -196,7 +196,9 @@ assert.match(queryExecutor, /await sendAiMessage\(text, "tool"\)/, "failed SQL f
 assert.match(source, /handleSchemiiAiOperationResult/, "Schemii must consume only allow-listed server operation results");
 assert.match(source, /card\.querySelectorAll\("\.ai-action-error"\).*remove/, "repeated review attempts must replace prior validation errors");
 assert.match(shared, /function invalidateContext[\s\S]*state\.requestGeneration \+= 1/, "application context changes must invalidate in-flight assistant responses");
-assert.match(shared, /contextKey\(capture, capturedAccess\) !== contextKey\(currentCapture, currentAccess\)/, "proposal execution must reject stale application context at click time");
+assert.match(shared, /function proposalContextIsCurrent[\s\S]*contextKey\(capture, capturedAccess\) === contextKey\(currentCapture, currentAccess\)[\s\S]*if \(!proposalContextIsCurrent\(capture\)\)/, "proposal execution must reject stale application context at click time");
+assert.match(shared, /operationSucceeded = true;[\s\S]*!proposalContextIsCurrent\(capture\)[\s\S]*return/, "completed shared operations must not apply their result after the application context changes");
+assert.match(source, /operationSucceeded = true;[\s\S]*!aiAssistant\.proposalContextIsCurrent\(context\)[\s\S]*return/, "completed Schemii operations must not mutate a replacement design or chat context");
 assert.match(shared, /control\.disabled = busy \|\| control\.dataset\.aiUnavailable === "true"/, "shared busy-state updates must preserve application-disabled permission controls");
 assert.match(shared, /AI provider/, "provider status must not look like a PostgreSQL connection count");
 assert.match(source, /targetCapabilities = new Set[\s\S]*targetAvailable \|\| !targetCapabilities\.has\(name\)/, "local designs must narrow target-dependent server capabilities");
@@ -238,6 +240,13 @@ assert.match(activityRenderer, /skillLabels\[event\.skill\]/, "live skill activi
 assert.match(activityRenderer, /event\.type === "part"\) setStage\("model", "Model started", "completed"\)/, "the first model output must complete the model-started stage");
 assert.match(activityRenderer, /body\.textContent = part\.text/, "reasoning must render as text rather than HTML");
 assert.doesNotMatch(activityRenderer, /innerHTML|insertAdjacentHTML|eval\(/, "agent visualizations must not interpret model output as code or HTML");
+const proposalActivity = shared.slice(shared.indexOf("function tickProposalActivities"), shared.indexOf("function beginActivity"));
+assert.match(proposalActivity, /function beginProposalOperation[\s\S]*ai-action-progress running[\s\S]*aria-busy[\s\S]*setInterval\(tickProposalActivities, 100\)/, "confirmed proposals must show a visible busy state with a live elapsed timer");
+assert.match(proposalActivity, /role", "status"[\s\S]*aria-live", "polite"[\s\S]*elapsed\.setAttribute\("aria-hidden", "true"\)/, "proposal state changes must be announced without repeatedly announcing timer ticks");
+assert.match(proposalActivity, /finish\(outcome = "completed"\)[\s\S]*formatDuration\(performance\.now\(\) - startedAt\)[\s\S]*Proposal failed[\s\S]*Proposal completed/, "terminal proposal visuals must retain the measured success or failure duration");
+assert.match(shared, /const activity = beginProposalOperation\(card\)[\s\S]*activity\.finish\("completed"\)[\s\S]*activity\.finish\(operationSucceeded \? "warning" : "failed"\)/, "shared Schemer proposal cards must drive the operation timer through authoritative and client-sync terminal states");
+assert.match(source, /executeAiReadQuery[\s\S]*beginProposalOperation\(card, \{ runningLabel: "Running query"[\s\S]*activity\.finish\("completed"\)[\s\S]*activity\.finish\(operationSucceeded \? "warning" : "failed"\)/, "Schemii query proposals must show and retain query execution time");
+assert.match(source, /confirmAiAction[\s\S]*beginProposalOperation\(card, \{ runningLabel: "Preparing proposal"[\s\S]*activity\.finish\("completed"\)/, "Schemii non-query proposals must use the shared running visual from preflight through completion");
 assert.match(shared, /requestGeneration !== state\.requestGeneration/, "stale agent responses must not enter a reset conversation");
 const newChat = shared.slice(shared.indexOf("function resetConversation"), shared.indexOf("function formatHistoryDate"));
 assert.doesNotMatch(newChat, /DELETE|delete_session/, "starting a new chat must preserve the prior persistent session");
@@ -250,6 +259,9 @@ assert.doesNotMatch(historyUi, /innerHTML|insertAdjacentHTML|eval\(/, "chat hist
 assert.match(html, /id="ai-history-dialog"/, "chat history dialog is missing");
 assert.match(sharedStyles, /@keyframes ai-dot-wave/, "agent progress animation is missing");
 assert.match(sharedStyles, /prefers-reduced-motion[\s\S]*\.ai-progress-grid i[\s\S]*animation: none/, "agent animations must respect reduced motion");
+assert.match(sharedStyles, /\.ai-action-card\.running[\s\S]*\.ai-action-progress\.running \.ai-action-progress-indicator/, "running proposals need a distinct card and operation marker");
+assert.match(sharedStyles, /@keyframes ai-proposal-spin/, "the proposal operation marker animation is missing");
+assert.match(sharedStyles, /prefers-reduced-motion[\s\S]*\.ai-action-progress\.running \.ai-action-progress-indicator[\s\S]*animation: none/, "proposal operation animation must respect reduced motion");
 
 const preferenceStart = shared.indexOf("function normalizeStoredModel");
 const preferenceEnd = shared.indexOf("function formatDuration", preferenceStart);

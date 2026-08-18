@@ -37,6 +37,7 @@ assert.match(html, /value="data"[\s\S]*data-ai-query-warning/, "Schemer must exp
 assert.doesNotMatch(html, /allow-session/, "Schemer must require confirmation for every analytic query");
 assert.match(source, /action\.type === "read_query"[\s\S]*action\.readOnly !== true[\s\S]*expectedRevision[\s\S]*buttonLabel: "Review & run query"/, "query proposals must be strict, read-only, revision-bound, and inert");
 assert.match(shared, /confirm\(`\$\{normalized\.summary\}\$\{consequence\}\\n\\nConfirm this reviewed action\?`\)/, "every Schemer operation must require one post-review confirmation with destructive wording when needed");
+assert.match(shared, /function beginProposalOperation[\s\S]*button\.textContent = "Running\.\.\."[\s\S]*const activity = beginProposalOperation\(card\)[\s\S]*activity\.finish\("completed"\)[\s\S]*activity\.finish\(operationSucceeded \? "warning" : "failed"\)/, "Schemer proposals must show live and authoritative terminal operation timing through the shared renderer");
 assert.match(source, /function schemerAiTargetLabel[\s\S]*toolbarTargetExplicit \? "selected" : "suggested"/, "Schemer AI must name whether its exact toolbar target was selected or merely suggested");
 assert.match(source, /result\?\.kind === "sql_result"[\s\S]*persistedAfter[\s\S]*appendQueryResult\(result\.display\)[\s\S]*resultRef: result\.resultRef/, "approved result references must retain local dashboard safety checks before follow-up delivery");
 assert.doesNotMatch(source, /queryResult: boundedSchemerAiQueryResult\(result\)/, "browser-owned rows must not be submitted as AI query provenance");
@@ -53,6 +54,7 @@ assert.ok(new TextEncoder().encode(JSON.stringify(bounded)).length <= 48 * 1024,
 assert.equal(bounded.rowCount, bounded.rows.length, "bounded results must contain only whole rows");
 assert.equal(bounded.truncated, true, "bounded results must disclose truncation");
 assert.match(styles, /\.ai-panel \{[^}]*position: fixed;[^}]*left: 0;[^}]*translate3d\(-100%[\s\S]*\.ai-panel\.open[\s\S]*@media \(prefers-reduced-motion: reduce\)/, "the shared AI panel needs canonical left-drawer motion with a reduced-motion fallback");
+assert.match(styles, /\.ai-action-progress\.completed[\s\S]*\.ai-action-progress\.failed[\s\S]*\.ai-action-progress-time[^{]*\{[^}]*ui-monospace/, "Schemer must retain readable success and failure durations on proposal cards");
 for (const stateContract of [/root\.inert = !open/, /aria-hidden/, /aria-expanded/]) assert.match(shared, stateContract, "the shared drawer must synchronize inert and ARIA state");
 
 console.log("Schemer AI isolation and action contracts passed");

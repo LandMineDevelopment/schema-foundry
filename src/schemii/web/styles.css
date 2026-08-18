@@ -42,6 +42,7 @@
 
 
 .workspace { position: absolute; inset: 0; overflow: hidden; background: #0c1016; cursor: default; touch-action: none; transition: left .25s cubic-bezier(.22,1,.36,1), bottom .25s cubic-bezier(.22,1,.36,1); }
+.workspace:focus-visible { outline: 1px solid rgba(101,169,255,.65); outline-offset: -2px; }
 .workspace.panning { cursor: grabbing; }
 .workspace.selecting { cursor: crosshair; }
 .selection-marquee { position: absolute; z-index: 9; pointer-events: none; border: 1px solid rgba(101, 169, 255, .9); border-radius: 3px; background: rgba(101, 169, 255, .12); box-shadow: 0 0 0 1px rgba(101, 169, 255, .08) inset, 0 0 18px rgba(101, 169, 255, .1); }
